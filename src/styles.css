@@ -1,0 +1,3357 @@
+/* ---------- repo group headers ---------- */
+
+/* A repo is a different kind of thing from a session, so it stops borrowing
+   `.row`. Sticky, so the repo you are scrolling through stays named. */
+.repo-row {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+
+/* The first header would otherwise double the pane header's bottom border. */
+.pane-body > div:first-child > .repo-row {
+  border-top: none;
+}
+
+.repo-row:hover {
+  background: var(--bg-hover);
+}
+
+/* The repo whose files, git and terminal are currently loaded. Marked by an
+   accent bar and the header chevron, not a fill: only one row in the rail should
+   read as selected, and that is the session attached to the chat. */
+.repo-row[data-selected="true"] {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.repo-row .twisty {
+  width: 12px;
+  flex: 0 0 12px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+
+.repo-row .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-row .badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+
+/* VSCode Dark+ derived palette, the default. Light values live in the blocks
+   below; every colour is defined here first so no token is only defined inside
+   a media query. */
+:root {
+  --bg: #1f1f1f;
+  --bg-elevated: #181818;
+  --bg-panel: #1f1f1f;
+  --bg-hover: #2a2d2e;
+  --bg-active: #04395e;
+  --border: #2b2b2b;
+  --fg: #cccccc;
+  --fg-dim: #8b8b8b;
+  --fg-bright: #ffffff;
+  --accent: #0078d4;
+  --accent-fg: #ffffff;
+  --green: #4ec9b0;
+  --amber: #dcdcaa;
+  --red: #f14c4c;
+  --purple: #c586c0;
+  --orange: #ce9178;
+  --blue: #569cd6;
+  --cyan: #29b8db;
+  /* Component tokens. Every colour is defined here first so nothing is only
+     defined inside a media query. */
+  --chip-bg: #2d4f67;
+  --chip-fg: #9cdcfe;
+  --chip-head-bg: #4b3a6b;
+  --chip-head-fg: #d9b3ff;
+  --status-idle: #4a4a4a;
+  --track: #ffffff14;
+  --scrollbar-thumb: #4a4a4a80;
+  --scrollbar-thumb-hover: #6a6a6a;
+  --scrim: #0006;
+  --shadow: #000a;
+  /* xterm paints to a canvas and cannot inherit CSS, so the full 16-colour ANSI
+     ramp lives here and is read out at runtime. VSCode Dark+ values. */
+  --term-black: #3b3b3b;
+  --term-white: #cccccc;
+  --term-bright-black: #666666;
+  --term-bright-red: #f14c4c;
+  --term-bright-green: #23d18b;
+  --term-bright-yellow: #f5f543;
+  --term-bright-blue: #3b8eea;
+  --term-bright-magenta: #d670d6;
+  --term-bright-cyan: #29b8db;
+  --term-bright-white: #e5e5e5;
+
+  --font-ui: "Segoe UI", Ubuntu, "Droid Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Ubuntu Mono", "Cascadia Mono", monospace;
+
+  --row-height: 22px;
+  /* Sidebar indent ladder. Session rows sit one step in from the rail edge so
+     they read as children of their repo header; every fan-out level below them
+     adds another step. Tokens, not literals: the levels drifted apart once
+     already when the session indent was retuned without its children. */
+  --rail-indent: 26px;
+  --rail-step: 16px;
+  --titlebar-height: 35px;
+  --statusbar-height: 22px;
+}
+
+/* VSCode Light+ derived palette. */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-elevated: #f8f8f8;
+  --bg-panel: #f3f3f3;
+  --bg-hover: #e8e8e8;
+  --bg-active: #cce4f7;
+  --border: #e0e0e0;
+  --fg: #3b3b3b;
+  --fg-dim: #6b6b6b;
+  --fg-bright: #000000;
+  --accent: #005fb8;
+  --accent-fg: #ffffff;
+  --green: #0a7f5f;
+  --amber: #a67b00;
+  --red: #cd3131;
+  --purple: #8b3fa8;
+  --orange: #b35309;
+  --blue: #0451a5;
+  --cyan: #0b7285;
+  --chip-bg: #d6e8f5;
+  --chip-fg: #0b4f79;
+  --chip-head-bg: #ead9f5;
+  --chip-head-fg: #5a2d75;
+  --status-idle: #b0b0b0;
+  --track: #00000014;
+  --scrollbar-thumb: #00000033;
+  --scrollbar-thumb-hover: #00000059;
+  --scrim: #00000040;
+  --shadow: #00000033;
+  /* VSCode Light+ ramp: bright slots must stay legible on white, which xterm's
+     default Tango ramp does not (brightWhite #eeeeec is 1.09:1). */
+  --term-black: #000000;
+  --term-white: #555555;
+  --term-bright-black: #666666;
+  --term-bright-red: #cd3131;
+  --term-bright-green: #14ce14;
+  --term-bright-yellow: #b5ba00;
+  --term-bright-blue: #0451a5;
+  --term-bright-magenta: #bc05bc;
+  --term-bright-cyan: #0598bc;
+  --term-bright-white: #3b3b3b;
+}
+
+/* Follow the desktop when the user has not chosen explicitly. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #ffffff;
+    --bg-elevated: #f8f8f8;
+    --bg-panel: #f3f3f3;
+    --bg-hover: #e8e8e8;
+    --bg-active: #cce4f7;
+    --border: #e0e0e0;
+    --fg: #3b3b3b;
+    --fg-dim: #6b6b6b;
+    --fg-bright: #000000;
+    --accent: #005fb8;
+    --accent-fg: #ffffff;
+    --green: #0a7f5f;
+    --amber: #a67b00;
+    --red: #cd3131;
+    --purple: #8b3fa8;
+    --orange: #b35309;
+    --blue: #0451a5;
+    --cyan: #0b7285;
+    --chip-bg: #d6e8f5;
+    --chip-fg: #0b4f79;
+    --chip-head-bg: #ead9f5;
+    --chip-head-fg: #5a2d75;
+    --status-idle: #b0b0b0;
+    --track: #00000014;
+    --scrollbar-thumb: #00000033;
+    --scrollbar-thumb-hover: #00000059;
+    --scrim: #00000040;
+    --shadow: #00000033;
+    /* VSCode Light+ ramp: bright slots must stay legible on white, which xterm's
+       default Tango ramp does not (brightWhite #eeeeec is 1.09:1). */
+    --term-black: #000000;
+    --term-white: #555555;
+    --term-bright-black: #666666;
+    --term-bright-red: #cd3131;
+    --term-bright-green: #14ce14;
+    --term-bright-yellow: #b5ba00;
+    --term-bright-blue: #0451a5;
+    --term-bright-magenta: #bc05bc;
+    --term-bright-cyan: #0598bc;
+    --term-bright-white: #3b3b3b;
+  }
+}
+
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  /* The webview owns text selection; disabling the callout keeps drags clean. */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Chrome is not selectable, but content panes explicitly opt back in so
+   select-to-PRIMARY works where it matters. */
+.app,
+.pane-header,
+.tab-strip,
+.statusbar {
+  user-select: none;
+}
+
+.selectable,
+.chat-message,
+.diff-view,
+.file-view {
+  user-select: text;
+  cursor: auto;
+}
+
+/* ---------- app shell ---------- */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--titlebar-height) 1fr var(--statusbar-height);
+  height: 100%;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.titlebar .brand {
+  font-weight: 600;
+  color: var(--fg-bright);
+  letter-spacing: 0.3px;
+}
+
+.repo-picker {
+  flex: 0 1 340px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.repo-picker input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.titlebar .spacer {
+  flex: 1;
+}
+
+.toggle-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.toggle-button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.toggle-button[data-active="true"] {
+  background: var(--bg-hover);
+  color: var(--fg-bright);
+  border-color: var(--border);
+}
+
+/* Hover is suppressed too, so a dead button does not look pressable. */
+.toggle-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.toggle-button:disabled:hover {
+  background: transparent;
+  color: var(--fg-dim);
+}
+
+/* Buttons whose whole label is a glyph need square padding, not text padding. */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+  font-size: 13px;
+}
+
+/* ---------- icons ---------- */
+
+/* Glyphs are 1em squares in currentColor, so size and hue come from the
+   context they are dropped into rather than from per-icon overrides. */
+.icon {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.pane-header > .icon {
+  font-size: 14px;
+}
+
+.branch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.branch-chip .icon {
+  font-size: 12px;
+}
+
+/* ---------- pane grid ---------- */
+
+.workbench {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.center-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  background: var(--bg-elevated);
+}
+
+/* Clamped rather than wrapped: the header is a fixed 26px, so a count long
+   enough to wrap drops its tail behind the action buttons instead. */
+.pane-header .count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.pane-header .actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ---------- resizers ---------- */
+
+.resizer {
+  flex: 0 0 auto;
+  background: transparent;
+  transition: background 120ms ease 150ms;
+  z-index: 5;
+}
+
+.resizer:hover,
+.resizer:active {
+  background: var(--accent);
+}
+
+.resizer-vertical {
+  width: 4px;
+  margin: 0 -2px;
+  cursor: col-resize;
+}
+
+.resizer-horizontal {
+  height: 4px;
+  margin: -2px 0;
+  cursor: row-resize;
+}
+
+/* ---------- tree rows ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: var(--row-height);
+  padding: 0 8px;
+  white-space: nowrap;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.row[data-selected="true"] {
+  background: var(--bg-active);
+  color: var(--fg-bright);
+}
+
+.row .twisty {
+  width: 12px;
+  flex: 0 0 12px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+
+.row .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row .badge {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+
+.row.dir .label {
+  color: var(--fg);
+}
+
+.empty-note {
+  padding: 10px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ---------- git ---------- */
+
+.commit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.commit-row:hover {
+  background: var(--bg-hover);
+}
+
+.commit-row[data-selected="true"] {
+  background: var(--bg-active);
+}
+
+/* `align-self` because the row is baseline-aligned and an SVG has no
+   meaningful baseline of its own. */
+.commit-row .commit-node {
+  align-self: center;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.commit-row:hover .commit-node,
+.commit-row[data-selected="true"] .commit-node {
+  color: var(--amber);
+}
+
+.commit-row .sha {
+  font-family: var(--font-mono);
+  color: var(--amber);
+  flex: 0 0 auto;
+}
+
+.commit-row .subject {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-row .when {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.ref-chip {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+}
+
+.ref-chip[data-head="true"] {
+  background: var(--chip-head-bg);
+  color: var(--chip-head-fg);
+}
+
+.status-code {
+  font-family: var(--font-mono);
+  width: 20px;
+  flex: 0 0 20px;
+  color: var(--amber);
+}
+
+.status-code[data-untracked="true"] {
+  color: var(--green);
+}
+
+/* ---------- sessions ---------- */
+
+/* One line per session. Two-line rows halved how many sessions the rail could
+   show, and seeing all of them at once is the entire point of the pane —
+   everything cut from the row body is in its tooltip. `box-shadow` rather than
+   `border-left` for the selected marker, so selecting a row cannot reflow it. */
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-height);
+  padding: 0 6px 0 var(--rail-indent);
+  cursor: pointer;
+  font-size: 12px;
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+.session-row:hover {
+  background: var(--bg-hover);
+}
+
+.session-row[data-selected="true"] {
+  background: var(--bg-active);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.session-row .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Archived rows are only visible when explicitly asked for, and read as
+   already-dealt-with when they are. */
+.session-row[data-archived="true"] {
+  opacity: 0.55;
+}
+
+.session-row[data-archived="true"] .title {
+  font-style: italic;
+}
+
+.session-row .age {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* Recency ramp, in the badge slot the extension uses for it: a size step rather
+   than a colour step, so three levels stay apart without tinting the row. */
+.session-row .heat-badge {
+  flex: 0 0 10px;
+  width: 10px;
+  text-align: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fg-dim);
+}
+
+/* Actions take the age's slot on hover rather than sitting beside it — the rail
+   is ~300px and a truncated title costs more than a hidden timestamp. */
+.session-row .row-actions {
+  display: none;
+  flex: 0 0 auto;
+}
+
+.session-row:hover .row-actions {
+  display: flex;
+}
+
+.session-row:hover .age {
+  display: none;
+}
+
+.session-row .row-actions .icon-button {
+  padding: 1px 3px;
+  font-size: 12px;
+}
+
+/* The session row's own twisty, for its subagent fan-out. Always rendered — an
+   empty one holds the column so titles line up whether a session spawned agents
+   or not. */
+.session-row .twisty {
+  width: 10px;
+  flex: 0 0 10px;
+  text-align: center;
+  font-size: 9px;
+  color: var(--fg-dim);
+}
+
+/* Collapsed fan-out still says how many are working. */
+.session-row .agent-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--purple);
+}
+
+/* ---------- sessions search ---------- */
+
+/* Sits directly under the pane header, above the rows it filters. Full-bleed
+   rather than inset: the rail is ~300px, and an inset box would cost the query
+   the characters the titles below it need. */
+.pane-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 3px 6px 4px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+
+.pane-search .pane-search-icon {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.pane-search input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.pane-search input:focus {
+  border-color: var(--accent);
+}
+
+/* Status line for the escalation rungs: what was searched, or the control that
+   searches deeper. Only rendered while a query is in the box. */
+.pane-search-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 0 8px 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.pane-search-note .toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.pane-search-note .search-error {
+  color: var(--red);
+}
+
+/* The line of conversation that put a row in the list. Indented under its
+   session like a fan-out child, because that is what it is: evidence belonging
+   to the row above, not a row you can act on. */
+.match-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 6px 2px calc(var(--rail-indent) + var(--rail-step));
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.match-row:hover {
+  background: var(--bg-hover);
+}
+
+.match-row .match-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--cyan);
+}
+
+/* One line, clipped: a snippet that wrapped would push the rest of the results
+   off the fold, which is the opposite of what a search result is for. */
+.match-row .match-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+/* ---------- subagents ---------- */
+
+/* Children of a session row: same height, deeper indent, purple. A fan-out is a
+   different kind of thing from a session, so it does not reuse the five status
+   shapes — see `SubagentGlyph`. */
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-height);
+  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.subagent-row:hover {
+  background: var(--bg-hover);
+}
+
+.subagent-row .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-row[data-running="true"] .title {
+  color: var(--fg);
+}
+
+/* Agent type is context, not the label: it takes what space is left and gives up
+   first when the description is long. */
+.subagent-row .agent-type {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+/* A workflow run: parent of a group of agent rows. */
+.workflow-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-height);
+  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.workflow-row:hover {
+  background: var(--bg-hover);
+}
+
+.workflow-row .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-row .agent-type {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* Workflow agents are children of a child, so they indent again. */
+.subagent-row[data-nested="true"] {
+  padding-left: calc(var(--rail-indent) + var(--rail-step) * 2);
+}
+
+.subagent-glyph,
+.workflow-glyph {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--purple);
+}
+
+.subagent-glyph[data-running="false"] {
+  opacity: 0.5;
+}
+
+.subagent-glyph .glyph-ring {
+  animation: glyph-ring 1.6s ease-in-out infinite;
+}
+
+/* Status glyphs. Colour matches the `.status-dot` mapping used elsewhere, so the
+   same state reads the same in the status panel and in quick-open. */
+.status-glyph {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--status-idle);
+}
+
+.status-glyph[data-status="active"] {
+  color: var(--green);
+}
+
+/* Blocked on you: the extension's charts.blue radar ping. */
+.status-glyph[data-status="awaiting"] {
+  color: var(--blue);
+}
+
+/* Done but unseen — charts.yellow, and the only quiet-turn state that moves. */
+.status-glyph[data-status="pendingReview"] {
+  color: var(--amber);
+}
+
+.status-glyph[data-status="pendingReview"] .glyph-ring {
+  animation: glyph-ring 1.2s ease-in-out infinite;
+}
+
+/* Seen and done: grey, so the reviewed tail stays quiet... */
+.status-glyph[data-status="finished"] {
+  color: var(--status-idle);
+}
+
+/* ...except for the handful you are currently cycling through, which stay green
+   so your working set does not vanish into that tail. */
+.session-row[data-warm="true"] .status-glyph[data-status="finished"] {
+  color: var(--green);
+}
+
+/* Unfinished turn: ESC, dead window, or an API error. */
+.status-glyph[data-status="interrupted"] {
+  color: var(--orange);
+}
+
+/* Only the two states that are still moving animate; five blinking glyphs is
+   noise, not signal. Opacity is the animated property because WebKitGTK will
+   not reliably animate `r` or a transform on an SVG child. */
+.status-glyph .glyph-ring {
+  opacity: 0.3;
+}
+
+/* Active spins: continuous rotation reads as "working" from across the rail,
+   the way the reference extension's loading~spin icon does. The rotation is on
+   the <svg> itself — WebKitGTK animates the HTML-level element reliably where
+   it will not animate a transform on an SVG child. The arc stays near-opaque:
+   motion carries the signal, not a blink. */
+.status-glyph[data-status="active"] {
+  animation: glyph-spin 1.2s linear infinite;
+}
+
+.status-glyph[data-status="active"] .glyph-ring {
+  opacity: 0.9;
+}
+
+@keyframes glyph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Faster and deeper than active: this one is blocked on a human. */
+.status-glyph[data-status="awaiting"] .glyph-ring {
+  animation: glyph-ring 1s ease-in-out infinite;
+}
+
+/* ...plus an expanding radar halo: awaiting is the one state that pages you. */
+.status-glyph[data-status="awaiting"] {
+  border-radius: 50%;
+  animation: glyph-ping 1.6s ease-out infinite;
+}
+
+@keyframes glyph-ping {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
+@keyframes glyph-ring {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* The glyph is 13px; the row is the unit you actually scan. The two live states
+   tint the whole line so "is anything running" reads at a glance, with hover
+   feedback kept on top of the tint. */
+.session-row[data-status="active"] {
+  background: color-mix(in srgb, var(--green) 7%, transparent);
+}
+
+.session-row[data-status="active"]:hover {
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-hover));
+}
+
+.session-row[data-status="awaiting"] {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+}
+
+.session-row[data-status="awaiting"]:hover {
+  background: color-mix(in srgb, var(--blue) 14%, var(--bg-hover));
+}
+
+/* Unread rows follow mail conventions: bold bright title, amber dot. The dot
+   sits left of the age so it survives the hover swap to row actions. */
+.session-row[data-unread="true"] .title {
+  font-weight: 600;
+  color: var(--fg-bright);
+}
+
+.unread-dot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+/* Repo header glyphs sit at the same weight as its label. */
+.repo-row > .icon {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.status-dot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+}
+
+/* active: work in flight. */
+.status-dot[data-status="active"] {
+  background: var(--green);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* awaiting: blocked on you. Ringed so it reads as louder than active — this is
+   the only state that needs a human right now. */
+.status-dot[data-status="awaiting"] {
+  background: var(--amber);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 35%, transparent);
+}
+
+/* pendingReview: ended cleanly, unseen. Same family as finished, louder. */
+.status-dot[data-status="pendingReview"] {
+  background: var(--amber);
+}
+
+/* finished: ended cleanly. */
+.status-dot[data-status="finished"] {
+  background: var(--blue);
+}
+
+/* interrupted: stopped mid-turn, resumable. */
+.status-dot[data-status="interrupted"] {
+  background: var(--orange);
+}
+
+/* idle: stale, >24h. */
+.status-dot[data-status="idle"] {
+  background: var(--status-idle);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-glyph .glyph-ring {
+    animation: none;
+  }
+
+  .status-glyph .glyph-ring {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  .status-glyph[data-status="active"],
+  .status-glyph[data-status="awaiting"] {
+    animation: none;
+  }
+
+  .status-dot[data-status="active"] {
+    animation: none;
+  }
+}
+
+/* ---------- chat ---------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
+}
+
+.chat-message {
+  margin-bottom: 14px;
+  line-height: 1.55;
+}
+
+.chat-message .who {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 3px;
+}
+
+.chat-message[data-role="user"] .who {
+  color: var(--blue);
+}
+
+.chat-message[data-role="assistant"] .who {
+  color: var(--orange);
+}
+
+.chat-message .text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinking-block {
+  border-left: 2px solid var(--purple);
+  border-radius: 0 4px 4px 0;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--purple) 8%, var(--bg));
+  color: var(--fg);
+  white-space: pre-wrap;
+  margin: 6px 0;
+}
+
+.tool-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin: 6px 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.tool-block .tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+}
+
+.tool-block .tool-name {
+  color: var(--green);
+  font-weight: 600;
+}
+
+.tool-block .tool-summary {
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-block pre {
+  margin: 0;
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+}
+
+.tool-block[data-error="true"] .tool-name {
+  color: var(--red);
+}
+
+.chat-composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+}
+
+.chat-composer textarea {
+  width: 100%;
+  resize: none;
+  min-height: 54px;
+  max-height: 240px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.chat-composer textarea:focus {
+  border-color: var(--accent);
+}
+
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.composer-bar .spacer {
+  flex: 1;
+}
+
+/*
+ * Each switch is its own inset group, so the model and permission clusters read
+ * as two separate controls rather than one eight-button strip.
+ */
+.mode-switch {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px;
+}
+
+/* The group already supplies the frame; per-button borders would double it. */
+.mode-switch .toggle-button[data-active="true"] {
+  border-color: transparent;
+  background: var(--bg-active);
+}
+
+/* Selected mode differs from the running process's mode until restart. */
+.mode-switch[data-pending="true"] {
+  border-color: var(--amber);
+}
+
+.primary-button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: 3px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.primary-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Same shape as the danger button, so a row of actions reads as a row of
+   buttons rather than a button, a bare label, and an outlier. */
+.secondary-button {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.secondary-button:hover {
+  background: var(--bg-hover);
+  color: var(--fg-bright);
+}
+
+.danger-button {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: 3px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+/* ---------- terminal ---------- */
+
+.terminal-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Nothing may paint past the panel: an oversized xterm grid would otherwise
+     spill over the status bar, which is the one thing below it. */
+  overflow: hidden;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+
+/* One row per repo, stacked; only the front one is displayed. */
+.terminal-stack {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.terminal-repo,
+.terminal-tab-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Hidden repos and tabs keep their box out of the layout but stay mounted, so
+   the shells behind them keep running. Absolute rather than stacked, so the
+   visible one gets the full panel without the others adding height. */
+.terminal-repo {
+  position: absolute;
+  inset: 0;
+}
+
+.terminal-tab-body {
+  position: absolute;
+  inset: 0;
+  flex-direction: row;
+}
+
+/* A split pane. `flex` comes from its stored weight, so the divider can drag.
+   The inset lives here rather than on `.terminal-host` below: everything is
+   `border-box`, so `getComputedStyle(host).height` reports the padded box, and
+   FitAddon subtracts only the *terminal's* own padding — never its parent's. A
+   padded host therefore over-reports the space by 8px, which is enough to buy
+   one extra row and hang it past the bottom of the panel. */
+.terminal-slot {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+}
+
+/* Only marked while a tab is split, since a lone pane needs no "which one". */
+.terminal-slot[data-active="true"] {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.terminal-slot-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 2;
+  padding: 0 4px;
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: 2px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  opacity: 0;
+}
+
+.terminal-slot:hover .terminal-slot-close {
+  opacity: 0.75;
+}
+
+.terminal-slot-close:hover {
+  color: var(--fg-bright);
+  opacity: 1;
+}
+
+/* ---------- terminal tab strip ---------- */
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  flex: 0 0 auto;
+  background: var(--bg-elevated);
+}
+
+.terminal-repo-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.terminal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.terminal-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.terminal-tab:hover {
+  background: var(--bg-hover);
+}
+
+.terminal-tab[data-active="true"] {
+  background: var(--bg-active);
+  border-color: var(--border);
+  color: var(--fg-bright);
+}
+
+/* Reserved rather than revealed on hover: appearing on hover would reflow the
+   strip and slide the tab out from under the pointer. */
+.terminal-tab .close {
+  opacity: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.terminal-tab:hover .close,
+.terminal-tab[data-active="true"] .close {
+  opacity: 0.7;
+}
+
+.terminal-tab .close:hover {
+  opacity: 1;
+  color: var(--fg-bright);
+}
+
+.terminal-bar .actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+
+/* No padding here: the grid is sized from this box, so it has to be exactly the
+   space the grid may use. See `.terminal-slot` above. */
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+/* ---------- content viewers ---------- */
+
+.diff-view,
+.file-view {
+  margin: 0;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+}
+
+.diff-add {
+  color: var(--green);
+}
+
+.diff-del {
+  color: var(--red);
+}
+
+.diff-hunk {
+  color: var(--purple);
+}
+
+.diff-meta {
+  color: var(--fg-dim);
+}
+
+/* ---------- per-file diff sections ---------- */
+
+/* A patch is a list of files before it is a wall of lines: each one folds, so a
+   thirty-file commit is scannable instead of scrollable. */
+.diff-view-sections {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* `git show`'s message and diffstat, above the files it summarises. */
+.diff-preamble {
+  flex: 0 0 auto;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-file-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.diff-file-head:hover {
+  background: var(--bg-hover);
+}
+
+.diff-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-bright);
+}
+
+/* Counts sit at the right edge, so they line up down a multi-file patch —
+   pushed there by the name, so a file with only deletions lines up too. */
+.diff-file-name {
+  min-width: 0;
+  margin-right: auto;
+}
+
+/* The section's own scroller: one wide file must not widen the whole patch. */
+.diff-file > .diff-view {
+  overflow-x: auto;
+}
+
+/* A diff synthesised from a tool call is inline in the transcript, so it scrolls
+   with it rather than owning a scrollbar. */
+.tool-diff {
+  padding: 4px 0;
+  overflow-x: auto;
+}
+
+/* ---------- file editor ---------- */
+
+.editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.editor-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
+
+.editor-dirty,
+.tab-dirty {
+  margin-right: 4px;
+  color: var(--amber);
+  font-size: 9px;
+}
+
+.editor-bar .actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* The one state the editor cannot resolve on its own: something else wrote the
+   file. Loud, because the next click either drops their work or yours. */
+.editor-conflict {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.editor-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Its own scroller, driven from the textarea's scrollTop: a gutter with a
+   scrollbar of its own drifts out of step with the text it numbers. */
+.editor-gutter {
+  flex: 0 0 auto;
+  padding: 10px 8px 10px 10px;
+  overflow: hidden;
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+  background: var(--bg-elevated);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Font metrics and line-height must match the gutter exactly, or the numbers
+   walk away from their lines further down a long file. */
+.editor-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 14px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+/* ---------- tabs ---------- */
+
+.tab-strip {
+  display: flex;
+  flex: 0 0 auto;
+  height: 35px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-right: 1px solid var(--border);
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.tab[data-active="true"] {
+  background: var(--bg);
+  color: var(--fg-bright);
+}
+
+/* Reordering: the dragged tab fades, and the tab under the pointer grows the
+   edge the drop will land on. */
+.tab[data-dragging="true"] {
+  opacity: 0.4;
+}
+
+.tab[data-drop="before"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tab[data-drop="after"] {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+.tab .close {
+  opacity: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tab:hover .close {
+  opacity: 0.7;
+}
+
+/* Rename pencil: hidden like the close button until the tab is hovered. */
+.tab .rename {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  font-size: 11px;
+}
+
+.tab:hover .rename {
+  opacity: 0.7;
+}
+
+.tab .rename:hover {
+  opacity: 1;
+  color: var(--fg-bright);
+}
+
+.tab-rename-input {
+  width: 18ch;
+  padding: 1px 4px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--fg-bright);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+/* ---------- statusbar ---------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 10px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 11px;
+}
+
+.statusbar .spacer {
+  flex: 1;
+}
+
+/* ---------- scrollbars ---------- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ---------- quick open ---------- */
+
+.repo-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+  padding: 3px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.repo-button:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.repo-button .repo-name {
+  font-weight: 600;
+}
+
+.repo-button .repo-hint {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.quickopen-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 90px;
+}
+
+.quickopen {
+  width: min(680px, 90vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px var(--shadow);
+  overflow: hidden;
+}
+
+.quickopen input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  outline: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.quickopen-list {
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.quickopen-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quickopen-row[data-cursor="true"] {
+  background: var(--bg-active);
+}
+
+.quickopen-row .qo-label {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.quickopen-row .qo-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.quickopen-row .qo-meta {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* ---------- status panel ---------- */
+
+.status-panel {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.usage-glyph[data-severity="ok"] {
+  color: var(--green);
+}
+
+.usage-glyph[data-severity="warn"] {
+  color: var(--amber);
+}
+
+.usage-glyph[data-severity="critical"] {
+  color: var(--red);
+}
+
+.usage-track {
+  flex: 1;
+  min-width: 40px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.usage-fill {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+
+.usage-fill[data-severity="warn"] {
+  background: var(--amber);
+}
+
+.usage-fill[data-severity="critical"] {
+  background: var(--red);
+}
+
+.usage-pct {
+  flex: 0 0 30px;
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.usage-label {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.tally-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.tally-row > span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fact-grid {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 1px 8px;
+  padding: 2px 10px 4px;
+  font-size: 11px;
+}
+
+.fact-key {
+  color: var(--fg-dim);
+}
+
+.fact-value {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- attached-session highlight ---------- */
+
+/* The row the chat is actually attached to. Deliberately louder than the
+   repo-group highlight: it answers "which session am I talking to". */
+.session-row[data-selected="true"] {
+  background: var(--bg-active);
+  border-left-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.session-row[data-selected="true"] .title {
+  color: var(--fg-bright);
+  font-weight: 600;
+}
+
+.session-row[data-selected="true"] .meta-line {
+  /* Deleting this to inherit --fg-dim fixes light but regresses dark to 3.52:1,
+     which fails AA at 10px. Mixing against the selected background holds both. */
+  color: color-mix(in srgb, var(--fg) 78%, var(--bg-active));
+}
+
+/* ---------- overflow containment ---------- */
+
+/* Flex items default to min-width:auto, so one unbreakable child (a long tool
+   summary, a wide pre) can force a column past its container and push the whole
+   workbench sideways. Every column in the chain gets an explicit floor. */
+.chat,
+.chat-log,
+.chat-message,
+.sidebar,
+.sidebar-section,
+.status-panel,
+.pane-body {
+  min-width: 0;
+}
+
+.chat-log,
+.sidebar,
+.status-panel {
+  overflow-x: hidden;
+}
+
+.tool-block {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.tool-block .tool-head {
+  min-width: 0;
+}
+
+/* The one element allowed to be clipped rather than sized by its content. */
+.tool-block .tool-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tool-block .tool-name {
+  flex: 0 0 auto;
+}
+
+/* Long paths and prompts in the sidebar must ellipsize, never widen the rail. */
+.session-row,
+.session-row .title-line,
+.session-row .meta-line,
+.fact-grid {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-row .meta-line > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status panel sections must not bleed into the session list below them. */
+.status-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 45%;
+  overflow-y: auto;
+}
+
+
+/* ---------- tool IN / OUT ---------- */
+
+.tool-io {
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-io .io-tag {
+  flex: 0 0 34px;
+  padding: 8px 0 8px 8px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.tool-io[data-error="true"] .io-tag {
+  color: var(--red);
+}
+
+.tool-io pre {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- composer attachments ---------- */
+
+.attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+}
+
+.attachment-thumb {
+  width: 28px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+
+.attachment-chip button {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.attachment-chip button:hover {
+  color: var(--red);
+}
+
+/* ---------- settings ---------- */
+
+.settings {
+  width: min(520px, 92vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px var(--shadow);
+  padding-bottom: 12px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 2px;
+}
+
+.setting-row label {
+  flex: 0 0 170px;
+  font-size: 12px;
+}
+
+.setting-row select,
+.setting-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 7px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.setting-hint {
+  margin: 2px 14px 6px 196px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.segmented button {
+  padding: 4px 12px;
+  background: var(--bg);
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.segmented button:last-child {
+  border-right: none;
+}
+
+.segmented button[data-active="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* ---------- markdown ---------- */
+
+/* Assistant prose. Spacing is tuned so a short answer does not float in
+   whitespace while a long one still has readable rhythm. */
+.markdown {
+  line-height: 1.6;
+}
+
+.markdown > *:first-child {
+  margin-top: 0;
+}
+
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0 0 10px;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--fg-bright);
+}
+
+.markdown h1 {
+  font-size: 1.35em;
+}
+.markdown h2 {
+  font-size: 1.2em;
+}
+.markdown h3 {
+  font-size: 1.08em;
+}
+.markdown h4 {
+  font-size: 1em;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.markdown li {
+  margin: 2px 0;
+}
+
+.markdown li > p {
+  margin: 0;
+}
+
+.markdown blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.markdown hr {
+  margin: 14px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.markdown a {
+  color: var(--blue);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0 0 10px;
+  display: block;
+  max-width: 100%;
+  /* Wide tables scroll inside themselves rather than widening the chat column. */
+  overflow-x: auto;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 4px 9px;
+  text-align: left;
+}
+
+.markdown th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+}
+
+.markdown code.inline-code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  word-break: break-word;
+}
+
+.markdown code.inline-code.path {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.code-block {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.code-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.code-head button {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 7px;
+}
+
+.code-head button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 9px 10px;
+  overflow-x: auto;
+  background: var(--bg);
+}
+
+.code-block code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* ---------- tool permission prompt ---------- */
+
+/* Deliberately loud: this is the one card that blocks the turn until answered. */
+.permission-card {
+  margin: 10px 0;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--amber);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.permission-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--amber) 14%, var(--bg-elevated));
+}
+
+.permission-tool {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg-bright);
+  word-break: break-all;
+}
+
+.permission-ask {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* The pending call's arguments, rendered as structure rather than a JSON dump.
+   Not scrollable: a decision taken on a clipped payload is a decision taken on
+   partial information, so the card grows and the transcript scrolls instead.
+   `overflow-wrap: anywhere` is what keeps a long unbroken token — a path, a URL —
+   inside the padding rather than pushing out through the border. */
+.permission-body {
+  min-width: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.permission-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.permission-field {
+  min-width: 0;
+}
+
+.permission-key {
+  margin-right: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* Newlines in a string are content, so they survive; everything else wraps. */
+.permission-text {
+  white-space: pre-wrap;
+}
+
+.permission-scalar {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+
+/* Nested structure indents under its key instead of trailing after it. */
+.permission-array,
+.permission-field > .permission-fields {
+  margin: 2px 0 2px 10px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ---------- AskUserQuestion, rendered as the questions it asks ---------- */
+
+.permission-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.permission-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  color: var(--fg-dim);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.permission-prompt {
+  margin: 4px 0 6px;
+  color: var(--fg-bright);
+  font-weight: 600;
+}
+
+.permission-options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: permission-option;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.permission-options li {
+  counter-increment: permission-option;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.permission-options li::before {
+  content: counter(permission-option);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Label before description: the name of the choice, then what it means. */
+.permission-option-label {
+  grid-column: 2;
+  color: var(--fg-bright);
+}
+
+.permission-option-note {
+  grid-column: 2;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.permission-note {
+  margin-top: 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Exact bytes stay one click away, for the cases the renderer flattens. */
+.permission-raw {
+  margin-top: 10px;
+}
+
+.permission-raw summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.permission-raw pre {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* One contiguous group, wrapping as a unit: a Deny pushed to the far edge reads
+   as belonging to something else. */
+.permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.permission-decided {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Once answered the card recedes; it is history, not a pending decision. */
+.permission-card[data-decided="allow"] {
+  border-color: var(--border);
+}
+
+.permission-card[data-decided="deny"] {
+  border-color: var(--red);
+}
+
+.permission-card[data-decided="allow"] .permission-head,
+.permission-card[data-decided="deny"] .permission-head {
+  background: var(--bg-elevated);
+}
+
+/* ---------- activity line ---------- */
+
+/* Sits at the tail of the transcript while a turn is live, so the chat never
+   ends on silent blank space. The technical phase goes to the status bar. */
+.activity {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 2px 2px;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.activity-spinner {
+  color: var(--orange);
+  font-family: var(--font-mono);
+  /* Fixed width so the row does not jitter as frames change. */
+  width: 1ch;
+  display: inline-block;
+}
+
+.activity-verb {
+  color: var(--orange);
+}
+
+.activity-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 64ch;
+}
+
+/* The probe's "what is actually executing" line, wrapped under the spinner row. */
+.activity-sub {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 3ch;
+}
+
+.activity-elapsed,
+.activity-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+  opacity: 0.75;
+}
+
+.activity-hint {
+  margin-left: auto;
+}
+
+/* ---------- session debug drawer ---------- */
+
+/* Overlay anchored above the status bar: the app root is a fixed grid, so the
+   drawer floats over the content rather than joining the rows. */
+.debug-log {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--statusbar-height);
+  height: 300px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.debug-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.debug-title {
+  color: var(--fg-bright);
+}
+
+.debug-meta {
+  color: var(--fg-dim);
+}
+
+.debug-verbose {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.debug-list {
+  flex: 1;
+  overflow: auto;
+  padding: 2px 0;
+}
+
+.debug-row-head {
+  display: flex;
+  gap: 8px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  align-items: baseline;
+}
+
+.debug-row-head[data-expandable="true"] {
+  cursor: pointer;
+}
+
+.debug-row-head:hover {
+  background: var(--bg-hover);
+}
+
+.debug-time {
+  color: var(--fg-dim);
+}
+
+.debug-gap {
+  color: var(--fg-dim);
+  opacity: 0.7;
+  min-width: 7ch;
+  text-align: right;
+}
+
+.debug-kind {
+  min-width: 10ch;
+  color: var(--cyan);
+}
+
+.debug-row[data-kind="stderr"] .debug-kind,
+.debug-row[data-kind="exit"] .debug-kind {
+  color: var(--red);
+}
+
+.debug-row[data-kind="phase"] .debug-kind {
+  color: var(--amber);
+}
+
+.debug-row[data-kind="probe"] .debug-kind,
+.debug-row[data-kind="cli"] .debug-kind {
+  color: var(--fg-dim);
+}
+
+.debug-row[data-kind="send"] .debug-kind,
+.debug-row[data-kind="permission"] .debug-kind {
+  color: var(--green);
+}
+
+.debug-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.debug-count {
+  color: var(--orange);
+}
+
+.debug-payload {
+  margin: 2px 8px 6px 8px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.debug-empty {
+  padding: 12px;
+  color: var(--fg-dim);
+}
+
+/* ---------- status bar detail ---------- */
+
+.status-phase {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: #ffffff26;
+}
+
+.status-phase[data-clickable="true"] {
+  cursor: pointer;
+}
+
+/* States that mean "waiting on something" read louder than steady ones. */
+.status-phase[data-phase^="awaiting"],
+.status-phase[data-phase^="running tool"] {
+  background: var(--amber);
+  color: #000;
+}
+
+.status-phase[data-phase="exited"],
+.status-phase[data-phase="send failed"],
+.status-phase[data-phase="failed to start"] {
+  background: var(--red);
+  color: #fff;
+}
+
+.status-notice {
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+/* ---------- tab strip additions ---------- */
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22ch;
+}
+
+.tab[data-kind="chat"] .tab-label {
+  font-weight: 500;
+}
+
+.tab-new {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0 6px;
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.tab-new:hover {
+  background: var(--bg-hover);
+  color: var(--fg-bright);
+}
+
+/* ---------- timeline rail ---------- */
+
+/* A continuous line down the gutter with one dot per action, matching the
+   official plugin. The line is drawn per row so it joins seamlessly and needs
+   no absolute-positioned container spanning the whole log. */
+.timeline-row {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  min-width: 0;
+}
+
+.timeline-row::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+/* The rail starts and stops at the first and last dot rather than running off
+   into empty space. */
+.timeline-row:first-child::before {
+  top: 11px;
+}
+
+.timeline-row:last-child::before {
+  bottom: auto;
+  height: 11px;
+}
+
+.timeline-dot {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 9px;
+  width: 9px;
+  height: 9px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px var(--fg-dim);
+}
+
+.timeline-body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Dot states carry the same vocabulary as the session list. */
+.timeline-dot[data-state="user"] {
+  background: var(--blue);
+  box-shadow: none;
+}
+
+.timeline-dot[data-state="assistant"] {
+  background: var(--orange);
+  box-shadow: none;
+}
+
+.timeline-dot[data-state="thinking"] {
+  background: var(--purple);
+  box-shadow: none;
+}
+
+.timeline-dot[data-state="done"] {
+  background: var(--green);
+  box-shadow: none;
+}
+
+.timeline-dot[data-state="error"] {
+  background: var(--red);
+  box-shadow: none;
+}
+
+/* Still running, and waiting on you: the two states worth animating. */
+.timeline-dot[data-state="running"] {
+  background: var(--amber);
+  box-shadow: none;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.timeline-dot[data-state="waiting"] {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 30%, transparent);
+}
+
+/* ---------- the three backgrounds ---------- */
+
+/* Your prompts: tinted and boxed, so they stand out when scrolling back. */
+.bubble-user {
+  background: color-mix(in srgb, var(--blue) 10%, var(--bg));
+  border-left: 2px solid var(--blue);
+  border-radius: 0 4px 4px 0;
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Claude's prose: no chrome at all, so reading is uninterrupted. */
+.timeline-row[data-kind="text"] .timeline-body {
+  padding: 2px 0;
+}
+
+/* Actions (tools, permission prompts, turn results) sit on a raised surface. */
+.timeline-row[data-kind="tool"] .tool-block,
+.timeline-row[data-kind="unknown"] .tool-block {
+  background: var(--bg-elevated);
+  margin: 2px 0;
+}
+
+.turn-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.turn-result[data-error="true"] {
+  background: color-mix(in srgb, var(--red) 12%, var(--bg-elevated));
+  color: var(--red);
+}
+
+.turn-result .text {
+  flex-basis: 100%;
+  font-family: var(--font-ui);
+}
+
+/* The activity line is a rail entry too, so it lines up with the dots. */
+.activity {
+  padding-left: 19px;
+}
+
+/* ---------- dashboard ---------- */
+
+/* Its own scroll container, like the viewers: the workbench is a fixed grid, so
+   a pane that grows with its content pushes the status bar off screen. */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+
+.dashboard-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* KPI row. `auto-fit` rather than a fixed count so the tiles reflow instead of
+   overflowing when the centre column is narrow. */
+.tile-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  min-width: 0;
+}
+
+.stat-tile .tile-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+
+.stat-tile .tile-value {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--fg-bright);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Exactly one hero per view: the number the dashboard leads with. */
+.stat-tile[data-hero="true"] .tile-value {
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.stat-tile .tile-note {
+  font-size: 10px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Side-by-side sections collapse to one column before their tables squeeze. */
+.dash-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.section-head .section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg);
+}
+
+.section-head .section-note {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-search {
+  flex: 0 1 240px;
+  min-width: 120px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.dash-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ---------- dashboard tables ---------- */
+
+.dash-table {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* One line per row, same rhythm as the session rail: the columns are read by
+   scanning down, so they are laid out by flex basis rather than a real table —
+   nothing here needs cells to align across sections. */
+.dash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-height);
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--fg);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.dash-row.head {
+  color: var(--fg-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+
+.dash-row[data-clickable="true"] {
+  cursor: pointer;
+}
+
+.dash-row[data-clickable="true"]:hover {
+  background: var(--bg-hover);
+}
+
+.dash-row[data-selected="true"] {
+  background: var(--bg-active);
+}
+
+/* Archived rows read as history, exactly as they do in the rail. */
+.dash-row[data-archived="true"] {
+  opacity: 0.55;
+}
+
+.dash-row[data-nested="true"] {
+  padding-left: 18px;
+  color: var(--fg-dim);
+}
+
+/* Never allowed to collapse to nothing: in the narrow three-up band the row
+   would otherwise render as a bar and three numbers with no idea what they are
+   about, which is exactly the failure a table exists to prevent. */
+.dash-row .cell-name {
+  flex: 1 1 0;
+  min-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dash-row .cell-name.dim {
+  flex: 0 1 130px;
+  color: var(--fg-dim);
+}
+
+.dash-row .cell-glyph {
+  flex: 0 0 14px;
+  display: flex;
+  align-items: center;
+}
+
+/* Numbers are read as a column, so they get tabular figures and a fixed slot. */
+.dash-row .cell-num {
+  flex: 0 0 62px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-row .cell-sub {
+  color: var(--fg-dim);
+  font-size: 10px;
+}
+
+.dash-row .cell-tag {
+  flex: 0 0 72px;
+  text-align: right;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* Grows with the name column rather than sitting at a fixed width: on a wide
+   window the slack should go to the mark, not to empty air beside it. */
+.dash-row .cell-bar {
+  flex: 1 1 160px;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+}
+
+/* ---------- dashboard marks ---------- */
+
+/* Share bar: one series, one hue. The row's own number carries the value, so the
+   bar only answers "how big is this against the biggest one". */
+.share-track {
+  flex: 1;
+  height: 6px;
+  background: var(--track);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.share-fill {
+  display: block;
+  height: 100%;
+  background: var(--blue);
+  border-radius: 0 3px 3px 0;
+}
+
+/* Daily bars. Columns grow from one baseline; empty days keep their slot so a
+   quiet fortnight reads as quiet rather than vanishing. */
+.day-chart {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  grid-template-areas: "axis plot" ". foot";
+  gap: 4px 6px;
+}
+
+.chart-axis {
+  grid-area: axis;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  font-size: 9px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  height: 110px;
+}
+
+.chart-plot {
+  grid-area: plot;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 110px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+/* The slot, not the mark: the 2px gap between slots is what separates bars, and
+   capping the mark keeps a 30-day view from painting six fat blocks. */
+.chart-col {
+  flex: 1 1 0;
+  max-width: 24px;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.chart-bar {
+  width: 100%;
+  background: var(--blue);
+  border-radius: 2px 2px 0 0;
+}
+
+.chart-col[data-empty="true"] .chart-bar {
+  background: var(--status-idle);
+  height: 1px !important;
+}
+
+.chart-col:hover .chart-bar {
+  background: var(--cyan);
+}
+
+.chart-foot {
+  grid-area: foot;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-foot .chart-peak {
+  color: var(--fg);
+}
+
+/* A year-long window is 300+ slots; at a 2px gap the air would outweigh the
+   data, so dense views tighten it. */
+.chart-plot[data-dense="true"] {
+  gap: 1px;
+}
+
+/* Inside the three-up column band the name is the scarce thing, not the bar:
+   `mcp__example__doc_read` must survive, so the mark yields its slack there. */
+.dash-columns .dash-row .cell-bar {
+  flex: 0 1 90px;
+  min-width: 24px;
+}
+
+/* Narrower number slots too — three 62px columns plus a bar leave a two-word
+   server name nowhere to go. */
+.dash-columns .dash-row .cell-num {
+  flex: 0 0 54px;
+}

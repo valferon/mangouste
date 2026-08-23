@@ -1,0 +1,110 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref; a full matrix build is slow and there
+# is no value in finishing one that a newer push has already replaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            # 24.04 for libgtk-3-0t64: the .deb's Depends names it, and the
+            # runner has to be able to resolve what it produces.
+            bundles: deb,appimage
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            # macos-14 is the Apple Silicon runner, so this is a native
+            # aarch64 build rather than a cross-compile.
+            bundles: dmg
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      - run: npm ci
+
+      # Typecheck and Rust tests before bundling: a bundle failure is slow to
+      # reach and tells you far less than a failing test does.
+      - run: npm run build
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Bundle
+        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      # Tauri hardcodes the pre-t64 `libgtk-3-0` into Depends, which has no
+      # candidate on 24.04, so the generated .deb will not install until the
+      # field is rewritten. See scripts/fix-deb-depends.sh.
+      - name: Repair .deb Depends
+        if: runner.os == 'Linux'
+        run: |
+          for deb in src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb; do
+            ./scripts/fix-deb-depends.sh "$deb"
+          done
+
+      # Globbed rather than named: the artifact filenames carry productName and
+      # version, so this keeps working across a rename or a version bump.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+
+  release:
+    # Tags only. Draft, so the unsigned-macOS caveat can be written into the
+    # notes before anyone can download it.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: artifacts/**/*

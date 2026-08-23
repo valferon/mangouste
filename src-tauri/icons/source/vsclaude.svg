@@ -1,0 +1,17 @@
+<!-- Launcher icon: the three-pane workbench, one amber node in the sessions rail.
+     Flat fills and plain shapes only (no gradients, filters, or clip paths) so
+     every rasterizer in the toolchain renders it identically. Gutters are wide
+     and pane fills sit well above the ground colour, because the dock draws
+     this at 48 px where anything subtler turns into one grey blob. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="90" y="90" width="844" height="844" rx="152" fill="#14171c"/>
+  <rect x="98" y="98" width="828" height="828" rx="144" fill="none" stroke="#5c6672" stroke-width="16"/>
+
+  <rect x="150" y="150" width="162" height="724" rx="34" fill="#434c56"/>
+
+  <rect x="346" y="150" width="332" height="538" rx="34" fill="#6a7684"/>
+  <rect x="346" y="722" width="332" height="152" rx="34" fill="#434c56"/>
+
+  <rect x="712" y="150" width="162" height="724" rx="34" fill="#434c56"/>
+  <circle cx="793" cy="240" r="50" fill="#dcdcaa"/>
+</svg>

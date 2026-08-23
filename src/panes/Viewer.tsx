@@ -1,0 +1,616 @@
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { readTextFileMeta, writeTextFile } from "../lib/ipc";
+
+/** Colourise a unified diff. Line class is decided by the first character. */
+function diffLineClass(line: string): string {
+  if (line.startsWith("+++") || line.startsWith("---")) return "diff-meta";
+  if (line.startsWith("@@")) return "diff-hunk";
+  if (line.startsWith("+")) return "diff-add";
+  if (line.startsWith("-")) return "diff-del";
+  if (line.startsWith("diff ") || line.startsWith("index ")) return "diff-meta";
+  return "";
+}
+
+/**
+ * Ceiling on rendered diff lines. One DOM node per line with no virtualisation,
+ * so an unbounded patch — a commit touching a generated file — otherwise locks
+ * the renderer up for seconds.
+ */
+const MAX_DIFF_LINES = 5000;
+
+/**
+ * Start of the marker `git.rs` appends when a patch hit its byte budget. No git
+ * output line can begin with it, so a prefix test is unambiguous. Keep in sync
+ * with `patch_cut_marker()` there.
+ */
+const PATCH_CUT_MARKER = "… patch cut off at";
+
+/** One file's worth of a multi-file patch, as its own collapsible block. */
+interface PatchFile {
+  /** `diff --git` line index, which is unique within a patch. */
+  key: number;
+  label: string;
+  lines: string[];
+  added: number;
+  removed: number;
+}
+
+/**
+ * Number of files a patch can hold before sections open collapsed.
+ *
+ * A commit touching thirty files is a list to scan, not a wall to scroll; one
+ * touching three is something you came to read.
+ */
+const AUTO_EXPAND_FILES = 6;
+
+/** Path a `diff --git a/x b/y` header is about, preferring the post-image. */
+function fileLabelOf(header: string): string {
+  const match = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+  if (!match) return header.replace(/^diff --git /, "");
+  const [, before, after] = match;
+  if (after === "dev/null") return `${before} (deleted)`;
+  if (before === "dev/null") return `${after} (new)`;
+  return before === after ? after : `${before} → ${after}`;
+}
+
+/**
+ * Split a patch into per-file sections.
+ *
+ * Anything before the first `diff --git` — `git show`'s message and diffstat —
+ * becomes the preamble, so it keeps its place above the files rather than being
+ * folded into the first one.
+ */
+function splitPatch(lines: string[]): { preamble: string[]; files: PatchFile[] } {
+  const preamble: string[] = [];
+  const files: PatchFile[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("diff --git ")) {
+      files.push({
+        key: index,
+        label: fileLabelOf(line),
+        lines: [line],
+        added: 0,
+        removed: 0,
+      });
+      continue;
+    }
+    const current = files[files.length - 1];
+    if (current === undefined) {
+      preamble.push(line);
+      continue;
+    }
+    current.lines.push(line);
+    // `+++`/`---` are the file headers, not changed lines; counting them would
+    // add a phantom +1/-1 to every file in the patch.
+    if (line.startsWith("+") && !line.startsWith("+++")) current.added += 1;
+    else if (line.startsWith("-") && !line.startsWith("---")) current.removed += 1;
+  }
+  return { preamble, files };
+}
+
+/** Colourised diff lines, one DOM node each. */
+const DiffLines = memo(function DiffLines({ lines }: { lines: string[] }) {
+  return (
+    <>
+      {lines.map((line, index) => (
+        <div key={index} className={diffLineClass(line)}>
+          {line || " "}
+        </div>
+      ))}
+    </>
+  );
+});
+
+export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
+  // Split and cap once per patch, not once per parent render — patches reach
+  // thousands of lines, each with its own class computation.
+  const { preamble, files, flat, hidden, cutNote } = useMemo(() => {
+    const lines = patch.split("\n");
+    // The last element is the artefact of the trailing newline, so the marker,
+    // when present, is the one before it.
+    const lastIndex = lines[lines.length - 1] === "" ? lines.length - 2 : lines.length - 1;
+    let cutNote: string | null = null;
+    if (lastIndex >= 0 && lines[lastIndex].startsWith(PATCH_CUT_MARKER)) {
+      cutNote = lines[lastIndex];
+      lines.length = lastIndex; // reported in the footer, not colourised as a diff line
+    }
+    const shown = lines.slice(0, MAX_DIFF_LINES);
+    const hidden = lines.length - shown.length;
+    const { preamble, files } = splitPatch(shown);
+    // Not a patch at all — an error string, or `(no textual diff)`. Nothing to
+    // section, so render it as it came.
+    return files.length === 0
+      ? { preamble: [], files: [], flat: shown, hidden, cutNote }
+      : { preamble, files, flat: null, hidden, cutNote };
+  }, [patch]);
+
+  /**
+   * Files the user has toggled away from the default. Keyed by section, so
+   * collapsing one file does not disturb the rest, and reset per patch — the
+   * keys are line offsets and mean nothing in the next one.
+   */
+  const [toggled, setToggled] = useState<Record<number, boolean>>({});
+  useEffect(() => setToggled({}), [patch]);
+  const defaultOpen = files.length <= AUTO_EXPAND_FILES;
+
+  const footer =
+    hidden > 0 || cutNote !== null ? (
+      <div className="diff-meta">
+        {hidden > 0
+          ? `… truncated, ${hidden.toLocaleString()} more line${hidden === 1 ? "" : "s"}` +
+            // The backend already dropped an unknown amount, so `hidden` is not
+            // the whole remainder; say so instead of printing a second number.
+            (cutNote !== null ? " of an already capped patch" : "")
+          : cutNote}
+      </div>
+    ) : null;
+
+  if (flat !== null) {
+    return (
+      <pre className="diff-view selectable">
+        <DiffLines lines={flat} />
+        {footer}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="diff-view-sections">
+      {preamble.length > 0 && (
+        <pre className="diff-view selectable diff-preamble">
+          <DiffLines lines={preamble} />
+        </pre>
+      )}
+      {files.length > 1 && (
+        <div className="diff-file-actions">
+          <button
+            className="toggle-button"
+            onClick={() =>
+              setToggled(Object.fromEntries(files.map((file) => [file.key, !defaultOpen])))
+            }
+          >
+            {defaultOpen ? "Collapse all" : "Expand all"}
+          </button>
+          <span className="count">
+            {files.length} file{files.length === 1 ? "" : "s"}
+          </span>
+        </div>
+      )}
+      {files.map((file) => {
+        const open = toggled[file.key] ?? defaultOpen;
+        return (
+          <div className="diff-file" key={file.key}>
+            <div
+              className="diff-file-head"
+              onClick={() => setToggled((current) => ({ ...current, [file.key]: !open }))}
+              title={file.label}
+            >
+              <span className="twisty">{open ? "▾" : "▸"}</span>
+              <span className="diff-file-name">{file.label}</span>
+              {file.added > 0 && <span className="diff-add">+{file.added}</span>}
+              {file.removed > 0 && <span className="diff-del">−{file.removed}</span>}
+            </div>
+            {open && (
+              <pre className="diff-view selectable">
+                <DiffLines lines={file.lines} />
+              </pre>
+            )}
+          </div>
+        );
+      })}
+      {footer}
+    </div>
+  );
+});
+
+/* ---------- diffs synthesised from a tool call ---------- */
+
+/**
+ * Longest side an LCS diff is computed for.
+ *
+ * The table is `before × after` cells, so this bounds it at ~160k — nothing next
+ * to a render, while an `Edit` rewriting a whole generated file stays cheap. Past
+ * it the two sides are shown whole instead, which is what the raw input showed
+ * anyway.
+ */
+const LCS_LINE_CAP = 400;
+
+/** Prefixed lines, ready for `diffLineClass`. */
+function lineDiff(before: string[], after: string[]): string[] {
+  if (before.length > LCS_LINE_CAP || after.length > LCS_LINE_CAP) {
+    return [...before.map((line) => `-${line}`), ...after.map((line) => `+${line}`)];
+  }
+  const rows = before.length;
+  const columns = after.length;
+  const stride = columns + 1;
+  // Suffix LCS lengths: `table[i * stride + j]` is the LCS of `before[i..]` and
+  // `after[j..]`, which lets the walk below run forwards and keep line order.
+  const table = new Uint32Array((rows + 1) * stride);
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = columns - 1; j >= 0; j -= 1) {
+      table[i * stride + j] =
+        before[i] === after[j]
+          ? table[(i + 1) * stride + j + 1] + 1
+          : Math.max(table[(i + 1) * stride + j], table[i * stride + j + 1]);
+    }
+  }
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < rows && j < columns) {
+    if (before[i] === after[j]) {
+      out.push(` ${before[i]}`);
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * stride + j] >= table[i * stride + j + 1]) {
+      out.push(`-${before[i]}`);
+      i += 1;
+    } else {
+      out.push(`+${after[j]}`);
+      j += 1;
+    }
+  }
+  while (i < rows) out.push(`-${before[i++]}`);
+  while (j < columns) out.push(`+${after[j++]}`);
+  return out;
+}
+
+/** `""` splits to `[""]`, which would show as a spurious blank changed line. */
+function splitSide(text: string): string[] {
+  return text === "" ? [] : text.split("\n");
+}
+
+const asString = (value: unknown): string | null =>
+  typeof value === "string" ? value : null;
+
+/**
+ * Render an edit-shaped tool input as a diff, or `null` when the input is not
+ * one.
+ *
+ * Returning null is what keeps the caller honest: a shape that does not match —
+ * a future tool, or an `Edit` whose arguments are still streaming — falls back
+ * to the raw key dump rather than to an empty diff.
+ */
+export function toolDiffLines(
+  name: string,
+  input: Record<string, unknown>,
+): string[] | null {
+  if (name === "Edit") {
+    const before = asString(input.old_string);
+    const after = asString(input.new_string);
+    if (before === null || after === null) return null;
+    const lines = lineDiff(splitSide(before), splitSide(after));
+    return input.replace_all === true ? ["@@ every occurrence @@", ...lines] : lines;
+  }
+  if (name === "MultiEdit" && Array.isArray(input.edits)) {
+    const lines: string[] = [];
+    (input.edits as unknown[]).forEach((raw, index) => {
+      if (typeof raw !== "object" || raw === null) return;
+      const edit = raw as Record<string, unknown>;
+      const before = asString(edit.old_string);
+      const after = asString(edit.new_string);
+      if (before === null || after === null) return;
+      lines.push(
+        `@@ edit ${index + 1} of ${(input.edits as unknown[]).length}${
+          edit.replace_all === true ? ", every occurrence" : ""
+        } @@`,
+      );
+      lines.push(...lineDiff(splitSide(before), splitSide(after)));
+    });
+    return lines.length > 0 ? lines : null;
+  }
+  // Write and NotebookEdit carry only the post-image: whatever was there before
+  // is not in the frame, so every line is shown as added rather than guessed at.
+  const whole =
+    name === "Write"
+      ? asString(input.content)
+      : name === "NotebookEdit"
+        ? asString(input.new_source)
+        : null;
+  if (whole === null) return null;
+  return splitSide(whole).map((line) => `+${line}`);
+}
+
+/** Diff synthesised from a tool call, for the chat's IN pane. */
+export const ToolDiff = memo(function ToolDiff({ lines }: { lines: string[] }) {
+  const shown = lines.length > MAX_DIFF_LINES ? lines.slice(0, MAX_DIFF_LINES) : lines;
+  return (
+    <pre className="diff-view selectable tool-diff">
+      <DiffLines lines={shown} />
+      {shown.length < lines.length && (
+        <div className="diff-meta">
+          … truncated, {(lines.length - shown.length).toLocaleString()} more lines
+        </div>
+      )}
+    </pre>
+  );
+});
+
+/* ---------- file editor ---------- */
+
+/**
+ * Marker `write_text_file` puts in its error when the file changed underneath.
+ * Keep in sync with `workspace.rs`.
+ */
+const STALE_MARKER = "STALE:";
+
+interface FileViewProps {
+  path: string;
+  /**
+   * Whether this pane is the one on screen.
+   *
+   * File tabs stay mounted while hidden — an unmount would throw away an unsaved
+   * draft on a tab switch — so the window-level shortcut has to be gated, or
+   * every open editor would save on one Ctrl+S.
+   */
+  visible?: boolean;
+  /** Reports unsaved changes upward, so the tab can show a dirty mark. */
+  onDirtyChange?: (path: string, dirty: boolean) => void;
+  /**
+   * Registers a save function while this pane is mounted, so a close-confirm
+   * elsewhere can flush the buffer instead of only offering to discard it. It
+   * resolves to whether the write landed — a refused save must not be read as
+   * permission to close the tab.
+   */
+  onRegisterSave?: (path: string, save: (() => Promise<boolean>) | null) => void;
+}
+
+type SaveState =
+  | { kind: "clean" }
+  | { kind: "saving" }
+  | { kind: "saved" }
+  | { kind: "error"; message: string }
+  | { kind: "stale" };
+
+/**
+ * File viewer and editor.
+ *
+ * Editing is deliberately plain — a textarea, a gutter, and one save — because
+ * the interesting problem here is not the editor but the second writer: claude
+ * is editing the same tree, so the mtime the bytes were read at rides along with
+ * every save and a save that would clobber someone else's work is refused.
+ */
+export const FileView = memo(function FileView({
+  path,
+  visible = true,
+  onDirtyChange,
+  onRegisterSave,
+}: FileViewProps) {
+  /** What is on disk, as far as this pane knows. */
+  const [saved, setSaved] = useState<{ text: string; modifiedMs: number } | null>(null);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<SaveState>({ kind: "clean" });
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+
+  const dirty = saved !== null && draft !== saved.text;
+
+  const load = useCallback(
+    async (signal?: { cancelled: boolean }) => {
+      try {
+        const file = await readTextFileMeta(path);
+        if (signal?.cancelled) return;
+        setSaved({ text: file.content, modifiedMs: file.modifiedMs });
+        setDraft(file.content);
+        setError(null);
+        setState({ kind: "clean" });
+      } catch (e) {
+        if (signal?.cancelled) return;
+        setError(String(e));
+      }
+    },
+    [path],
+  );
+
+  useEffect(() => {
+    const signal = { cancelled: false };
+    setSaved(null);
+    setDraft("");
+    setError(null);
+    setState({ kind: "clean" });
+    void load(signal);
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [load]);
+
+  /**
+   * Save, resolving once the write has landed.
+   *
+   * `force` drops the mtime check, which is only reachable from the button the
+   * stale banner offers — the point of the check is that nothing else can skip
+   * it silently.
+   */
+  const save = useCallback(
+    async (force = false): Promise<boolean> => {
+      if (saved === null) return false;
+      const text = draft;
+      setState({ kind: "saving" });
+      try {
+        const modifiedMs = await writeTextFile(
+          path,
+          text,
+          force ? undefined : saved.modifiedMs,
+        );
+        setSaved({ text, modifiedMs });
+        setState({ kind: "saved" });
+        return true;
+      } catch (e) {
+        const message = String(e);
+        setState(message.includes(STALE_MARKER) ? { kind: "stale" } : { kind: "error", message });
+        return false;
+      }
+    },
+    [draft, path, saved],
+  );
+
+  /** Latest save, for listeners and for the parent's registration. */
+  const saveRef = useRef(save);
+  useEffect(() => {
+    saveRef.current = save;
+  }, [save]);
+
+  useEffect(() => {
+    onDirtyChange?.(path, dirty);
+  }, [dirty, onDirtyChange, path]);
+
+  // Unmounting means the tab is gone or another one is in front; either way the
+  // dirty mark and the save hook must not outlive the buffer they describe.
+  useEffect(
+    () => () => {
+      onDirtyChange?.(path, false);
+      onRegisterSave?.(path, null);
+    },
+    [onDirtyChange, onRegisterSave, path],
+  );
+
+  useEffect(() => {
+    onRegisterSave?.(path, () => saveRef.current(false));
+  }, [onRegisterSave, path]);
+
+  // Ctrl+S from anywhere in the window, not only from inside the textarea, so
+  // the shortcut works with the cursor parked on the gutter or the toolbar.
+  useEffect(() => {
+    if (!visible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "s" || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+      event.preventDefault();
+      void saveRef.current(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [visible]);
+
+  /** Read inside the focus handler below, which must see the live buffer. */
+  const savedRef = useRef(saved);
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    savedRef.current = saved;
+    draftRef.current = draft;
+  }, [draft, saved]);
+
+  // Reload when the window regains focus and nothing local would be lost:
+  // claude edits these files, and a stale buffer that only says so at save time
+  // is worse than one that quietly caught up.
+  useEffect(() => {
+    if (!visible || dirty) return;
+    const onFocus = () => {
+      void readTextFileMeta(path)
+        .then((file) => {
+          const current = savedRef.current;
+          if (current === null || current.modifiedMs === file.modifiedMs) return;
+          // Re-checked here, not only in the effect's guard: the read is a round
+          // trip, and a keystroke landing inside it must not have its edit
+          // replaced by what was on disk before it.
+          if (draftRef.current !== current.text) return;
+          setSaved({ text: file.content, modifiedMs: file.modifiedMs });
+          setDraft(file.content);
+          setState({ kind: "clean" });
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [dirty, path, visible]);
+
+  /** Tab indents instead of leaving the field. */
+  const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Tab" || event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    const field = event.currentTarget;
+    // `insertText` keeps the native undo stack, which `value = ...` throws away —
+    // Ctrl+Z after an indent is the whole point.
+    if (!document.execCommand("insertText", false, "  ")) {
+      const { selectionStart, selectionEnd, value } = field;
+      field.value = `${value.slice(0, selectionStart)}  ${value.slice(selectionEnd)}`;
+      field.selectionStart = field.selectionEnd = selectionStart + 2;
+      setDraft(field.value);
+    }
+  }, []);
+
+  const lineCount = useMemo(() => draft.split("\n").length, [draft]);
+  const gutter = useMemo(
+    () => Array.from({ length: lineCount }, (_, index) => index + 1).join("\n"),
+    [lineCount],
+  );
+
+  if (error !== null) return <div className="empty-note">{error}</div>;
+  if (saved === null) return <div className="empty-note">Loading…</div>;
+
+  let status: ReactNode = null;
+  if (state.kind === "saving") status = <span className="count">Saving…</span>;
+  else if (state.kind === "saved" && !dirty) status = <span className="count">Saved</span>;
+  else if (state.kind === "error") status = <span className="diff-del">{state.message}</span>;
+  else if (dirty) status = <span className="count">Unsaved</span>;
+
+  return (
+    <div className="editor">
+      <div className="editor-bar">
+        <span className="editor-path" title={path}>
+          {dirty && <span className="editor-dirty">●</span>}
+          {path}
+        </span>
+        {status}
+        <div className="actions">
+          <button
+            className="toggle-button"
+            onClick={() => void save(false)}
+            disabled={!dirty || state.kind === "saving"}
+            title="Ctrl+S"
+          >
+            Save
+          </button>
+          <button
+            className="toggle-button"
+            onClick={() => void load()}
+            disabled={state.kind === "saving"}
+            title={dirty ? "Discard changes and re-read from disk" : "Re-read from disk"}
+          >
+            {dirty ? "Revert" : "Reload"}
+          </button>
+        </div>
+      </div>
+      {state.kind === "stale" && (
+        <div className="editor-conflict">
+          <span>Changed on disk since it was opened — probably by claude.</span>
+          <button className="toggle-button" onClick={() => void load()}>
+            Discard mine, reload
+          </button>
+          <button className="toggle-button" onClick={() => void save(true)}>
+            Overwrite anyway
+          </button>
+        </div>
+      )}
+      <div className="editor-body">
+        <div className="editor-gutter" ref={gutterRef} aria-hidden>
+          {gutter}
+        </div>
+        <textarea
+          ref={textareaRef}
+          className="editor-input selectable"
+          value={draft}
+          spellCheck={false}
+          wrap="off"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={onKeyDown}
+          // The gutter is a separate scroller, so it has to be driven from here;
+          // it has no scrollbar of its own and cannot drift out of step.
+          onScroll={(event) => {
+            const gutterElement = gutterRef.current;
+            if (gutterElement) gutterElement.scrollTop = event.currentTarget.scrollTop;
+          }}
+        />
+      </div>
+    </div>
+  );
+});

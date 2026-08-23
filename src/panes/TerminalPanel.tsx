@@ -1,0 +1,427 @@
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Resizer } from "../layout/Split";
+import { TerminalPane } from "./TerminalPane";
+
+/** One shell. `id` is the key the Rust side stores the pty under. */
+interface TerminalSlot {
+  id: string;
+  /** Flex weight inside its tab, so a split can be dragged. */
+  weight: number;
+}
+
+/** One tab, holding one shell or several side by side. */
+interface TerminalTab {
+  id: string;
+  slots: TerminalSlot[];
+  activeSlot: string;
+}
+
+/** Every terminal one repo owns. */
+interface RepoTerminals {
+  tabs: TerminalTab[];
+  activeTab: string;
+}
+
+/**
+ * Monotonic, and module-level rather than a ref.
+ *
+ * The Rust side keys terminals by id and `pty_open` closes whatever it already
+ * has under the id it is handed, so a counter that restarted with the component
+ * would hand a fresh pane the id of a live shell and kill it.
+ */
+let sequence = 0;
+
+const mintId = (prefix: string) => `${prefix}:${(sequence += 1)}`;
+
+function makeSlot(): TerminalSlot {
+  return { id: mintId("term"), weight: 1 };
+}
+
+function makeTab(): TerminalTab {
+  const slot = makeSlot();
+  return { id: mintId("tab"), slots: [slot], activeSlot: slot.id };
+}
+
+function makeGroup(): RepoTerminals {
+  const tab = makeTab();
+  return { tabs: [tab], activeTab: tab.id };
+}
+
+/** Smallest share of a tab's width a split pane can be dragged down to. */
+const MIN_SHARE = 0.08;
+
+interface TerminalPanelProps {
+  /** Repo in front. Its group is the one the tab strip and stack show. */
+  repo: string;
+  visible: boolean;
+  /** Panel height in pixels, owned by the parent's drag handle. */
+  height: number;
+  /** Bumped by the parent when the panel's box changes, to force a refit. */
+  refitToken: number;
+  themeKey: string;
+  /** Hide the panel: the × button, and closing the last terminal of a repo. */
+  onClose: () => void;
+  /** Show the panel, for a chord pressed while it is hidden. */
+  onRequestShow: () => void;
+}
+
+/**
+ * The bottom terminal panel: one group of terminals per repo, tabs within a
+ * group, and side-by-side splits within a tab.
+ *
+ * Nothing is unmounted while the app is running. `TerminalPane`'s cleanup closes
+ * its pty, which kills the shell and everything running in it, so a hidden pane
+ * — another repo's, another tab's, the whole panel collapsed — is a pane with
+ * `display: none`, not an absent one. That is the whole reason this component
+ * holds every repo's state at once instead of being keyed on the active repo.
+ */
+export function TerminalPanel({
+  repo,
+  visible,
+  height,
+  refitToken,
+  themeKey,
+  onClose,
+  onRequestShow,
+}: TerminalPanelProps) {
+  const [groups, setGroups] = useState<Record<string, RepoTerminals>>({});
+  /**
+   * Bumped only by a user action that should move the caret into a terminal.
+   *
+   * A pane's focus effect keys on this, so switching repos or first paint does
+   * not pull focus out of the chat, while opening a tab or a split does.
+   */
+  const [focusSeq, setFocusSeq] = useState(0);
+  /**
+   * Bumped whenever a pane goes from hidden to shown, since a `display: none`
+   * box has no measurable size and its last fit() was therefore a no-op.
+   */
+  const [showToken, setShowToken] = useState(0);
+  /** Tab bodies, measured to turn a pixel drag into a weight change. */
+  const bodies = useRef(new Map<string, HTMLDivElement>());
+
+  const group = repo ? groups[repo] : undefined;
+
+  // First terminal for a repo, spawned lazily: a login shell per repo the user
+  // merely clicks past is a process nobody asked for, so the group is created
+  // when the repo is in front of an open panel.
+  useEffect(() => {
+    if (!visible || !repo) return;
+    setGroups((current) => (current[repo] ? current : { ...current, [repo]: makeGroup() }));
+  }, [visible, repo]);
+
+  useEffect(() => setShowToken((token) => token + 1), [repo, group?.activeTab, visible]);
+
+  const addTab = useCallback(() => {
+    if (!repo) return;
+    if (!visible) onRequestShow();
+    setFocusSeq((seq) => seq + 1);
+    setGroups((current) => {
+      const existing = current[repo];
+      // No group yet means the effect above is about to make one; a second tab
+      // on top of that would be a shell the click did not ask for.
+      if (!existing) return current;
+      const tab = makeTab();
+      return { ...current, [repo]: { tabs: [...existing.tabs, tab], activeTab: tab.id } };
+    });
+  }, [repo, visible, onRequestShow]);
+
+  const splitTab = useCallback(() => {
+    if (!repo) return;
+    if (!visible) onRequestShow();
+    setFocusSeq((seq) => seq + 1);
+    setGroups((current) => {
+      const existing = current[repo];
+      if (!existing) return current;
+      const slot = makeSlot();
+      const tabs = existing.tabs.map((tab) => {
+        if (tab.id !== existing.activeTab) return tab;
+        // Inserted after the pane being split, as a split of that pane rather
+        // than an append to the row.
+        const at = tab.slots.findIndex((candidate) => candidate.id === tab.activeSlot);
+        const index = at < 0 ? tab.slots.length : at + 1;
+        const slots = [...tab.slots.slice(0, index), slot, ...tab.slots.slice(index)];
+        return { ...tab, slots, activeSlot: slot.id };
+      });
+      return { ...current, [repo]: { ...existing, tabs } };
+    });
+  }, [repo, visible, onRequestShow]);
+
+  const selectTab = useCallback((tabId: string) => {
+    if (!repo) return;
+    setFocusSeq((seq) => seq + 1);
+    setGroups((current) => {
+      const existing = current[repo];
+      if (!existing || existing.activeTab === tabId) return current;
+      return { ...current, [repo]: { ...existing, activeTab: tabId } };
+    });
+  }, [repo]);
+
+  const selectSlot = useCallback((tabId: string, slotId: string) => {
+    if (!repo) return;
+    setGroups((current) => {
+      const existing = current[repo];
+      if (!existing) return current;
+      const tabs = existing.tabs.map((tab) =>
+        tab.id === tabId && tab.activeSlot !== slotId ? { ...tab, activeSlot: slotId } : tab,
+      );
+      return { ...current, [repo]: { ...existing, tabs } };
+    });
+  }, [repo]);
+
+  /**
+   * Drop panes and the tabs that held them, and the panel with the last tab.
+   *
+   * Computed against the current state rather than inside a `setGroups` updater,
+   * because the updater does not run until React processes the update — so an
+   * "everything is gone" flag set in there is still false by the time this
+   * function would read it.
+   */
+  const closeSlots = useCallback(
+    (tabId: string, doomed: (slot: TerminalSlot) => boolean) => {
+      if (!repo) return;
+      const existing = groups[repo];
+      if (!existing) return;
+      const tabs: TerminalTab[] = [];
+      for (const tab of existing.tabs) {
+        if (tab.id !== tabId) {
+          tabs.push(tab);
+          continue;
+        }
+        const slots = tab.slots.filter((slot) => !doomed(slot));
+        // A tab is its panes; the last one closing takes the tab with it.
+        if (slots.length === 0) continue;
+        const activeSlot = slots.some((slot) => slot.id === tab.activeSlot)
+          ? tab.activeSlot
+          : slots[0].id;
+        tabs.push({ ...tab, slots, activeSlot });
+      }
+      setFocusSeq((seq) => seq + 1);
+      if (tabs.length === 0) {
+        // Dropping the group and hiding the panel together: the effect above
+        // only re-creates a group when `visible` or `repo` changes, so a group
+        // dropped under an open panel would leave an empty panel behind.
+        setGroups((current) => {
+          const next = { ...current };
+          delete next[repo];
+          return next;
+        });
+        onClose();
+        return;
+      }
+      const activeTab = tabs.some((tab) => tab.id === existing.activeTab)
+        ? existing.activeTab
+        : tabs[0].id;
+      setGroups((current) => ({ ...current, [repo]: { tabs, activeTab } }));
+    },
+    [repo, groups, onClose],
+  );
+
+  const closeSlot = useCallback(
+    (tabId: string, slotId: string) => closeSlots(tabId, (slot) => slot.id === slotId),
+    [closeSlots],
+  );
+
+  const closeTab = useCallback(
+    (tabId: string) => closeSlots(tabId, () => true),
+    [closeSlots],
+  );
+
+  const closeActiveSlot = useCallback(() => {
+    if (!group) return;
+    const tab = group.tabs.find((candidate) => candidate.id === group.activeTab);
+    if (tab) closeSlot(tab.id, tab.activeSlot);
+  }, [group, closeSlot]);
+
+  /**
+   * Turn a divider drag into a weight change for the pair it sits between.
+   *
+   * `index` is the slot to the right of the divider, matching the render below.
+   */
+  const resizeSlot = useCallback(
+    (tabId: string, index: number, delta: number) => {
+      if (!repo) return;
+      const width = bodies.current.get(tabId)?.clientWidth ?? 0;
+      if (width <= 0) return;
+      setGroups((current) => {
+        const existing = current[repo];
+        if (!existing) return current;
+        const tabs = existing.tabs.map((tab) => {
+          if (tab.id !== tabId) return tab;
+          const left = tab.slots[index - 1];
+          const right = tab.slots[index];
+          if (!left || !right) return tab;
+          const total = tab.slots.reduce((sum, slot) => sum + slot.weight, 0);
+          const pair = left.weight + right.weight;
+          const min = MIN_SHARE * total;
+          // Two minimums do not fit in the pair, so there is nothing to give.
+          if (pair < min * 2) return tab;
+          const wanted = left.weight + (delta / width) * total;
+          const nextLeft = Math.min(Math.max(wanted, min), pair - min);
+          const slots = tab.slots.map((slot, at) => {
+            if (at === index - 1) return { ...slot, weight: nextLeft };
+            if (at === index) return { ...slot, weight: pair - nextLeft };
+            return slot;
+          });
+          return { ...tab, slots };
+        });
+        return { ...current, [repo]: { ...existing, tabs } };
+      });
+    },
+    [repo],
+  );
+
+  // Panel chords, captured at the window so they never reach a shell.
+  //
+  // xterm listens on its own textarea, so stopping propagation here — in the
+  // capture phase, before the event reaches the target — is what keeps
+  // Ctrl+Shift+T out of the terminal as a control byte. Keyed on `code`, since
+  // shifted "5" arrives as "%" on most layouts.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
+      const handler =
+        event.code === "KeyT"
+          ? addTab
+          : event.code === "Digit5" || event.code === "Backslash"
+            ? splitTab
+            : event.code === "KeyW"
+              ? closeActiveSlot
+              : null;
+      if (!handler) return;
+      event.preventDefault();
+      event.stopPropagation();
+      handler();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [addTab, splitTab, closeActiveSlot]);
+
+  return (
+    <div
+      className="terminal-panel"
+      // Shrinkable, unlike the editor above it, whose `flex: 1` basis of 0 leaves
+      // it nothing to give: when the column is shorter than the stored height,
+      // the panel is the item that yields rather than overflowing the bottom.
+      style={{ height, flex: `0 1 ${height}px`, display: visible ? "flex" : "none" }}
+    >
+      <div className="terminal-bar">
+        <span className="terminal-repo-label" title={repo}>
+          {repo.split("/").pop() ?? ""}
+        </span>
+        <div className="terminal-tabs">
+          {group?.tabs.map((tab, index) => (
+            <button
+              key={tab.id}
+              className="terminal-tab"
+              data-active={tab.id === group.activeTab}
+              onClick={() => selectTab(tab.id)}
+              title={tab.slots.length > 1 ? `${tab.slots.length} panes` : undefined}
+            >
+              <span>
+                {index + 1}
+                {tab.slots.length > 1 ? ` · ${tab.slots.length}` : ""}
+              </span>
+              <span
+                className="close"
+                role="button"
+                aria-label="Close terminal tab"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  closeTab(tab.id);
+                }}
+              >
+                ×
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="actions">
+          <button
+            className="toggle-button"
+            onClick={addTab}
+            title="New terminal tab (Ctrl+Shift+T)"
+          >
+            +
+          </button>
+          <button
+            className="toggle-button"
+            onClick={splitTab}
+            title="Split terminal vertically (Ctrl+Shift+5)"
+            disabled={!group}
+          >
+            ⇔
+          </button>
+          <button className="toggle-button" onClick={onClose} title="Hide terminal (Ctrl+`)">
+            ×
+          </button>
+        </div>
+      </div>
+
+      <div className="terminal-stack">
+        {Object.entries(groups).map(([groupRepo, groupState]) => {
+          const repoShown = groupRepo === repo;
+          return (
+            <div
+              key={groupRepo}
+              className="terminal-repo"
+              style={{ display: repoShown ? "flex" : "none" }}
+            >
+              {groupState.tabs.map((tab) => {
+                const tabShown = repoShown && tab.id === groupState.activeTab;
+                return (
+                  <div
+                    key={tab.id}
+                    className="terminal-tab-body"
+                    style={{ display: tab.id === groupState.activeTab ? "flex" : "none" }}
+                    ref={(element) => {
+                      if (element) bodies.current.set(tab.id, element);
+                      else bodies.current.delete(tab.id);
+                    }}
+                  >
+                    {tab.slots.map((slot, index) => {
+                      const slotActive = tabShown && visible && slot.id === tab.activeSlot;
+                      return (
+                        <Fragment key={slot.id}>
+                          {index > 0 && (
+                            <Resizer
+                              orientation="vertical"
+                              onDelta={(delta) => resizeSlot(tab.id, index, delta)}
+                            />
+                          )}
+                          <div
+                            className="terminal-slot"
+                            style={{ flex: `${slot.weight} 1 0` }}
+                            data-active={slotActive && tab.slots.length > 1}
+                            onMouseDown={() => selectSlot(tab.id, slot.id)}
+                          >
+                            {tab.slots.length > 1 && (
+                              <button
+                                className="terminal-slot-close"
+                                title="Close pane (Ctrl+Shift+W)"
+                                onClick={() => closeSlot(tab.id, slot.id)}
+                              >
+                                ×
+                              </button>
+                            )}
+                            <TerminalPane
+                              id={slot.id}
+                              cwd={groupRepo}
+                              refitToken={refitToken + showToken}
+                              themeKey={themeKey}
+                              focusRequest={slotActive ? focusSeq : 0}
+                            />
+                          </div>
+                        </Fragment>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
