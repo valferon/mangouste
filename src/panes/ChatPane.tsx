@@ -26,6 +26,14 @@ import {
   resolveControlResponse,
 } from "../lib/control";
 import {
+  buildAnswers,
+  isComplete,
+  OTHER_LABEL,
+  parseQuestions,
+  togglePick,
+  type ParsedQuestion,
+} from "../lib/questions";
+import {
   applyCompletion,
   buildMenu,
   detectTrigger,
@@ -154,15 +162,6 @@ const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"]
  */
 const QUESTION_TOOL = "AskUserQuestion";
 
-/**
- * The choice every question carries implicitly.
- *
- * The CLI's own UI always offers a free-text escape hatch, so the card does
- * too. It is a placeholder for the text box, never an answer in itself: on
- * submit it is swapped out for what was typed.
- */
-const OTHER_LABEL = "Other";
-
 /** Compact labels so all four modes fit the composer bar as one-click buttons. */
 const MODE_LABELS: Record<(typeof PERMISSION_MODES)[number], string> = {
   default: "default",
@@ -262,9 +261,6 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
     ? (value as Record<string, unknown>)
     : null;
 
-const asText = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() ? value : null;
-
 /**
  * Fields rendered first, in this order, whatever order they arrived in.
  *
@@ -335,52 +331,6 @@ function PermissionValue({ value }: { value: unknown }) {
   );
 }
 
-interface QuestionOption {
-  label: string;
-  description: string | null;
-}
-
-interface ParsedQuestion {
-  header: string | null;
-  question: string;
-  options: QuestionOption[];
-  multiSelect: boolean;
-}
-
-/**
- * `AskUserQuestion`'s input, as much of it as the form needs to be answerable.
- *
- * Null on anything that does not match the tool's schema, which sends the card
- * back to the generic allow/deny renderer rather than showing a form that
- * cannot produce a valid answer. Question text is required, not defaulted:
- * `answers` is keyed by it, so a blank question has nowhere to put its reply.
- */
-function parseQuestions(input: unknown): ParsedQuestion[] | null {
-  const questions = asRecord(input)?.questions;
-  if (!Array.isArray(questions) || questions.length === 0) return null;
-  const parsed: ParsedQuestion[] = [];
-  for (const entry of questions) {
-    const record = asRecord(entry);
-    const question = asText(record?.question);
-    if (!record || !question) return null;
-    const options = Array.isArray(record.options) ? record.options : [];
-    const labelled: QuestionOption[] = [];
-    for (const option of options) {
-      const label = asText(asRecord(option)?.label);
-      if (!label || label === OTHER_LABEL) continue;
-      labelled.push({ label, description: asText(asRecord(option)?.description) });
-    }
-    if (labelled.length === 0) return null;
-    parsed.push({
-      header: asText(record.header),
-      question,
-      options: labelled,
-      multiSelect: record.multiSelect === true,
-    });
-  }
-  return parsed;
-}
-
 /**
  * `AskUserQuestion`, rendered as the questions it is actually asking — and as
  * the buttons that answer them.
@@ -408,33 +358,17 @@ function AskUserQuestionForm({
   const [typed, setTyped] = useState<Record<string, string>>({});
 
   const toggle = useCallback((question: ParsedQuestion, label: string) => {
-    setPicked((current) => {
-      const chosen = current[question.question] ?? [];
-      if (chosen.includes(label)) {
-        // A second click clears, so a mis-click is undoable without needing a
-        // "none of these" option that the tool's schema does not have.
-        return { ...current, [question.question]: chosen.filter((it) => it !== label) };
-      }
-      return {
-        ...current,
-        [question.question]: question.multiSelect ? [...chosen, label] : [label],
-      };
-    });
+    setPicked((current) => ({
+      ...current,
+      [question.question]: togglePick(question, current[question.question] ?? [], label),
+    }));
   }, []);
 
-  const answers = useMemo(() => {
-    const built: Record<string, string> = {};
-    for (const question of questions) {
-      const chosen = picked[question.question] ?? [];
-      const free = typed[question.question]?.trim() ?? "";
-      const labels = chosen.filter((label) => label !== OTHER_LABEL);
-      if (chosen.includes(OTHER_LABEL) && free) labels.push(free);
-      built[question.question] = labels.join(", ");
-    }
-    return built;
-  }, [picked, questions, typed]);
-
-  const complete = questions.every((question) => answers[question.question]);
+  const answers = useMemo(
+    () => buildAnswers(questions, picked, typed),
+    [picked, questions, typed],
+  );
+  const complete = isComplete(questions, answers);
 
   return (
     <>
