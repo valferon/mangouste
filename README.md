@@ -103,20 +103,23 @@ mode bits, so the behaviour has to be redesigned, not ported.
 
 ## Icon
 
-Two pieces of source art, both in `src-tauri/icons/source/`:
+`src-tauri/icons/source/mongoose.svg` is the whole thing: launcher icon, titlebar
+mark, and the image at the top of this file. The path is the one `MongooseLogo`
+draws in `src/lib/icons.tsx`, lifted out of its 24-unit box — edit both or
+neither. Filled rather than stroked, on a dark plaque rather than bare, because
+both decisions are what let it survive being drawn at 32 px in a dock and at
+`currentColor` against an unknown page background.
 
-- `mangouste.svg` — the launcher icon: the three-pane workbench, one amber node
-  in the sessions rail
-- `mongoose.svg` — the brand mark, on the same dark plaque. The path is the one
-  `MongooseLogo` draws in `src/lib/icons.tsx`, lifted out of its 24-unit box so a
-  README and a titlebar can share a drawing; edit both or neither
-
-Regenerate every raster size from the launcher art:
+Regenerate every raster size from it:
 
 ```bash
-convert -background none src-tauri/icons/source/mangouste.svg -resize 1024x1024 /tmp/icon.png
+convert -background none src-tauri/icons/source/mongoose.svg -resize 1024x1024 /tmp/icon.png
 npx tauri icon /tmp/icon.png
 ```
+
+`mangouste.svg` beside it is the previous mark — the three-pane workbench, one
+amber node in the sessions rail. Nothing consumes it now; it is kept because it
+is the better drawing of what the app *does*, if the animal ever wears thin.
 
 The dock shows a generic gear under `npm run app`: a `tauri dev` window has no
 `.desktop` file, so the shell cannot map the window to an application and falls
