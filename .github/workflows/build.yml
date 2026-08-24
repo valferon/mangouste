@@ -90,6 +90,20 @@ jobs:
       - name: Bundle
         run: npx tauri build --target ${{ matrix.bundle-target }} --bundles ${{ matrix.bundles }}
 
+      # An arm64 binary with no valid signature is killed on launch, not merely
+      # warned about, so an unsigned bundle is not a lesser product -- it is one
+      # that cannot start. `signingIdentity: "-"` in tauri.conf.json asks the
+      # bundler for an ad-hoc signature; this asserts it actually applied one,
+      # since the failure would otherwise only show up on a user's Mac.
+      - name: Verify the macOS bundle is signed
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find src-tauri/target/${{ matrix.bundle-target }}/release/bundle \
+                 -maxdepth 2 -name '*.app' -print -quit)"
+          test -n "$app" || { echo "no .app was bundled"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=2 "$app"
+
       # Tauri hardcodes the pre-t64 `libgtk-3-0` into Depends, which has no
       # candidate on 24.04, so the generated .deb will not install until the
       # field is rewritten. See scripts/fix-deb-depends.sh.

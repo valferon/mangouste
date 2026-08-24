@@ -1,13 +1,15 @@
 //! Claude subscription usage — the same data the `/usage` command shows.
 //!
-//! Reads the user's own OAuth access token from `~/.claude/.credentials.json`
-//! and calls Anthropic's usage endpoint with it. The token is read at call time,
+//! Reads the user's own OAuth access token from wherever the CLI put it — a
+//! `~/.claude/.credentials.json` file, or the login keychain on macOS — and
+//! calls Anthropic's usage endpoint with it. The token is read at call time,
 //! used only as a request header, and never logged, cached, or returned to the
 //! frontend.
 //!
 //! Off unless the frontend asks: nothing here touches the token or the network
 //! until `fetch_usage` is actually invoked.
 
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -49,17 +51,71 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Read the Claude Code OAuth access token from the local credentials file.
+/// The keychain item the CLI writes on macOS.
 ///
-/// Returns the token by value so the caller can hand it straight to the request
-/// builder; it is never stored anywhere else.
-fn read_access_token() -> Result<String, String> {
+/// There is no credentials file there: the CLI stores the same JSON as a
+/// generic password instead, so reading the file would report "not signed in"
+/// on a machine that is. Matched by service alone rather than service+account,
+/// because the account is whichever local user wrote it.
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The credentials JSON out of the login keychain, or None if it is not there.
+///
+/// Shelling out to `security` rather than linking a keychain crate: the
+/// framework call would need an Objective-C bridge in the build for one string
+/// read, and `security` is part of the OS. The first read raises the system's
+/// own "allow access" prompt, which is the user's to answer — and answering
+/// "Always Allow" is what makes it silent from then on.
+///
+/// Compiled everywhere, reached only on macOS, so a change to it is checked by
+/// a build on either host.
+fn keychain_credentials() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = Command::new("security")
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!raw.is_empty()).then_some(raw)
+}
+
+/// The credentials JSON, from wherever this platform's CLI keeps it.
+///
+/// The keychain leads on macOS because that is the only place the CLI writes;
+/// the file is still tried after it, since an older CLI or a
+/// `CLAUDE_CODE_USE_KEYCHAIN=0` install leaves one there.
+fn read_credentials() -> Result<String, String> {
+    if let Some(raw) = keychain_credentials() {
+        return Ok(raw);
+    }
     let path = dirs::home_dir()
         .ok_or("no home directory")?
         .join(".claude")
         .join(".credentials.json");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read credentials: {e}"))?;
+    std::fs::read_to_string(&path).map_err(|e| {
+        if cfg!(target_os = "macos") {
+            format!(
+                "could not read credentials from the login keychain or {}: {e}. \
+                 Sign in with the CLI first, and allow the keychain prompt.",
+                path.display()
+            )
+        } else {
+            format!("could not read credentials: {e}")
+        }
+    })
+}
+
+/// Read the Claude Code OAuth access token.
+///
+/// Returns the token by value so the caller can hand it straight to the request
+/// builder; it is never stored anywhere else.
+fn read_access_token() -> Result<String, String> {
+    let raw = read_credentials()?;
     let parsed: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("credentials not valid JSON: {e}"))?;
 

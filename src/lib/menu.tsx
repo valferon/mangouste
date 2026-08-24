@@ -41,7 +41,7 @@ import {
   undoIn,
 } from "./editing";
 import { openExternal } from "./ipc";
-import { CHORD } from "./keybindings";
+import { CHORD, formatChord } from "./keybindings";
 import {
   entriesAtLevel,
   expand,
@@ -512,7 +512,9 @@ function Panel({ entries, level, path, x, y, flipTo, onHover, onPick }: PanelPro
                 <span className="menu-check">{entry.checked ? "✓" : ""}</span>
               )}
               <span className="menu-label">{entry.label}</span>
-              {entry.accelerator && <span className="menu-accel">{entry.accelerator}</span>}
+              {entry.accelerator && (
+                <span className="menu-accel">{formatChord(entry.accelerator)}</span>
+              )}
               {submenu && <span className="menu-arrow">›</span>}
             </div>
           );

@@ -1,5 +1,6 @@
 mod chats;
 mod claude;
+mod env;
 mod git;
 mod primary;
 mod permission;
@@ -14,7 +15,8 @@ use std::time::Duration;
 
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 pub use permission::run_permission_server;
@@ -64,9 +66,89 @@ fn watch_sessions(app: AppHandle) {
     });
 }
 
+/// The macOS menu bar.
+///
+/// macOS needs a real menu for reasons that have nothing to do with menus: a
+/// WKWebView gets ⌘C/⌘V/⌘Z from the Edit menu's items, not from the webview, so
+/// an app without one cannot copy or paste at all. Tauri knows this and installs
+/// a default menu when none is set — but its File and Window submenus both carry
+/// Close Window, so ⌘W closes the only window there is, and closing that window
+/// kills every `claude` this process owns. On a workbench whose whole premise is
+/// unattended sessions, a reflex keystroke from the browser must not end eight
+/// of them.
+///
+/// So the default is replaced by this: the same editing and window items, no
+/// Close Window, and ⌘W left to the frontend — where it closes a tab, which is
+/// what it does in the editors this borrows its keymap from.
+///
+/// Quit is kept, and stays the way out: `RunEvent::Exit` still reaps the
+/// children. Compiled on every platform so it typechecks off macOS, installed
+/// only there — Linux and Windows draw the menu bar inside the window.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mac_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    let package = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(package.name.clone()),
+        version: Some(package.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|publisher| vec![publisher]),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app,
+        &package.name,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+
+    // The whole reason a menu exists here. The items are the AppKit responders,
+    // so they reach the webview's own selection rather than going through the
+    // clipboard commands in `primary.rs`.
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(chats::ChatManager::default()))
@@ -76,6 +158,13 @@ pub fn run() {
         .manage(stats::StatsCache::default())
         .setup(|app| {
             watch_sessions(app.handle().clone());
+            // Warm the login-shell PATH probe off the main thread: the first
+            // chat start is a synchronous command, and on macOS resolving that
+            // PATH means running the user's shell. Nothing waits on this — a
+            // caller that arrives first blocks on the same cache.
+            std::thread::spawn(|| {
+                let _ = env::child_path();
+            });
 
             let permission: tauri::State<'_, Arc<permission::PermissionState>> = app.state();
             let manager: tauri::State<'_, Arc<chats::ChatManager>> = app.state();
@@ -201,7 +290,14 @@ pub fn run() {
             stats::stats_summary,
             // tool permissions
             claude::permission_respond,
-        ])
+        ]);
+
+    // Only macOS gets a native menu; the other platforms draw the menu bar
+    // inside the window, and a second one above it would be a duplicate.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(mac_menu);
+
+    builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {

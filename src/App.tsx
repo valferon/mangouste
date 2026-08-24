@@ -38,8 +38,8 @@ import {
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
 import { FilesIcon, MongooseLogo, PencilIcon, SourceControlIcon } from "./lib/icons";
-import { runChord, type Command } from "./lib/commands";
-import { CHORD } from "./lib/keybindings";
+import { claimedByShell, runChord, type Command } from "./lib/commands";
+import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
 import {
   KEYS,
@@ -1439,7 +1439,7 @@ function Workbench() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const eligible = inTerminal(event)
-        ? commands.filter((command) => !command.shellFirst)
+        ? commands.filter((command) => !claimedByShell(command))
         : commands;
       if (!runChord(eligible, event)) return;
       // Swallowed, not just defaulted: xterm listens on its own textarea, so an
@@ -1472,7 +1472,7 @@ function Workbench() {
         >
           {/* `pop()` on a split never returns undefined, only "" — so `||`. */}
           <span className="repo-name">{activeRepo.split("/").pop() || "select a repo"}</span>
-          <span className="repo-hint">Ctrl+P</span>
+          <span className="repo-hint">{formatChord(CHORD.quickOpen)}</span>
         </button>
         <span className="spacer" />
         <button
@@ -1520,7 +1520,7 @@ function Workbench() {
                 aria-label={label}
                 data-active={active}
                 onClick={() => toggleSidebarView(view)}
-                title={`${label} (${hint})`}
+                title={`${label} (${formatChord(hint)})`}
               >
                 <Glyph />
               </button>

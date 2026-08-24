@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { highlightCode } from "../lib/highlight";
 import { clipboardSet, openExternal } from "../lib/ipc";
+import { isMac } from "../lib/platform";
 import { useMenu } from "../lib/menu";
 
 interface MarkdownProps {
@@ -131,7 +132,7 @@ export const Markdown = memo(function Markdown({ children, onOpenFile }: Markdow
                   });
                 }}
                 title={`${href} — click to open, ${
-                  navigator.platform.includes("Mac") ? "⌘" : "Ctrl"
+                  isMac() ? "⌘" : "Ctrl"
                 }-click to copy`}
               >
                 {content}

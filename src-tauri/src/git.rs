@@ -48,14 +48,30 @@ pub struct RepoStatus {
     pub files: Vec<FileStatus>,
 }
 
+/// git's own message, or a better one when the failure is not about the repo.
+///
+/// macOS ships `/usr/bin/git` as an Xcode shim, so `git` resolves and runs on a
+/// machine that has no git at all — it just fails with `xcrun`'s wording, which
+/// says nothing about what to install. Everything else is passed through
+/// untouched: git's errors are good, and rewording them would only hide them.
+fn explain(stderr: &str) -> String {
+    let message = stderr.trim();
+    if message.contains("invalid active developer path") || message.contains("xcrun: error") {
+        return "git is not installed: the Xcode command line tools are missing. \
+                Run `xcode-select --install`, or install git with Homebrew."
+            .to_string();
+    }
+    message.to_string()
+}
+
 fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::env::with_child_path(&mut Command::new("git"))
         .args(args)
         .current_dir(cwd)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(explain(&String::from_utf8_lossy(&output.stderr)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -209,7 +225,7 @@ fn patch_cut_marker() -> String {
 /// `allow_diff_exit` tolerates exit 1, which `diff --no-index` uses to mean
 /// "the files differ" rather than to report a failure.
 fn git_patch(cwd: &str, args: &[&str], allow_diff_exit: bool) -> Result<String, String> {
-    let mut child = Command::new("git")
+    let mut child = crate::env::with_child_path(&mut Command::new("git"))
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -395,7 +411,7 @@ pub fn git_commit(cwd: String, message: String, amend: Option<bool>) -> Result<S
 /// the app is killed. Failing fast with git's own error is far better: the user
 /// can fix their credential helper and retry.
 fn git_network(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::env::with_child_path(&mut Command::new("git"))
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -411,7 +427,7 @@ fn git_network(cwd: &str, args: &[&str]) -> Result<String, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        return Err(stderr.trim().to_string());
+        return Err(explain(&stderr));
     }
     let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
     Ok(combined.trim().to_string())

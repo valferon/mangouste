@@ -3,6 +3,7 @@ import {
   byId,
   commandEntry,
   duplicateChords,
+  claimedByShell,
   matchChord,
   parseChord,
   runChord,
@@ -26,7 +27,13 @@ function press(
 
 describe("parseChord", () => {
   it("maps letters to their physical code", () => {
-    expect(parseChord("Ctrl+N")).toEqual({ code: "KeyN", ctrl: true, shift: false, alt: false });
+    expect(parseChord("Ctrl+N")).toEqual({
+      code: "KeyN",
+      ctrl: true,
+      shift: false,
+      alt: false,
+      meta: false,
+    });
   });
 
   it("maps digits, which is the case `key` gets wrong", () => {
@@ -37,6 +44,7 @@ describe("parseChord", () => {
       ctrl: true,
       shift: true,
       alt: false,
+      meta: false,
     });
   });
 
@@ -52,6 +60,7 @@ describe("parseChord", () => {
     expect(parseChord("Escape")?.code).toBe("Escape");
     expect(parseChord("Shift+Enter")).toEqual({
       code: "Enter",
+      meta: false,
       ctrl: false,
       shift: true,
       alt: false,
@@ -190,6 +199,50 @@ describe("duplicateChords", () => {
         { id: "b", label: "B", run: () => {} },
       ]),
     ).toEqual([]);
+  });
+});
+
+describe("matchChord and Cmd", () => {
+  it("fires a Cmd chord only with Cmd held", () => {
+    expect(matchChord("Cmd+P", press("KeyP", { meta: true }))).toBe(true);
+    expect(matchChord("Cmd+P", press("KeyP", { ctrl: true }))).toBe(false);
+    expect(matchChord("Cmd+P", press("KeyP", {}))).toBe(false);
+  });
+
+  it("keeps a Ctrl chord off Cmd", () => {
+    // The two modifiers are the same key on neither platform, and a chord that
+    // answered both would fire twice on a Mac reading a Linux keymap.
+    expect(matchChord("Ctrl+P", press("KeyP", { meta: true }))).toBe(false);
+    expect(matchChord("Ctrl+P", press("KeyP", { ctrl: true }))).toBe(true);
+  });
+
+  it("matches the both-modifiers chord macOS uses for full screen", () => {
+    expect(matchChord("Ctrl+Cmd+F", press("KeyF", { ctrl: true, meta: true }))).toBe(true);
+    expect(matchChord("Ctrl+Cmd+F", press("KeyF", { ctrl: true }))).toBe(false);
+  });
+});
+
+describe("claimedByShell", () => {
+  const command = (chord: string) => ({
+    id: "x",
+    label: "X",
+    chord,
+    shellFirst: true,
+    run: () => {},
+  });
+
+  it("stands down for a Ctrl chord readline wants", () => {
+    expect(claimedByShell(command("Ctrl+W"))).toBe(true);
+  });
+
+  it("does not stand down once the chord has moved to Cmd", () => {
+    // The shell binds Ctrl+W, not Cmd+W. Dropping the command on macOS anyway
+    // left the keystroke doing nothing at all inside a terminal.
+    expect(claimedByShell(command("Cmd+W"))).toBe(false);
+  });
+
+  it("says nothing about a command that never claimed the exception", () => {
+    expect(claimedByShell({ id: "x", label: "X", chord: "Ctrl+W", run: () => {} })).toBe(false);
   });
 });
 

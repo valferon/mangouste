@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { formatAppInfo, readAppInfo, type AppInfo } from "../lib/appInfo";
 import { copyText } from "../lib/editing";
 import { openExternal } from "../lib/ipc";
-import { SHORTCUT_GROUPS } from "../lib/keybindings";
+import { formatChord, SHORTCUT_GROUPS } from "../lib/keybindings";
 
 /** Where Help ▸ points. The only hand-written strings in the Help menu. */
 export const REPO_URL = "https://github.com/valferon/mangouste";
@@ -140,7 +140,7 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
               <div className="shortcut-title">{group.title}</div>
               {group.rows.map((row) => (
                 <div className="shortcut-row" key={`${group.title}:${row.keys}:${row.what}`}>
-                  <span className="shortcut-keys">{row.keys}</span>
+                  <span className="shortcut-keys">{formatChord(row.keys)}</span>
                   <span className="shortcut-what">{row.what}</span>
                 </div>
               ))}

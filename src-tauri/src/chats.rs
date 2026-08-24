@@ -460,7 +460,7 @@ fn haiku_title(prompt: &str) -> Option<String> {
          with this request. Reply with only the title — no quotes, no \
          trailing punctuation.\n\nRequest: {prompt}"
     );
-    let mut child = Command::new(claude_binary())
+    let mut child = crate::env::with_child_path(&mut Command::new(claude_binary()))
         .args(["-p", "--model", "haiku"])
         .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_TITLEGEN)
         .arg(&ask)
@@ -580,7 +580,7 @@ pub fn expand_search_terms(query: String) -> Result<Vec<String>, String> {
          concrete technical nouns implied by the query, and likely error or \
          command strings. One term per line, nothing else."
     );
-    let mut child = Command::new(claude_binary())
+    let mut child = crate::env::with_child_path(&mut Command::new(claude_binary()))
         .args(["-p", "--model", "haiku"])
         .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_SEARCH)
         .arg(&ask)
@@ -778,8 +778,11 @@ fn command_line_of(pid: u32) -> Option<String> {
 /// Same line from `ps`, which already joins argv with spaces.
 #[cfg(not(target_os = "linux"))]
 fn command_line_of(pid: u32) -> Option<String> {
+    // `-ww`: BSD `ps` truncates each line to the terminal width, and with no
+    // terminal it truncates to 80 columns — which is well inside the length of
+    // the `node .../claude ...` lines this exists to show.
     let output = Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     shape_command(&String::from_utf8_lossy(&output.stdout))
@@ -820,10 +823,25 @@ fn chat_entrypoint() -> String {
     }
 }
 
+/// The `claude` to run.
+///
+/// An absolute path rather than a bare name wherever one can be found: the last
+/// resort leans on the child's PATH, and on a windowed macOS launch that PATH is
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — see `crate::env`.
+///
+/// `child_path_dirs` leads because it is what the word `claude` means in the
+/// user's own terminal, which is the CLI they authenticated. It is empty off
+/// macOS, so the order below is unchanged there.
 fn claude_binary() -> String {
     if let Ok(explicit) = std::env::var("MANGOUSTE_CLAUDE_BIN") {
         if !explicit.is_empty() {
             return explicit;
+        }
+    }
+    for dir in crate::env::child_path_dirs() {
+        let candidate = dir.join("claude");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
         }
     }
     if let Some(home) = dirs::home_dir() {
@@ -831,13 +849,20 @@ fn claude_binary() -> String {
             home.join(".local/bin/claude"),
             home.join(".claude/local/claude"),
             home.join(".bun/bin/claude"),
+            home.join(".volta/bin/claude"),
         ] {
             if candidate.is_file() {
                 return candidate.to_string_lossy().into_owned();
             }
         }
     }
-    for candidate in ["/usr/local/bin/claude", "/usr/bin/claude"] {
+    // `/opt/homebrew` is Apple Silicon's Homebrew prefix and is on no default
+    // PATH; `/usr/local` is Intel's, and also where a plain `npm -g` lands.
+    for candidate in [
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+    ] {
         if std::path::Path::new(candidate).is_file() {
             return candidate.to_string();
         }
@@ -991,6 +1016,7 @@ pub fn start(
     }
 
     let mut command = Command::new(claude_binary());
+    crate::env::with_child_path(&mut command);
     command
         .args(build_args(&options, permission_config.as_deref()))
         .env("CLAUDE_CODE_ENTRYPOINT", chat_entrypoint())

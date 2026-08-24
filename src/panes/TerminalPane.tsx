@@ -4,6 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
+import { matchChord } from "../lib/commands";
+import { isMac } from "../lib/platform";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { clipboardGet, onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
 
@@ -132,11 +134,17 @@ export function TerminalPane({
     if (!host) return;
 
     const term = new Terminal({
-      fontFamily: "'JetBrains Mono', 'Ubuntu Mono', monospace",
+      // SF Mono and Menlo are macOS's; Menlo is the one that is always there.
+      fontFamily:
+        "'JetBrains Mono', 'SF Mono', Menlo, 'Ubuntu Mono', monospace",
       fontSize: 13,
       lineHeight: 1.2,
       cursorBlink: true,
       allowProposedApi: true,
+      // Option as Meta, so Alt+B and Alt+F walk words in readline the way they
+      // do in Terminal.app. Without it macOS composes an accented character and
+      // the shell sees a letter.
+      macOptionIsMeta: isMac(),
       scrollback: 10000,
       theme: readTheme(),
       // Backstop for any colour a program picks that still lands too close to
@@ -214,49 +222,84 @@ export function TerminalPane({
       writePty(data);
     }).dispose);
 
-    // Selection publishes to PRIMARY, matching every other X11 terminal.
-    disposables.push(term.onSelectionChange(() => {
-      const selection = term.getSelection();
-      if (selection) void primarySet(selection);
-    }).dispose);
+    // Selection publishes to PRIMARY, matching every other X11 terminal, and
+    // middle-click pastes it back. Both are X11 conventions and both are skipped
+    // on macOS, where the commands behind them are inert — publishing a
+    // selection there would be an IPC round trip per drag for nothing.
+    if (!isMac()) {
+      disposables.push(term.onSelectionChange(() => {
+        const selection = term.getSelection();
+        if (selection) void primarySet(selection);
+      }).dispose);
 
-    // Middle-click pastes PRIMARY into the shell.
-    const onMouseDown = (event: MouseEvent) => {
-      if (event.button !== 1) return;
-      event.preventDefault();
-      if (deadRef.current) {
-        sayDead();
-        return;
-      }
-      void primaryGet().then((text) => {
-        if (text) writePty(text);
-      });
-    };
-    host.addEventListener("mousedown", onMouseDown, true);
-    disposables.push(() => host.removeEventListener("mousedown", onMouseDown, true));
+      const onMouseDown = (event: MouseEvent) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        if (deadRef.current) {
+          sayDead();
+          return;
+        }
+        void primaryGet().then((text) => {
+          if (text) writePty(text);
+        });
+      };
+      host.addEventListener("mousedown", onMouseDown, true);
+      disposables.push(() => host.removeEventListener("mousedown", onMouseDown, true));
+    }
 
-    // Ctrl+Shift+C / Ctrl+Shift+V, since Ctrl+C must reach the shell.
-    // Not pushed onto `disposables`: this returns void, so the old code was
+    // Copy and paste, off the same chord strings the context menu prints:
+    // Ctrl+Shift+C/V on X11, where plain Ctrl+C has to reach the shell, and
+    // Cmd+C/V on macOS, where it does not.
+    //
+    // The clipboard goes through the Rust commands rather than
+    // `navigator.clipboard`, which is gated on a user gesture the webview does
+    // not always credit and, in WebKit, can raise a paste confirmation of its
+    // own. Not pushed onto `disposables`: this returns void, so the old code was
     // storing `undefined` and throwing on teardown.
     term.attachCustomKeyEventHandler((event) => {
-        if (!event.ctrlKey || !event.shiftKey || event.type !== "keydown") return true;
-        if (event.key === "C") {
-          const selection = term.getSelection();
-          if (selection) void navigator.clipboard.writeText(selection);
+      if (event.type !== "keydown") return true;
+      if (matchChord(CHORD.terminalCopy, event)) {
+        const selection = term.getSelection();
+        if (selection) void copyText(selection);
+        return false;
+      }
+      if (matchChord(CHORD.terminalPaste, event)) {
+        if (deadRef.current) {
+          sayDead();
           return false;
         }
-        if (event.key === "V") {
-          if (deadRef.current) {
-            sayDead();
-            return false;
-          }
-          void navigator.clipboard.readText().then((text) => {
-            if (text) writePty(text);
-          });
-          return false;
-        }
+        void clipboardGet().then((text) => {
+          if (text) writePty(text);
+        });
+        return false;
+      }
       return true;
     });
+
+    // macOS second path to the same copy.
+    //
+    // AppKit offers a ⌘-keystroke to the key window's view hierarchy before the
+    // main menu, so the handler above should see ⌘C first — but WKWebView
+    // decides for itself whether a JS `preventDefault` counts as handling it,
+    // and if it does not, the Edit menu's `copy:` runs instead. That reaches the
+    // *document* selection, and xterm draws its selection on a canvas where the
+    // document has none, so the copy would silently produce nothing.
+    //
+    // So the resulting `copy` event is answered too: whichever route the
+    // keystroke took, the terminal's own selection is what lands on the
+    // clipboard. Mac only — on X11 a Ctrl+C that has to reach the shell also
+    // fires this event, and clobbering the clipboard on every interrupt is not
+    // what anyone pressed it for.
+    if (isMac()) {
+      const onCopy = (event: ClipboardEvent) => {
+        const selection = term.getSelection();
+        if (!selection) return;
+        event.preventDefault();
+        void copyText(selection);
+      };
+      host.addEventListener("copy", onCopy, true);
+      disposables.push(() => host.removeEventListener("copy", onCopy, true));
+    }
 
     const dataSubscription = onPtyData((event) => {
       if (event.id !== id || disposed) return;

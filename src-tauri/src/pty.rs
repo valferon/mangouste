@@ -87,8 +87,10 @@ pub struct TerminalInfo {
     pub alive: bool,
 }
 
+/// The user's shell. See `crate::env::user_shell` for why `$SHELL` alone is not
+/// enough on macOS.
 fn login_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    crate::env::user_shell()
 }
 
 /// Open a terminal running the user's login shell in `cwd`.

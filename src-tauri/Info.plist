@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS-only Info.plist keys, merged into the generated one at bundle time.
+
+  The usage strings are what the system quotes in its own permission dialog the
+  first time the app touches one of these folders. They are not optional in
+  practice: a repository under ~/Documents or ~/Desktop is behind macOS's
+  file-access consent, and a prompt with no explanation is one people deny.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>mangouste needs access to open repositories and Claude Code sessions kept in your Documents folder.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>mangouste needs access to open repositories and Claude Code sessions kept on your Desktop.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>mangouste needs access to open repositories and Claude Code sessions kept in your Downloads folder.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

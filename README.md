@@ -80,9 +80,15 @@ sudo apt update && sudo apt install -y \
   librsvg2-dev patchelf
 ```
 
+On macOS, Rust (via rustup) and the Xcode command line tools
+(`xcode-select --install`) are the whole list — the webview is the system's.
+
 `claude` must be on PATH, or at one of the probed locations
-(`~/.local/bin`, `~/.claude/local`, `~/.bun/bin`, `/usr/local/bin`, `/usr/bin`).
-Override with `MANGOUSTE_CLAUDE_BIN`.
+(`~/.local/bin`, `~/.claude/local`, `~/.bun/bin`, `~/.volta/bin`,
+`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). Override with
+`MANGOUSTE_CLAUDE_BIN`. On macOS the search starts from the PATH the *login
+shell* reports rather than the one the app inherited — see
+[Platforms](#platforms).
 
 ## Run
 
@@ -112,24 +118,53 @@ macOS builds on CI (`.github/workflows/build.yml`, `macos-14`) as a single
 universal `.dmg`: the runner is Apple Silicon and its Xcode carries both SDK
 slices, so the Intel half is a cross-compile. Tests run native arm64, because
 `universal-apple-darwin` is a Tauri pseudo-target that `cargo test --target`
-will not accept. Two things behave differently there:
+will not accept.
 
-- middle-click paste does nothing. PRIMARY is an X11 selection with no macOS
-  equivalent, so `primary.rs` compiles to inert stubs off Linux
-- the "waiting on" line under a running turn stays blank. It reads the process
-  group from `/proc` on Linux and from `ps` elsewhere; the `ps` path is tested
-  but has not been exercised on real hardware
-
-The `.dmg` is unsigned and un-notarized, so Gatekeeper will refuse it until the
-quarantine attribute is cleared:
+The `.dmg` is ad-hoc signed (`signingIdentity: "-"`) but not notarized. Ad-hoc
+is not cosmetic on Apple Silicon: an arm64 binary with no valid signature is
+killed on launch rather than warned about, so CI asserts the signature exists
+before the artifact is uploaded. Notarization it does not have, so Gatekeeper
+still quarantines the download:
 
 ```bash
-xattr -d com.apple.quarantine /Applications/mangouste.app
+xattr -dr com.apple.quarantine /Applications/mangouste.app
 ```
 
-Usage figures are also blank on macOS. `usage.rs` reads the OAuth token from
-`~/.claude/.credentials.json`, which is the Linux location; on macOS the CLI
-keeps it in the login Keychain instead, so the read fails.
+Four things are macOS-specific rather than shared, and each is a real difference
+in the platform rather than a shim:
+
+- **PATH.** A windowed launch inherits `/usr/bin:/bin:/usr/sbin:/sbin` and
+  nothing else, so Homebrew, nvm, bun and `~/.local/bin` are all invisible to a
+  double-clicked app while being on the PATH of every terminal on the machine.
+  Worse than a missing `claude`: the CLI is a node script, so finding it by
+  absolute path still fails when its `#!/usr/bin/env node` cannot resolve
+  `node`. `src-tauri/src/env.rs` asks `$SHELL -ilc` for its PATH once, in the
+  background at startup, and hands that to every child — `claude` and `git`
+  both. `-ilc` rather than `-lc` because zsh only reads `.zshrc` when
+  interactive, and `.zshrc` is where Homebrew's own installer tells people to
+  put their PATH.
+- **The menu bar.** A WKWebView gets ⌘C/⌘V/⌘Z from a native Edit menu's items,
+  not from the webview, so an app without one cannot copy or paste at all. Tauri
+  installs a default menu for exactly this reason, but its File and Window
+  submenus both carry Close Window — and closing the only window kills every
+  `claude` this process owns. `mac_menu` in `lib.rs` replaces it with the same
+  editing and window items and no Close Window, leaving ⌘W to close a tab.
+- **The keymap.** Ctrl becomes Cmd, once, where the chord table is built; see
+  [Keybindings](#keybindings).
+- **Credentials.** The CLI keeps its OAuth token in the login keychain on macOS,
+  not in `~/.claude/.credentials.json`, so `usage.rs` reads it with `security
+  find-generic-password -s "Claude Code-credentials"` and falls back to the file.
+  The first read raises the system's own access prompt; answering *Always Allow*
+  is what makes it silent from then on.
+
+Selecting text still does not publish to PRIMARY there, because PRIMARY is an
+X11 selection with no macOS equivalent — `primary.rs` compiles to inert stubs
+and the frontend bridge does not install. Middle-click still closes a tab; it
+just pastes nothing.
+
+One thing remains unverified on real hardware: the "waiting on" line under a
+running turn reads the process group from `/proc` on Linux and from `ps`
+elsewhere, and the `ps` path is unit-tested but has never run on a Mac.
 
 Windows is not supported and is not built. The Rust side is Unix-only in about
 two dozen places -- process groups and signals for tearing down a `claude`
@@ -350,7 +385,11 @@ history.
 ## Terminal
 
 `Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the
-one in front side by side, `Ctrl+Shift+W` closes a pane. `Ctrl+Shift+M` moves the
+one in front side by side, `Ctrl+Shift+W` closes a pane. Copy and paste are
+`Ctrl+Shift+C/V`, because plain `Ctrl+C` has to reach the shell — and `Cmd+C/V`
+on macOS, where it does not. Both go through the Rust clipboard commands rather
+than `navigator.clipboard`, which is gated on a user gesture the webview does
+not always credit. `Ctrl+Shift+M` moves the
 whole panel between the bottom of the column and the right of the chat, and each
 dock remembers the size it was last dragged to under its own key — a stored
 height means nothing as a width.
@@ -377,8 +416,8 @@ looking at.
 ## Tests
 
 Rust owns the parsing and the process handling, and has the older suite:
-`cargo test`, 16 tests over the transcript scanner, the stats accumulator, the
-`ps` shapes and the workspace writer.
+`cargo test`, 19 tests over the transcript scanner, the stats accumulator, the
+`ps` shapes, the login-shell PATH probe and the workspace writer.
 
 The frontend suite is `npm test` (vitest, node environment, no jsdom) and
 deliberately covers only pure functions: the menu model's tidy/expand rules and
@@ -392,6 +431,9 @@ string, because `Number("")` is `0` and passes `isFinite`. That is a collapsed
 pane size, restored silently on every launch.
 
 ## X11 selection behaviour
+
+Linux only: everything in this section is skipped on macOS, where PRIMARY does
+not exist and the native Edit menu carries the clipboard.
 
 WebKitGTK does not wire PRIMARY into webview-editable content, so both halves of
 the X11 convention are reimplemented:
@@ -424,6 +466,13 @@ Clipboard work goes through the Rust commands rather than
 item does not count as. Nothing in a context menu mutates the filesystem: the
 tree offers open, copy and reveal, and the only destructive entry anywhere is
 the SCM pane's Discard, which keeps its confirmation.
+
+macOS has a second, native menu bar above this one — see
+[Platforms](#platforms) for why it has to exist. It carries only what AppKit
+insists on owning (about, hide, quit, and the editing items ⌘C/⌘V/⌘Z are routed
+through), so File, View, Terminal and Help stay in the window with their app-
+specific entries, and the in-window Edit menu keeps Copy Active Path and Copy
+Session Id.
 
 Help ▸ About reads its version from Tauri (which reads `tauri.conf.json`) and
 its commit and build stamp from Vite `define`, so a release updates it without
@@ -486,7 +535,25 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Ctrl+Shift+C/V` | Copy/paste in terminal |
 
 `Ctrl+N` and `Ctrl+W` are readline chords too, so both stand down when the
-keystroke landed inside a terminal.
+keystroke landed inside a terminal. The exception is keyed on the chord, not the
+command: once the chord moves to Cmd there is no shell to yield to, so it stops
+standing down.
+
+On macOS the table is rewritten once, at import — Ctrl becomes Cmd, which is
+what every editor on that platform means by these chords and what leaves the
+system's own Ctrl+letter bindings inside text fields alone. Four entries are not
+a mechanical rename:
+
+| Key | macOS | Why |
+| --- | --- | --- |
+| `Ctrl+\`` | `Ctrl+\`` | ⌘\` is cycle-windows; the editors keep this one on Ctrl |
+| `F11` | `Ctrl+Cmd+F` | F11 is a media key without holding fn |
+| `Ctrl+Shift+C/V` | `Cmd+C/V` | Ctrl+Shift only exists so Ctrl+C reaches the shell |
+| `Middle click` | — | no PRIMARY to paste |
+
+The chord string is still both the binding and the label: `matchChord` parses
+what the accelerator column shows, and `formatChord` is presentation only — it
+prints `Cmd+Shift+E` as `⇧⌘E`, in the order macOS prints modifiers.
 
 ## Switching repos
 

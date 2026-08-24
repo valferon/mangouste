@@ -75,16 +75,18 @@ interface Chord {
   ctrl: boolean;
   shift: boolean;
   alt: boolean;
+  /** Cmd on macOS, Super elsewhere. Only macOS chords name it. */
+  meta: boolean;
 }
 
-/** Parse "Ctrl+Shift+E". Returns null for anything that is not a key chord. */
+/** Parse "Ctrl+Shift+E" or "Cmd+Shift+E". Null for anything that is not a key chord. */
 export function parseChord(chord: string): Chord | null {
   const parts = chord.split("+").map((part) => part.trim());
   const key = parts.pop();
   if (!key) return null;
   const code = codeFor(key);
   if (code === null) return null;
-  const chordKeys = { code, ctrl: false, shift: false, alt: false };
+  const chordKeys = { code, ctrl: false, shift: false, alt: false, meta: false };
   for (const part of parts) {
     switch (part.toLowerCase()) {
       case "ctrl":
@@ -95,7 +97,12 @@ export function parseChord(chord: string): Chord | null {
         chordKeys.shift = true;
         break;
       case "alt":
+      case "option":
         chordKeys.alt = true;
+        break;
+      case "cmd":
+      case "meta":
+        chordKeys.meta = true;
         break;
       default:
         // An unknown modifier must not silently widen the chord into one that
@@ -107,12 +114,25 @@ export function parseChord(chord: string): Chord | null {
 }
 
 /**
+ * Is this command's chord one the shell would have wanted?
+ *
+ * `shellFirst` records that readline has a prior claim, but the claim is on the
+ * *chord*, not the command: on macOS these actions move to Cmd, which no shell
+ * binds, so standing down there would leave the keystroke doing nothing at all.
+ */
+export function claimedByShell(command: Command): boolean {
+  if (!command.shellFirst || !command.chord) return false;
+  const parsed = parseChord(command.chord);
+  return parsed !== null && parsed.ctrl && !parsed.meta;
+}
+
+/**
  * Does this keystroke *exactly* match the chord?
  *
  * Exactly, including the modifiers the chord does not name: `Ctrl+N` must stay
- * off `Ctrl+Shift+N`, or two commands answer one keystroke. Meta is never part
- * of a chord here and never tolerated, so the desktop's own super-key bindings
- * pass through untouched.
+ * off `Ctrl+Shift+N`, or two commands answer one keystroke. That holds for Meta
+ * too — a chord that does not name Cmd does not fire with Cmd held, so a
+ * desktop's own super-key bindings still pass through untouched.
  */
 export function matchChord(chord: string, event: KeyboardEvent): boolean {
   const parsed = parseChord(chord);
@@ -122,7 +142,7 @@ export function matchChord(chord: string, event: KeyboardEvent): boolean {
     event.ctrlKey === parsed.ctrl &&
     event.shiftKey === parsed.shift &&
     event.altKey === parsed.alt &&
-    !event.metaKey
+    event.metaKey === parsed.meta
   );
 }
 

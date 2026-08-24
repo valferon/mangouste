@@ -6,9 +6,19 @@
  * place — the drift between a tooltip and the handler that used to implement it
  * is the whole reason this file exists. The handlers themselves still live where
  * the state they touch lives; this is the label, not the binding.
+ *
+ * On macOS the table is rewritten once, at import: Ctrl becomes Cmd, because
+ * that is what every editor on that platform means by these chords and because
+ * Ctrl+letter there is already spoken for by the system's emacs bindings inside
+ * text fields. The rewrite happens here rather than in the matcher so that a
+ * chord is still one string that is both the binding and the label — `matchChord`
+ * parses exactly what the accelerator column shows.
  */
 
-export const CHORD = {
+import { isMac } from "./platform";
+
+/** The chords as written for a PC keyboard. macOS reads them through `macChord`. */
+const BASE_CHORD = {
   menuBar: "F10",
   newSession: "Ctrl+N",
   quickOpen: "Ctrl+P",
@@ -48,6 +58,93 @@ export const CHORD = {
   primaryPaste: "Middle-click",
   closeTabAlt: "Middle-click",
 } as const;
+
+type ChordName = keyof typeof BASE_CHORD;
+
+/**
+ * The chords whose macOS spelling is not a Ctrl→Cmd rename.
+ *
+ * An empty string means the action does not exist on macOS at all.
+ */
+const MAC_CHORD: Partial<Record<ChordName, string>> = {
+  // Editors keep the terminal toggle on Ctrl on macOS too — Cmd+` is the
+  // system's cycle-windows chord, and muscle memory here follows VS Code.
+  toggleTerminal: "Ctrl+`",
+  // F11 is a brightness key on Apple keyboards without holding fn.
+  fullScreen: "Ctrl+Cmd+F",
+  // Cmd+Shift+5 is the system's screenshot recorder, which takes the keystroke
+  // first; Cmd+\\ is what the editors split with on macOS anyway.
+  splitTerminal: "Cmd+\\",
+  // Ctrl+Shift+C/V only exist on Linux because Ctrl+C has to reach the shell.
+  // Cmd is free of that constraint, so the terminal copies like everything else.
+  terminalCopy: "Cmd+C",
+  terminalPaste: "Cmd+V",
+  // PRIMARY is X11's. Middle-click still closes a tab; it just pastes nothing.
+  primaryPaste: "",
+};
+
+/** Mechanical rename: every Ctrl in a chord becomes Cmd. */
+export function macChord(chord: string): string {
+  return chord.replace(/\bCtrl\b/g, "Cmd");
+}
+
+/** The chord table as this platform spells it. Exported for its test. */
+export function resolveChords(
+  base: Record<ChordName, string>,
+  mac: boolean,
+): Record<ChordName, string> {
+  const resolved = {} as Record<ChordName, string>;
+  for (const name of Object.keys(base) as ChordName[]) {
+    resolved[name] = mac ? MAC_CHORD[name] ?? macChord(base[name]) : base[name];
+  }
+  return resolved;
+}
+
+export const CHORD: Record<ChordName, string> = resolveChords(BASE_CHORD, isMac());
+
+/* ---------- display ---------- */
+
+/** ⌃⌥⇧⌘, in the order macOS prints them. */
+const MAC_MODIFIER: Record<string, string> = {
+  ctrl: "⌃",
+  control: "⌃",
+  alt: "⌥",
+  option: "⌥",
+  shift: "⇧",
+  cmd: "⌘",
+  meta: "⌘",
+};
+const MAC_MODIFIER_ORDER = ["⌃", "⌥", "⇧", "⌘"];
+
+/** Keys macOS draws as a glyph rather than a word. */
+const MAC_KEY: Record<string, string> = {
+  Enter: "↩",
+  Escape: "⎋",
+  Tab: "⇥",
+  Space: "␣",
+};
+
+/**
+ * A chord as this platform writes it.
+ *
+ * Display only — never fed back to `parseChord`, which reads the `CHORD` strings
+ * themselves. On macOS "Cmd+Shift+E" prints as "⇧⌘E", because a mac user reading
+ * "Cmd+Shift+E" has to translate it and a modifier printed in the wrong order
+ * reads as a different app's shortcut.
+ */
+export function formatChord(chord: string, mac: boolean = isMac()): string {
+  if (!mac || !chord) return chord;
+  const parts = chord.split("+").map((part) => part.trim());
+  const key = parts.pop() ?? "";
+  const modifiers = parts.map((part) => MAC_MODIFIER[part.toLowerCase()]);
+  // An unknown modifier means this is not a chord we understand — a mouse
+  // gesture, or free text in the Help sheet. Leave it exactly as written.
+  if (modifiers.some((symbol) => symbol === undefined)) return chord;
+  modifiers.sort(
+    (a, b) => MAC_MODIFIER_ORDER.indexOf(a!) - MAC_MODIFIER_ORDER.indexOf(b!),
+  );
+  return modifiers.join("") + (MAC_KEY[key] ?? key);
+}
 
 export interface ShortcutGroup {
   title: string;
@@ -108,12 +205,19 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Source Control",
     rows: [{ keys: CHORD.commit, what: "Commit the staged changes" }],
   },
-  {
-    title: "X11 selection",
-    rows: [
-      { keys: "Select text", what: "Publishes to PRIMARY, as in every X11 app" },
-      { keys: CHORD.primaryPaste, what: "Paste PRIMARY at the caret" },
-      { keys: "Right-click", what: "Context menu for whatever is under the pointer" },
-    ],
-  },
+  isMac()
+    ? {
+        title: "Selection",
+        rows: [
+          { keys: "Right-click", what: "Context menu for whatever is under the pointer" },
+        ],
+      }
+    : {
+        title: "X11 selection",
+        rows: [
+          { keys: "Select text", what: "Publishes to PRIMARY, as in every X11 app" },
+          { keys: CHORD.primaryPaste, what: "Paste PRIMARY at the caret" },
+          { keys: "Right-click", what: "Context menu for whatever is under the pointer" },
+        ],
+      },
 ];

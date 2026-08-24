@@ -121,8 +121,11 @@
   --syn-tag: #569cd6;
   --syn-regexp: #d16969;
 
-  --font-ui: "Segoe UI", Ubuntu, "Droid Sans", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", "Ubuntu Mono", "Cascadia Mono", monospace;
+  --font-ui: -apple-system, "Segoe UI", Ubuntu, "Droid Sans", system-ui, sans-serif;
+  /* SF Mono is macOS's editor face and Menlo is its always-present fallback;
+     without them a Mac renders every monospaced pane in Courier. */
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, "Ubuntu Mono",
+    "Cascadia Mono", monospace;
 
   --row-height: 22px;
   /* Sidebar indent ladder. Session rows sit one step in from the rail edge so

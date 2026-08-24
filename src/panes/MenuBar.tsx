@@ -62,7 +62,13 @@ export function MenuBar({ menus }: { menus: BarMenu[] }) {
   // there. The only way into the bar without a mouse.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== CHORD.menuBar || event.ctrlKey || event.altKey || event.shiftKey) {
+      if (
+        event.key !== CHORD.menuBar ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey ||
+        event.metaKey
+      ) {
         return;
       }
       event.preventDefault();

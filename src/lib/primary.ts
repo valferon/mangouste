@@ -1,5 +1,5 @@
 /**
- * X11 middle-click paste, and X11 select-to-copy.
+ * X11 middle-click paste, and X11 select-to-copy. Linux only.
  *
  * WebKitGTK does not wire PRIMARY into webview-editable content, so both halves
  * of the X11 selection convention are reimplemented here:
@@ -13,6 +13,7 @@
 
 import { insertAtCaret, isEditable, type Editable } from "./editing";
 import { primaryGet, primarySet } from "./ipc";
+import { isMac } from "./platform";
 
 /** Selections settle in bursts while dragging; only the settled value is published. */
 const PUBLISH_DELAY_MS = 120;
@@ -105,6 +106,13 @@ function restoreSelection(snapshot: Snapshot) {
  * duplicate listeners behind.
  */
 export function installPrimarySelectionBridge(): () => void {
+  // PRIMARY is an X11 selection and has no macOS equivalent: the commands
+  // behind it answer empty there, the platform's own middle-click does nothing,
+  // and a webview selection reaches the clipboard through the native Edit menu.
+  // Installing the bridge anyway would publish every selection over IPC to be
+  // discarded, and would swallow a middle-click that WebKit handles correctly.
+  if (isMac()) return () => {};
+
   let publishTimer: number | undefined;
   let lastPublished = "";
 
