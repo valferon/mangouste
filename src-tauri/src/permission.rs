@@ -34,17 +34,6 @@ use serde::{Deserialize, Serialize};
 
 pub const EVENT_REQUEST: &str = "permission://request";
 
-/// Tools whose only effect is to put a question in front of the user.
-///
-/// Prompting for these is a double ask: the human answers "may I ask you
-/// something?" and then answers the question itself, and a denial leaves the
-/// agent unable to do the one thing it was trying to do — talk to them. There is
-/// nothing to guard, so the bridge answers on the user's behalf and the ask
-/// never reaches a window.
-///
-/// `ExitPlanMode` deliberately stays out: approving a plan *is* the decision.
-const AUTO_ALLOWED_TOOLS: [&str; 1] = ["AskUserQuestion"];
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
@@ -341,18 +330,12 @@ fn handle_ask<F, G, H>(
         }
     }
 
-    // Answered here rather than in the window: nothing is pending, so no card is
-    // rendered, no timer runs, and the transcript goes straight to the question.
-    if AUTO_ALLOWED_TOOLS.contains(&request.tool_name.as_str()) {
-        let mut stream = stream;
-        let reply = serde_json::json!({
-            "behavior": "allow",
-            "updatedInput": request.input,
-        });
-        let _ = writeln!(stream, "{reply}");
-        let _ = stream.flush();
-        return;
-    }
+    // `AskUserQuestion` used to be answered right here, on the reasoning that
+    // asking permission to ask is a double ask. It is not: the tool reads its
+    // answers out of the reply's `updatedInput`, so the permission hop *is* the
+    // channel the answers travel on. Allowing it through unchanged left the tool
+    // with no answers and no terminal to collect them in, and the turn died on
+    // "AskUserQuestion not landing in this session". Every ask reaches a window.
 
     let (sender, receiver) = channel::<PermissionDecision>();
     state

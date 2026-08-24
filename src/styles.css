@@ -2963,6 +2963,66 @@ select {
   font-size: 11px;
 }
 
+/* Answerable options: a column of full-width targets, because the label and its
+   description already stack and a row of chips would wrap into soup. */
+.permission-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.permission-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.permission-choice:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+/* The picked ones have to survive the card going quiet after it is answered, so
+   selection is drawn from aria-pressed rather than a hover-adjacent state. */
+.permission-choice[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.permission-choice:disabled {
+  cursor: default;
+}
+
+.permission-choice:disabled[aria-pressed="false"] {
+  opacity: 0.45;
+}
+
+.permission-other {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg-bright);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.permission-other:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .permission-note {
   margin-top: 6px;
   color: var(--fg-dim);

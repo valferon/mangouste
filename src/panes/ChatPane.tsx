@@ -145,14 +145,23 @@ interface PanelContext {
 const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"] as const;
 
 /**
- * Tools whose only effect is to ask the user something.
+ * The one tool whose card fills its input in rather than guarding it.
  *
- * The bridge already answers these itself, so no card should reach this pane;
- * the guard stays because a detached daemon from an older build routes its asks
- * here unchanged. Prompting for them is a double ask — the human answers "may I
- * ask you?" and then the real question.
+ * `AskUserQuestion` reads its answers back out of the permission reply's
+ * `updatedInput`, so allowing it unchanged hands the tool a question with no
+ * answer and it dies. Its card renders the options as buttons and "allow"
+ * means "here is what I picked". Every other tool gets the plain allow/deny.
  */
-const AUTO_ALLOWED_TOOLS = new Set(["AskUserQuestion"]);
+const QUESTION_TOOL = "AskUserQuestion";
+
+/**
+ * The choice every question carries implicitly.
+ *
+ * The CLI's own UI always offers a free-text escape hatch, so the card does
+ * too. It is a placeholder for the text box, never an answer in itself: on
+ * submit it is swapped out for what was typed.
+ */
+const OTHER_LABEL = "Other";
 
 /** Compact labels so all four modes fit the composer bar as one-click buttons. */
 const MODE_LABELS: Record<(typeof PERMISSION_MODES)[number], string> = {
@@ -326,55 +335,181 @@ function PermissionValue({ value }: { value: unknown }) {
   );
 }
 
+interface QuestionOption {
+  label: string;
+  description: string | null;
+}
+
+interface ParsedQuestion {
+  header: string | null;
+  question: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+}
+
 /**
- * `AskUserQuestion`, rendered as the questions it is actually asking.
+ * `AskUserQuestion`'s input, as much of it as the form needs to be answerable.
  *
- * Returns null on anything that does not match the tool's schema, so a changed
- * payload falls back to the generic renderer instead of showing nothing.
+ * Null on anything that does not match the tool's schema, which sends the card
+ * back to the generic allow/deny renderer rather than showing a form that
+ * cannot produce a valid answer. Question text is required, not defaulted:
+ * `answers` is keyed by it, so a blank question has nowhere to put its reply.
  */
-function AskUserQuestionInput({ input }: { input: unknown }) {
+function parseQuestions(input: unknown): ParsedQuestion[] | null {
   const questions = asRecord(input)?.questions;
   if (!Array.isArray(questions) || questions.length === 0) return null;
-  const parsed = questions.map(asRecord);
-  if (parsed.some((question) => question === null)) return null;
+  const parsed: ParsedQuestion[] = [];
+  for (const entry of questions) {
+    const record = asRecord(entry);
+    const question = asText(record?.question);
+    if (!record || !question) return null;
+    const options = Array.isArray(record.options) ? record.options : [];
+    const labelled: QuestionOption[] = [];
+    for (const option of options) {
+      const label = asText(asRecord(option)?.label);
+      if (!label || label === OTHER_LABEL) continue;
+      labelled.push({ label, description: asText(asRecord(option)?.description) });
+    }
+    if (labelled.length === 0) return null;
+    parsed.push({
+      header: asText(record.header),
+      question,
+      options: labelled,
+      multiSelect: record.multiSelect === true,
+    });
+  }
+  return parsed;
+}
+
+/**
+ * `AskUserQuestion`, rendered as the questions it is actually asking — and as
+ * the buttons that answer them.
+ *
+ * The answer shape is the CLI's, not ours: one string per question keyed by the
+ * question text, multi-select values joined with `", "`. Unlike the CLI, a
+ * bare `Other` with nothing typed in it is not submittable — sending the
+ * literal word back as the answer tells the model nothing.
+ */
+function AskUserQuestionForm({
+  input,
+  questions,
+  locked,
+  onSubmit,
+  onDeny,
+}: {
+  input: unknown;
+  questions: ParsedQuestion[];
+  /** Already answered: the picks stay on screen, but nothing moves. */
+  locked: boolean;
+  onSubmit: (answers: Record<string, string>) => void;
+  onDeny: () => void;
+}) {
+  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const [typed, setTyped] = useState<Record<string, string>>({});
+
+  const toggle = useCallback((question: ParsedQuestion, label: string) => {
+    setPicked((current) => {
+      const chosen = current[question.question] ?? [];
+      if (chosen.includes(label)) {
+        // A second click clears, so a mis-click is undoable without needing a
+        // "none of these" option that the tool's schema does not have.
+        return { ...current, [question.question]: chosen.filter((it) => it !== label) };
+      }
+      return {
+        ...current,
+        [question.question]: question.multiSelect ? [...chosen, label] : [label],
+      };
+    });
+  }, []);
+
+  const answers = useMemo(() => {
+    const built: Record<string, string> = {};
+    for (const question of questions) {
+      const chosen = picked[question.question] ?? [];
+      const free = typed[question.question]?.trim() ?? "";
+      const labels = chosen.filter((label) => label !== OTHER_LABEL);
+      if (chosen.includes(OTHER_LABEL) && free) labels.push(free);
+      built[question.question] = labels.join(", ");
+    }
+    return built;
+  }, [picked, questions, typed]);
+
+  const complete = questions.every((question) => answers[question.question]);
 
   return (
-    <div className="permission-questions">
-      {parsed.map((question, index) => {
-        const options = Array.isArray(question!.options) ? question!.options : [];
-        return (
-          <div className="permission-question" key={index}>
-            {asText(question!.header) && (
-              <span className="permission-chip">{asText(question!.header)}</span>
-            )}
-            <div className="permission-prompt">
-              {asText(question!.question) ?? "(no question text)"}
-            </div>
-            <ol className="permission-options">
-              {options.map((option, optionIndex) => {
-                const record = asRecord(option);
-                return (
-                  <li key={optionIndex}>
-                    {/* Label first: the name of the choice, then what it means. */}
-                    <span className="permission-option-label">
-                      {asText(record?.label) ?? JSON.stringify(option)}
-                    </span>
-                    {asText(record?.description) && (
-                      <span className="permission-option-note">
-                        {asText(record?.description)}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-            <div className="permission-note">
-              {question!.multiSelect === true ? "pick one or more" : "pick one"}
-            </div>
-          </div>
-        );
-      })}
-    </div>
+    <>
+      <div className="permission-body">
+        <div className="permission-questions">
+          {questions.map((question, index) => {
+            const chosen = picked[question.question] ?? [];
+            return (
+              <div className="permission-question" key={index}>
+                {question.header && <span className="permission-chip">{question.header}</span>}
+                <div className="permission-prompt">{question.question}</div>
+                <div className="permission-choices">
+                  {[
+                    ...question.options,
+                    { label: OTHER_LABEL, description: "Answer in your own words" },
+                  ].map((option) => (
+                    <button
+                      key={option.label}
+                      type="button"
+                      className="permission-choice"
+                      aria-pressed={chosen.includes(option.label)}
+                      disabled={locked}
+                      onClick={() => toggle(question, option.label)}
+                    >
+                      {/* Label first: the name of the choice, then what it means. */}
+                      <span className="permission-option-label">{option.label}</span>
+                      {option.description && (
+                        <span className="permission-option-note">{option.description}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                {chosen.includes(OTHER_LABEL) && (
+                  <input
+                    className="permission-other"
+                    placeholder="Your answer"
+                    readOnly={locked}
+                    value={typed[question.question] ?? ""}
+                    onChange={(event) =>
+                      setTyped((current) => ({
+                        ...current,
+                        [question.question]: event.target.value,
+                      }))
+                    }
+                  />
+                )}
+                <div className="permission-note">
+                  {question.multiSelect ? "pick one or more" : "pick one"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <details className="permission-raw">
+          <summary>raw arguments</summary>
+          <pre className="selectable">{JSON.stringify(input, null, 2)}</pre>
+        </details>
+      </div>
+      {!locked && (
+        <div className="permission-actions">
+          <button
+            className="primary-button"
+            disabled={!complete}
+            onClick={() => onSubmit(answers)}
+          >
+            Submit answers
+          </button>
+          {/* Not "Deny": refusing to answer a question is walking away from it,
+              and the model is told exactly that. */}
+          <button className="danger-button" onClick={onDeny}>
+            Dismiss
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -407,10 +542,11 @@ const PermissionInput = memo(function PermissionInput({
     typeof (input as Record<string, unknown>).file_path === "string"
       ? ((input as Record<string, unknown>).file_path as string)
       : null;
+  // `AskUserQuestion` is absent here on purpose: a well-formed one is rendered
+  // by `AskUserQuestionForm`, and a malformed one belongs in the generic view
+  // where the raw payload is the only honest thing to show.
   const known =
-    toolName === "AskUserQuestion" ? (
-      <AskUserQuestionInput input={input} />
-    ) : edit !== null ? (
+    edit !== null ? (
       <>
         {filePath !== null && <div className="count">{filePath}</div>}
         <ToolDiff lines={edit} />
@@ -796,6 +932,101 @@ const UserMessage = memo(function UserMessage({ text }: { text: string }) {
   );
 });
 
+/** What a decided card says it did, per tool family. */
+const DECIDED_LABELS: Record<string, string> = { allow: "allowed", deny: "denied" };
+const ANSWERED_LABELS: Record<string, string> = { allow: "answered", deny: "dismissed" };
+
+/**
+ * One tool prompt, pending or decided.
+ *
+ * Its own component rather than inline in the timeline map because the question
+ * form holds state — the options picked so far — and state cannot live in a loop
+ * body that re-runs on every frame.
+ */
+function PermissionCard({
+  entry,
+  onDecide,
+}: {
+  entry: Extract<TimelineEntry, { kind: "permission" }>;
+  onDecide: (
+    request: PermissionRequest,
+    behavior: "allow" | "deny",
+    always?: boolean,
+    updatedInput?: unknown,
+  ) => Promise<void>;
+}) {
+  const { request, decided } = entry;
+  const questions = useMemo(
+    () => (request.toolName === QUESTION_TOOL ? parseQuestions(request.input) : null),
+    [request.input, request.toolName],
+  );
+  const labels = questions ? ANSWERED_LABELS : DECIDED_LABELS;
+
+  return (
+    <div className="permission-card" data-decided={decided ?? ""}>
+      <div className="permission-head">
+        <span className="permission-tool">{request.toolName}</span>
+        <span className="permission-ask">
+          {questions ? "wants to ask you" : "wants to run"}
+        </span>
+      </div>
+      {questions ? (
+        <AskUserQuestionForm
+          input={request.input}
+          questions={questions}
+          locked={decided !== null}
+          // The answers ride back as edited arguments, next to the questions
+          // they answer — spread rather than rebuilt, so anything else the tool
+          // sent (its `metadata`, a field added after this was written) survives.
+          onSubmit={(answers) =>
+            void onDecide(request, "allow", false, {
+              ...(asRecord(request.input) ?? {}),
+              answers,
+            })
+          }
+          onDeny={() => void onDecide(request, "deny")}
+        />
+      ) : (
+        <>
+          <PermissionInput toolName={request.toolName} input={request.input} />
+          {decided === null && (
+            // One contiguous group: a Deny shoved to the far edge reads as
+            // belonging to something else.
+            <div className="permission-actions">
+              <button
+                className="primary-button"
+                onClick={() => void onDecide(request, "allow")}
+              >
+                Allow once
+              </button>
+              {/* Never for the question tool: a standing allow would answer
+                  future questions with no answers in them, which is the failure
+                  this card exists to fix. A malformed one lands here too. */}
+              {request.toolName !== QUESTION_TOOL && (
+                <button
+                  className="secondary-button"
+                  onClick={() => void onDecide(request, "allow", true)}
+                >
+                  Always allow {request.toolName}
+                </button>
+              )}
+              <button
+                className="danger-button"
+                onClick={() => void onDecide(request, "deny")}
+              >
+                Deny
+              </button>
+            </div>
+          )}
+        </>
+      )}
+      {decided !== null && (
+        <div className="permission-decided">{labels[decided] ?? decided}</div>
+      )}
+    </div>
+  );
+}
+
 /**
  * The rendered timeline rows, split out of ChatPane and memoized so composer
  * keystrokes — which only touch draft state — do not re-reconcile up to
@@ -816,6 +1047,8 @@ const Timeline = memo(function Timeline({
     request: PermissionRequest,
     behavior: "allow" | "deny",
     always?: boolean,
+    /** Edited arguments, which is how an answered question travels back. */
+    updatedInput?: unknown,
   ) => Promise<void>;
   panelContext: PanelContext;
   /** The chat-wide entries a row's menu ends with. */
@@ -879,46 +1112,7 @@ const Timeline = memo(function Timeline({
             )}
 
             {entry.kind === "permission" && (
-              <div className="permission-card" data-decided={entry.decided ?? ""}>
-                <div className="permission-head">
-                  <span className="permission-tool">{entry.request.toolName}</span>
-                  <span className="permission-ask">
-                    {AUTO_ALLOWED_TOOLS.has(entry.request.toolName)
-                      ? "wants to ask you"
-                      : "wants to run"}
-                  </span>
-                </div>
-                <PermissionInput
-                  toolName={entry.request.toolName}
-                  input={entry.request.input}
-                />
-                {entry.decided ? (
-                  <div className="permission-decided">{entry.decided}ed</div>
-                ) : (
-                  // One contiguous group: a Deny shoved to the far edge reads as
-                  // belonging to something else.
-                  <div className="permission-actions">
-                    <button
-                      className="primary-button"
-                      onClick={() => void onDecide(entry.request, "allow")}
-                    >
-                      Allow once
-                    </button>
-                    <button
-                      className="secondary-button"
-                      onClick={() => void onDecide(entry.request, "allow", true)}
-                    >
-                      Always allow {entry.request.toolName}
-                    </button>
-                    <button
-                      className="danger-button"
-                      onClick={() => void onDecide(entry.request, "deny")}
-                    >
-                      Deny
-                    </button>
-                  </div>
-                )}
-              </div>
+              <PermissionCard entry={entry} onDecide={onDecide} />
             )}
 
             {entry.kind === "result" && (
@@ -1277,10 +1471,7 @@ export const ChatPane = memo(function ChatPane({
         // Prompts raised while nothing was watching. Carried in the reply rather
         // than broadcast, so they land exactly once, here.
         for (const request of status.pendingPermissions ?? []) {
-          if (
-            AUTO_ALLOWED_TOOLS.has(request.toolName) ||
-            alwaysAllowRef.current.has(request.toolName)
-          ) {
+          if (alwaysAllowRef.current.has(request.toolName)) {
             void permissionRespond(request.id, "allow");
             continue;
           }
@@ -1561,12 +1752,24 @@ export const ChatPane = memo(function ChatPane({
   );
 
   const decide = useCallback(
-    async (request: PermissionRequest, behavior: "allow" | "deny", always = false) => {
+    async (
+      request: PermissionRequest,
+      behavior: "allow" | "deny",
+      always = false,
+      updatedInput?: unknown,
+    ) => {
       logDebug(chatId, "permission", `${behavior} · ${request.toolName}${always ? " (always)" : ""}`);
       if (always) alwaysAllowRef.current.add(request.toolName);
+      // A refused question is not a refused command: say which it was, or the
+      // model reads "denied" as "not allowed to ask" and asks again.
+      const refusal =
+        request.toolName === QUESTION_TOOL
+          ? "The user dismissed the question without answering it."
+          : "Denied by the user in mangouste";
       try {
         await permissionRespond(request.id, behavior, {
-          message: behavior === "deny" ? "Denied by the user in mangouste" : undefined,
+          message: behavior === "deny" ? refusal : undefined,
+          updatedInput,
         });
       } catch {
         // The request may have already timed out; the card still resolves.
@@ -1619,15 +1822,16 @@ export const ChatPane = memo(function ChatPane({
         // pre-spawn items and gets it back through status.pendingPermissions.
         if (request.chatId !== chatId) return;
         logDebug(chatId, "permission", `ask · ${request.toolName}`, request);
-        if (
-          AUTO_ALLOWED_TOOLS.has(request.toolName) ||
-          alwaysAllowRef.current.has(request.toolName)
-        ) {
+        if (alwaysAllowRef.current.has(request.toolName)) {
           void permissionRespond(request.id, "allow");
           return;
         }
         stickyRef.current = true;
-        setPhase("awaiting your permission");
+        setPhase(
+          request.toolName === QUESTION_TOOL
+            ? "awaiting your answer"
+            : "awaiting your permission",
+        );
         appendItem({ kind: "permission", key: nextKey(), request, decided: null });
       }),
       onClaudeToolActivity((event) => {
