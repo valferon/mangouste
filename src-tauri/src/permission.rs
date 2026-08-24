@@ -143,15 +143,67 @@ impl PermissionState {
 /// `owns_chat` answers whether a chat id belongs to this process, so an ask from
 /// a child orphaned by a previous run is denied instead of parked forever on a
 /// prompt no window will ever show.
-pub fn start_bridge<F, G>(
+/// A second instance found the first one holding the socket.
+///
+/// Not a `String` like the other failures here, because it is the one the caller
+/// must act on rather than report: two instances writing the same transcripts is
+/// corruption, so the launch has to end.
+pub struct AlreadyRunning {
+    pub socket: PathBuf,
+    /// The owner acknowledged the `show` request and raised its window, so the
+    /// launch has already done everything the user wanted and needs no dialog.
+    pub raised: bool,
+}
+
+/// The one line that means "raise your window", not "approve a tool".
+///
+/// Deliberately not JSON. An ask is a JSON object, and a build that predates this
+/// message would parse a JSON `show` into a `PermissionRequest` with no fields —
+/// surfacing a phantom prompt for tool `unknown` in a window the user was not
+/// touching. Invalid JSON hits the older `from_str` guard instead and is dropped
+/// without a trace, so upgrading costs nothing.
+const SHOW_REQUEST: &str = "show";
+
+/// Ask the instance holding `path` to show itself. `true` when it answered.
+///
+/// The bridge socket is the only thing in a running instance a second launch can
+/// reach — there is no single-instance plugin here and no other IPC — so the
+/// "raise the existing window" gesture rides on the protocol that already exists.
+fn ask_owner_to_show(path: &PathBuf) -> bool {
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    // A short timeout, not none: an owner mid-prompt may be slow, but a launch
+    // must not hang on a peer that will never answer.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
+    if writeln!(stream, "{SHOW_REQUEST}").is_err() {
+        return false;
+    }
+    let _ = stream.flush();
+    let mut reply = String::new();
+    let Ok(clone) = stream.try_clone() else {
+        return false;
+    };
+    if BufReader::new(clone).read_line(&mut reply).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&reply)
+        .ok()
+        .and_then(|value| value.get("shown").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+pub fn start_bridge<F, G, H>(
     state: Arc<PermissionState>,
     path: PathBuf,
     emit: F,
     owns_chat: G,
-) -> Result<(), String>
+    on_show: H,
+) -> Result<(), AlreadyRunning>
 where
     F: Fn(&PermissionRequest) + Send + Sync + 'static,
     G: Fn(&str) -> bool + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
 {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -166,17 +218,16 @@ where
     // instead. The probe connection is dropped immediately; the owner's
     // `handle_ask` reads an empty line and returns.
     //
-    // Reported as an error rather than `process::exit`: Tauri creates the
-    // configured window before it runs `setup`, so exiting here flashes a window
-    // and disappears, with the reason on a stderr nobody is reading. Handing the
-    // error back lets the caller fail the build with a message (a dialog would
-    // be better still — `tauri_plugin_dialog` is already registered).
+    // Handed back rather than `process::exit`ed here so the caller can do the
+    // two things a user actually wants from a second launch: bring the running
+    // window forward, or — when it will not answer — say why nothing happened.
+    // The window is configured hidden and only shown once this has passed, so
+    // neither path flashes an empty frame.
     if UnixStream::connect(&path).is_ok() {
-        return Err(format!(
-            "mangouste is already running: another instance owns the permission \
-             bridge at {}. Close it before starting a second one.",
-            path.display()
-        ));
+        return Err(AlreadyRunning {
+            raised: ask_owner_to_show(&path),
+            socket: path,
+        });
     }
     // Nothing answered, so anything still at the path is a stale socket from a
     // crashed run, which would block the bind.
@@ -200,26 +251,34 @@ where
 
     let emit = Arc::new(emit);
     let owns_chat = Arc::new(owns_chat);
+    let on_show = Arc::new(on_show);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let state = Arc::clone(&state);
             let emit = Arc::clone(&emit);
             let owns_chat = Arc::clone(&owns_chat);
+            let on_show = Arc::clone(&on_show);
             // One thread per ask: each blocks until someone decides, and asks
             // can legitimately overlap when the model batches tool calls.
             std::thread::spawn(move || {
-                handle_ask(state, emit.as_ref(), owns_chat.as_ref(), stream)
+                handle_ask(state, emit.as_ref(), owns_chat.as_ref(), on_show.as_ref(), stream)
             });
         }
     });
     Ok(())
 }
 
-fn handle_ask<F, G>(state: Arc<PermissionState>, emit: &F, owns_chat: &G, stream: UnixStream)
-where
+fn handle_ask<F, G, H>(
+    state: Arc<PermissionState>,
+    emit: &F,
+    owns_chat: &G,
+    on_show: &H,
+    stream: UnixStream,
+) where
     F: Fn(&PermissionRequest) + Send + Sync + 'static,
     G: Fn(&str) -> bool + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
 {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(clone) => clone,
@@ -227,6 +286,18 @@ where
     });
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+        return;
+    }
+
+    // Not an ask at all: a second launch reaching us through the only channel it
+    // has, to hand its turn over rather than start a rival. Checked against the
+    // raw line and before the parse below, which is what keeps it out of the
+    // `PermissionRequest` path entirely.
+    if line.trim() == SHOW_REQUEST {
+        on_show();
+        let mut stream = stream;
+        let _ = writeln!(stream, "{}", serde_json::json!({ "shown": true }));
+        let _ = stream.flush();
         return;
     }
 
@@ -437,4 +508,22 @@ fn ask_app(
         return deny("no answer from mangouste");
     }
     serde_json::from_str(reply.trim()).unwrap_or_else(|_| deny("malformed answer from mangouste"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SHOW_REQUEST;
+
+    /// The upgrade story rests on this one property.
+    ///
+    /// A build that predates the show message parses every incoming line as an
+    /// ask. If `SHOW_REQUEST` were valid JSON it would become a
+    /// `PermissionRequest` for tool `unknown` and raise a prompt in a window
+    /// nobody touched; being invalid, it hits that build's parse guard and is
+    /// dropped. Anyone tempted to "tidy" this into `{"type":"show"}` breaks a
+    /// case they cannot test, because the other half of it is already shipped.
+    #[test]
+    fn show_request_is_not_valid_json() {
+        assert!(serde_json::from_str::<serde_json::Value>(SHOW_REQUEST).is_err());
+    }
 }

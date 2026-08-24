@@ -15,10 +15,16 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 pub use permission::run_permission_server;
 
 pub const EVENT_SESSIONS_CHANGED: &str = "sessions://changed";
+
+/// Label of the one window, matching `tauri.conf.json`. Looked up rather than
+/// taking "the first window", so a future second window cannot be shown by
+/// accident.
+const MAIN_WINDOW: &str = "main";
 
 /// Transcripts are appended to continuously during a turn, so the watcher is
 /// debounced hard — the sidebar only needs to know that *something* changed.
@@ -79,7 +85,12 @@ pub fn run() {
             let socket = chats::runtime_dir().join("permission.sock");
             let handle = app.handle().clone();
             let owner = Arc::clone(&manager);
-            permission::start_bridge(
+            // Raising the window is what a second launch of a single-instance
+            // app is asking for, so the running instance answers `show` by
+            // doing exactly that. `unminimize` first: `set_focus` alone leaves
+            // an iconified window iconified.
+            let raiser = app.handle().clone();
+            let started = permission::start_bridge(
                 Arc::clone(&permission),
                 socket,
                 move |request| {
@@ -89,7 +100,45 @@ pub fn run() {
                 // previous run's survivors; the bridge denies those rather than
                 // parking them on a prompt no window will show.
                 move |chat_id| owner.statuses().iter().any(|status| status.chat_id == chat_id),
-            )?;
+                move || {
+                    if let Some(window) = raiser.get_webview_window(MAIN_WINDOW) {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                },
+            );
+
+            if let Err(collision) = started {
+                // The running instance took the launch: it is now in front, and
+                // there is nothing to tell anyone.
+                if collision.raised {
+                    std::process::exit(0);
+                }
+                // It holds the socket but would not answer — a build too old to
+                // know `show`, or one wedged mid-prompt. This is the case that
+                // used to be a panic onto a stderr nobody reads, so it gets the
+                // one thing a double-clicked launcher can show: a dialog. Exit
+                // runs from its callback, because a blocking dialog on the main
+                // thread during `setup` deadlocks the loop that would draw it.
+                app.dialog()
+                    .message(format!(
+                        "The running window owns the permission bridge at {}.\n\n                         A second instance would compete with it for tool prompts, \
+                         so this one will not start. Close the other window first.",
+                        collision.socket.display()
+                    ))
+                    .title("mangouste is already running")
+                    .kind(MessageDialogKind::Warning)
+                    .show(|_| std::process::exit(0));
+                return Ok(());
+            }
+
+            // Only now is this instance the real one. The window is configured
+            // hidden so neither branch above can flash an empty frame — which is
+            // exactly what the old panic did.
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = window.show();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
