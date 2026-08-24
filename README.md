@@ -20,6 +20,14 @@ VSCode window per repository.
 
 ## Requirements
 
+Node 24, as pinned in `.nvmrc`. Ubuntu's own `node` is 18, which the Vite build
+refuses, so this is the one prerequisite that fails with a version error rather
+than a missing-package error:
+
+```bash
+nvm use    # or nvm install, the first time
+```
+
 Rust (via rustup) and the WebKitGTK toolchain:
 
 ```bash
@@ -39,6 +47,14 @@ Override with `MANGOUSTE_CLAUDE_BIN`.
 npm install
 npm run app          # tauri dev
 npm run app:build    # deb + AppImage in src-tauri/target/release/bundle
+```
+
+A locally built `.deb` will not install until its `Depends` is repaired — Tauri
+appends its own hardcoded `libgtk-3-0`, which has no candidate on Ubuntu 24.04.
+CI does this step; `app:build` does not:
+
+```bash
+./scripts/fix-deb-depends.sh src-tauri/target/release/bundle/deb/*.deb
 ```
 
 ## Platforms

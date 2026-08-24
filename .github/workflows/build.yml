@@ -23,12 +23,36 @@ jobs:
             # 24.04 for libgtk-3-0t64: the .deb's Depends names it, and the
             # runner has to be able to resolve what it produces.
             bundles: deb,appimage
-            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            bundle-target: x86_64-unknown-linux-gnu
+            test-target: x86_64-unknown-linux-gnu
+
+          - os: ubuntu-24.04-arm
+            # Free arm64 Linux runner (public repos only). Native build, so no
+            # cross toolchain and the tests actually execute on-target.
+            bundles: deb,appimage
+            rust-targets: aarch64-unknown-linux-gnu
+            bundle-target: aarch64-unknown-linux-gnu
+            test-target: aarch64-unknown-linux-gnu
+
           - os: macos-14
-            # macos-14 is the Apple Silicon runner, so this is a native
-            # aarch64 build rather than a cross-compile.
+            # One universal dmg instead of two: macos-14 is Apple Silicon, and
+            # its Xcode carries both SDK slices, so the x86_64 half is a plain
+            # cross-compile. `universal-apple-darwin` is a Tauri pseudo-target
+            # and not a rustc one, hence the separate test-target below --
+            # tests run native aarch64 rather than under Rosetta.
             bundles: dmg
-            target: aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundle-target: universal-apple-darwin
+            test-target: aarch64-apple-darwin
+
+          - os: windows-latest
+            # WebView2 ships with the runner image; Tauri fetches WiX and NSIS
+            # itself on first bundle.
+            bundles: msi,nsis
+            rust-targets: x86_64-pc-windows-msvc
+            bundle-target: x86_64-pc-windows-msvc
+            test-target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
 
@@ -42,12 +66,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.target }}
+          key: ${{ matrix.bundle-target }}
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -66,10 +90,10 @@ jobs:
 
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --target ${{ matrix.target }}
+        run: cargo test --target ${{ matrix.test-target }}
 
       - name: Bundle
-        run: npx tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        run: npx tauri build --target ${{ matrix.bundle-target }} --bundles ${{ matrix.bundles }}
 
       # Tauri hardcodes the pre-t64 `libgtk-3-0` into Depends, which has no
       # candidate on 24.04, so the generated .deb will not install until the
@@ -77,20 +101,25 @@ jobs:
       - name: Repair .deb Depends
         if: runner.os == 'Linux'
         run: |
-          for deb in src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb; do
+          for deb in src-tauri/target/${{ matrix.bundle-target }}/release/bundle/deb/*.deb; do
             ./scripts/fix-deb-depends.sh "$deb"
           done
 
       # Globbed rather than named: the artifact filenames carry productName and
-      # version, so this keeps working across a rename or a version bump.
+      # version, so this keeps working across a rename or a version bump. Every
+      # platform's patterns are listed together -- the ones that match nothing
+      # on a given runner are simply skipped, and if-no-files-found only trips
+      # when the whole list comes up empty.
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: ${{ matrix.bundle-target }}
           if-no-files-found: error
           path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.bundle-target }}/release/bundle/deb/*.deb
+            src-tauri/target/${{ matrix.bundle-target }}/release/bundle/appimage/*.AppImage
+            src-tauri/target/${{ matrix.bundle-target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.bundle-target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.bundle-target }}/release/bundle/nsis/*.exe
 
   release:
     # Tags only. Draft, so the unsigned-macOS caveat can be written into the
