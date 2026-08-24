@@ -2,11 +2,13 @@ import {
   memo,
   useCallback,
   useEffect,
+  useDeferredValue,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { highlightCode, languageForPath } from "../lib/highlight";
 import { readTextFileMeta, writeTextFile } from "../lib/ipc";
 
 /** Colourise a unified diff. Line class is decided by the first character. */
@@ -50,6 +52,15 @@ interface PatchFile {
  * touching three is something you came to read.
  */
 const AUTO_EXPAND_FILES = 6;
+
+/**
+ * Size past which the editor stops colouring and shows plain text.
+ *
+ * Higher than the chat's ceiling: a file this pane opens is being read, and
+ * every keystroke re-tokenises the whole buffer, so the number is set by what
+ * stays responsive to type in rather than by what is worth reading.
+ */
+const EDITOR_HIGHLIGHT_MAX = 200_000;
 
 /** Path a `diff --git a/x b/y` header is about, preferring the post-image. */
 function fileLabelOf(header: string): string {
@@ -392,6 +403,7 @@ export const FileView = memo(function FileView({
   const [state, setState] = useState<SaveState>({ kind: "clean" });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
+  const highlightRef = useRef<HTMLPreElement | null>(null);
 
   const dirty = saved !== null && draft !== saved.text;
 
@@ -538,6 +550,15 @@ export const FileView = memo(function FileView({
     }
   }, []);
 
+  const language = useMemo(() => languageForPath(path), [path]);
+  // Typing must not wait on the tokeniser: the deferred copy lags behind during
+  // a burst of keystrokes and catches up once it stops, so the caret never does.
+  const deferredDraft = useDeferredValue(draft);
+  const tokens = useMemo(
+    () => highlightCode(deferredDraft, language, EDITOR_HIGHLIGHT_MAX),
+    [deferredDraft, language],
+  );
+
   const lineCount = useMemo(() => draft.split("\n").length, [draft]);
   const gutter = useMemo(
     () => Array.from({ length: lineCount }, (_, index) => index + 1).join("\n"),
@@ -595,21 +616,40 @@ export const FileView = memo(function FileView({
         <div className="editor-gutter" ref={gutterRef} aria-hidden>
           {gutter}
         </div>
-        <textarea
-          ref={textareaRef}
-          className="editor-input selectable"
-          value={draft}
-          spellCheck={false}
-          wrap="off"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={onKeyDown}
-          // The gutter is a separate scroller, so it has to be driven from here;
-          // it has no scrollbar of its own and cannot drift out of step.
-          onScroll={(event) => {
-            const gutterElement = gutterRef.current;
-            if (gutterElement) gutterElement.scrollTop = event.currentTarget.scrollTop;
-          }}
-        />
+        <div className="editor-code">
+          {/* The coloured copy of the buffer, painted under a textarea whose own
+              text is transparent. The textarea stays the only thing focus,
+              selection and the caret ever touch, so none of the editing
+              behaviour is reimplemented here. */}
+          <pre className="editor-highlight hljs" aria-hidden ref={highlightRef}>
+            {tokens}
+            {/* A <pre> swallows one trailing newline; the textarea shows it, and
+                without this the last line drifts out of step with the gutter. */}
+            {"\n"}
+          </pre>
+          <textarea
+            ref={textareaRef}
+            className="editor-input selectable"
+            value={draft}
+            spellCheck={false}
+            wrap="off"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={onKeyDown}
+            // The gutter and the highlight layer are separate scrollers driven
+            // from here; neither has a scrollbar of its own and neither can
+            // drift out of step with the text it sits beside.
+            onScroll={(event) => {
+              const { scrollTop, scrollLeft } = event.currentTarget;
+              const gutterElement = gutterRef.current;
+              if (gutterElement) gutterElement.scrollTop = scrollTop;
+              const highlightElement = highlightRef.current;
+              if (highlightElement) {
+                highlightElement.scrollTop = scrollTop;
+                highlightElement.scrollLeft = scrollLeft;
+              }
+            }}
+          />
+        </div>
       </div>
     </div>
   );

@@ -1926,21 +1926,55 @@ select {
   line-height: 1.5;
 }
 
-/* Font metrics and line-height must match the gutter exactly, or the numbers
-   walk away from their lines further down a long file. */
-.editor-input {
+/* Holds the two stacked layers: the highlighted copy and the textarea over it. */
+.editor-code {
+  position: relative;
   flex: 1;
   min-width: 0;
-  padding: 10px 14px;
-  border: none;
-  outline: none;
-  resize: none;
+  overflow: hidden;
   background: var(--bg);
-  color: var(--fg);
+}
+
+/* Font metrics and line-height must match the gutter exactly, or the numbers
+   walk away from their lines further down a long file — and must match between
+   these two, or the text does not sit under the caret that is editing it. */
+.editor-highlight,
+.editor-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 10px 14px;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   tab-size: 2;
+  white-space: pre;
+}
+
+/* Scrolled from the textarea's handler, so no scrollbar of its own. */
+.editor-highlight {
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--fg);
+}
+
+.editor-input {
+  border: none;
+  outline: none;
+  resize: none;
+  overflow: auto;
+  background: transparent;
+  /* The characters come from the layer below; only the caret is drawn here.
+     `-webkit-text-fill-color` is what actually hides glyphs in Chromium, which
+     is the only engine this app's webview runs on Linux and Windows. */
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--fg);
+}
+
+/* Opaque selection would hide the coloured text underneath, so it tints. */
+.editor-input::selection {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 /* ---------- tabs ---------- */

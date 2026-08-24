@@ -54,8 +54,12 @@ function toReact(nodes: RootContent[], keyPrefix: string): ReactNode[] {
  * `highlightAuto`: detection on a three-line snippet guesses wrong often
  * enough that the colours mislead.
  */
-export function highlightCode(code: string, language: string | null): ReactNode {
-  if (!language || code.length > MAX_HIGHLIGHT_CHARS) return code;
+export function highlightCode(
+  code: string,
+  language: string | null,
+  maxChars = MAX_HIGHLIGHT_CHARS,
+): ReactNode {
+  if (!language || code.length > maxChars) return code;
   const name = language.toLowerCase();
   if (!lowlight.registered(name)) return code;
   try {
@@ -64,4 +68,48 @@ export function highlightCode(code: string, language: string | null): ReactNode 
     // A grammar that throws on partial input must not take the message down.
     return code;
   }
+}
+
+/**
+ * Extensions highlight.js does not resolve as language names or aliases itself.
+ * Anything it already knows (`ts`, `py`, `rs`, `yml`, `toml`, …) is left out —
+ * `registered()` below catches those.
+ */
+const EXTENSION_LANGUAGE: Record<string, string> = {
+  cfg: "ini",
+  conf: "ini",
+  env: "ini",
+  htm: "html",
+  m: "objectivec",
+  properties: "ini",
+  tf: "ini",
+};
+
+/** Files named for what they are rather than for their extension. */
+const FILENAME_LANGUAGE: Record<string, string> = {
+  ".env": "ini",
+  "cargo.lock": "toml",
+  containerfile: "dockerfile",
+  dockerfile: "dockerfile",
+  gemfile: "ruby",
+  gnumakefile: "makefile",
+  makefile: "makefile",
+  rakefile: "ruby",
+};
+
+/**
+ * Best guess at the language of a file on disk, or null to leave it plain.
+ *
+ * Guessing from the name only: sniffing content would disagree with the tab's
+ * own label, and a wrong guess on a file being edited is worse than no colour.
+ */
+export function languageForPath(path: string): string | null {
+  const name = (path.split(/[\\/]/).pop() ?? "").toLowerCase();
+  const byName = FILENAME_LANGUAGE[name];
+  if (byName) return byName;
+  // `.gitignore` has no extension in the sense meant here, hence lastIndexOf > 0.
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const extension = name.slice(dot + 1);
+  return EXTENSION_LANGUAGE[extension] ?? (lowlight.registered(extension) ? extension : null);
 }
