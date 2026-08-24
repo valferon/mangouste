@@ -1,22 +1,32 @@
+<img src="src-tauri/icons/source/mongoose.svg" alt="mangouste" width="96">
+
 # mangouste
 
 Single-window, multi-repo Claude Code workbench. Replaces running one
 VSCode window per repository.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ mangouste  [ payments-service      Ctrl+P ]              [terminal] │
-├──────────────┬────────────────────────────────────┬─────────────────┤
-│ Explorer     │ Chat │ file.ts │ a1b2c3 fix …      │ Sessions        │
-│              ├────────────────────────────────────┤ 3 live · 144    │
-│  file tree   │                                    │                 │
-│              │   stream-json chat with Claude     │  ● playground   │
-├──────────────┤                                    │  ○ web-app      │
-│ Source Ctrl  │                                    │  ● payments-…   │
-│  status      ├────────────────────────────────────┤                 │
-│  history     │ Terminal                    Ctrl+` │                 │
-└──────────────┴────────────────────────────────────┴─────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│ (m) File Edit View Terminal Help   [ payments-service Ctrl+P ]        │
+├───┬──────────────┬─────────────────────────────────┬──────────────────┤
+│ E │ Explorer     │ Chat │ file.ts │ a1b2c3 …       │ Current session  │
+│ G │  file tree   ├─────────────────────────────────┤  model · branch  │
+│   │  src/        │                                 │  context · spend │
+│   │  README.md   │  stream-json chat with          │                  │
+│   │              │  the claude CLI                 │ Sessions  3 live │
+│   │              │                                 │  ● playground    │
+│   │              ├─────────────────────────────────┤  ○ web-app       │
+│   │              │ Terminal      Ctrl+`            │  ● payments-svc  │
+│   │              │ $                               │     2 agents     │
+├───┴──────────────┴─────────────────────────────────┴──────────────────┤
+│ ~/workspace/payments-service   session a1b2c3   idle      7 repos     │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+`E` and `G` are the activity rail: one left view at a time, switched with
+`Ctrl+Shift+E` / `Ctrl+Shift+G`, and the button for the open view collapses it.
+Both views stay mounted — glancing at the tree must not throw away a half-typed
+commit message.
 
 ## Requirements
 
@@ -93,8 +103,15 @@ mode bits, so the behaviour has to be redesigned, not ported.
 
 ## Icon
 
-Source art is `src-tauri/icons/source/mangouste.svg` — the three-pane workbench,
-one amber node in the sessions rail. Regenerate every raster size from it:
+Two pieces of source art, both in `src-tauri/icons/source/`:
+
+- `mangouste.svg` — the launcher icon: the three-pane workbench, one amber node
+  in the sessions rail
+- `mongoose.svg` — the brand mark, on the same dark plaque. The path is the one
+  `MongooseLogo` draws in `src/lib/icons.tsx`, lifted out of its 24-unit box so a
+  README and a titlebar can share a drawing; edit both or neither
+
+Regenerate every raster size from the launcher art:
 
 ```bash
 convert -background none src-tauri/icons/source/mangouste.svg -resize 1024x1024 /tmp/icon.png
@@ -137,6 +154,10 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/git.rs` | `git` porcelain: status, log, show, diff |
 | `src-tauri/src/workspace.rs` | Repo discovery, lazy tree, quick-open search |
 | `src-tauri/src/primary.rs` | X11 PRIMARY + CLIPBOARD access |
+| `src-tauri/src/chats.rs` | Owns the child processes; kills them with the window |
+| `src-tauri/src/permission.rs` | The MCP server the CLI asks for tool approval |
+| `src-tauri/src/stats.rs` | Corpus-wide tokens and cost, resumed by byte offset |
+| `src-tauri/src/usage.rs` | Anthropic usage windows, opt-in |
 
 ### Chat transport
 
@@ -262,6 +283,19 @@ but nothing yet distinguishes "changed since you looked" from "wants review".
 A `notify` watcher on `~/.claude/projects` pushes `sessions://changed`; a 15 s
 interval covers status decay, which is time-based rather than event-based.
 
+### Editor
+
+The file viewer is an editor: a textarea, a gutter, and a highlight layer painted
+underneath it, so selection, the caret and the native undo stack are never
+reimplemented. The interesting problem is not the editing but the second writer —
+claude is editing the same tree — so the mtime the bytes were read at rides along
+with every save and a write that would clobber someone else's change is refused.
+That leaves three answers to a conflict, and the pane offers all three: reload and
+lose yours, overwrite anyway, or keep editing.
+
+Tabs never unmount for the same reason: hiding is not unmounting, so switching
+tabs cannot silently drop an unsaved buffer, and closing one asks before it does.
+
 ## X11 selection behaviour
 
 WebKitGTK does not wire PRIMARY into webview-editable content, so both halves of
@@ -301,6 +335,12 @@ its commit and build stamp from Vite `define`, so a release updates it without
 anyone editing a string. Help ▸ Keyboard Shortcuts renders straight off the
 `CHORD` table in `src/lib/keybindings.ts`, which is also what fills the menus'
 accelerator column.
+
+The bar is reachable without a mouse: `F10` opens it, the arrow keys walk both
+the bar and the submenus, and one letter jumps to the next entry starting with
+it. A mouse-up is ignored for the first 250 ms after a menu opens — a menu that
+flipped upward to fit on screen puts a row under the pointer, and the release of
+the click that opened it would otherwise pick that row.
 
 ## Keybindings
 
@@ -344,8 +384,10 @@ full path, so `pay` finds `payments-service` and `ws/an` finds `~/workspace/ansi
 ## Not implemented yet
 
 - Commit lane graph — `parents` and `refs` are plumbed through, nothing draws them
-- `stream_event` partial deltas are ignored; text appears when the turn settles
-- Permission prompts: `can_use_tool` control requests are not answered, so
-  interactive `default` mode will stall. Use `acceptEdits` or `plan`.
-- Quick-open UI over `search_files`
-- File editing — viewer is read-only by design
+- Streaming text. `stream_event` deltas drive the spinner and the "preparing
+  tool" state, but prose still appears when the turn settles, not as it arrives
+- Quick-open over file names. The palette ranks repos and sessions; `search_files`
+  is wired to the composer's `@` mention menu instead
+- New file, rename and delete in the tree. Every filesystem write goes through
+  the editor or through claude, and the context menus deliberately kept it that
+  way — see Menus above
