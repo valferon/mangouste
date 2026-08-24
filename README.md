@@ -59,10 +59,14 @@ CI does this step; `app:build` does not:
 
 ## Platforms
 
-Linux is the primary target and the only one built locally by `app:build`.
+Linux is the primary target and the only one built locally by `app:build`. CI
+builds it for both x86_64 and arm64, each on a native runner.
 
-macOS builds on CI (`.github/workflows/build.yml`, `macos-14`, native arm64) and
-produces a `.dmg`. Two things behave differently there:
+macOS builds on CI (`.github/workflows/build.yml`, `macos-14`) as a single
+universal `.dmg`: the runner is Apple Silicon and its Xcode carries both SDK
+slices, so the Intel half is a cross-compile. Tests run native arm64, because
+`universal-apple-darwin` is a Tauri pseudo-target that `cargo test --target`
+will not accept. Two things behave differently there:
 
 - middle-click paste does nothing. PRIMARY is an X11 selection with no macOS
   equivalent, so `primary.rs` compiles to inert stubs off Linux
@@ -76,6 +80,16 @@ quarantine attribute is cleared:
 ```bash
 xattr -d com.apple.quarantine /Applications/mangouste.app
 ```
+
+Usage figures are also blank on macOS. `usage.rs` reads the OAuth token from
+`~/.claude/.credentials.json`, which is the Linux location; on macOS the CLI
+keeps it in the login Keychain instead, so the read fails.
+
+Windows is not supported and is not built. The Rust side is Unix-only in about
+two dozen places -- process groups and signals for tearing down a `claude`
+process tree, mode bits and uid in the workspace writer -- and those are
+semantic gaps rather than missing shims: Windows has no process groups and no
+mode bits, so the behaviour has to be redesigned, not ported.
 
 ## Icon
 
