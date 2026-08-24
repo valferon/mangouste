@@ -76,9 +76,12 @@ jobs:
 
       - run: npm ci
 
-      # Typecheck and Rust tests before bundling: a bundle failure is slow to
-      # reach and tells you far less than a failing test does.
+      # Typecheck and both test suites before bundling: a bundle failure is slow
+      # to reach and tells you far less than a failing test does.
       - run: npm run build
+
+      - name: vitest
+        run: npm test
 
       - name: cargo test
         working-directory: src-tauri

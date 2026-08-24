@@ -27,7 +27,7 @@ export interface AppInfo {
 }
 
 /** The engine and its version, out of a user-agent string that names several. */
-function webviewLabel(userAgent: string): string {
+export function webviewLabel(userAgent: string): string {
   const webkit = /AppleWebKit\/([\d.]+)/.exec(userAgent);
   if (webkit) return `WebKit ${webkit[1]}`;
   const chrome = /Chrome\/([\d.]+)/.exec(userAgent);
@@ -35,10 +35,15 @@ function webviewLabel(userAgent: string): string {
   return "unknown";
 }
 
-/** The OS, from the one part of the user-agent that still carries it. */
-function platformLabel(userAgent: string): string {
+/**
+ * The OS, from the one part of the user-agent that still carries it.
+ *
+ * `fallback` is passed in rather than read from `navigator` here, so this stays a
+ * pure string function its test can call without a browser standing behind it.
+ */
+export function platformLabel(userAgent: string, fallback: string): string {
   const parenthetical = /\(([^)]+)\)/.exec(userAgent);
-  return parenthetical?.[1] ?? navigator.platform ?? "unknown";
+  return parenthetical?.[1] ?? fallback;
 }
 
 /**
@@ -66,7 +71,7 @@ export async function readAppInfo(): Promise<AppInfo> {
     built: __BUILD_DATE__,
     channel: import.meta.env.DEV ? "dev" : "release",
     webview: webviewLabel(userAgent),
-    platform: platformLabel(userAgent),
+    platform: platformLabel(userAgent, navigator.platform || "unknown"),
   };
 }
 
