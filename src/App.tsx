@@ -19,7 +19,7 @@ import {
   renameSession,
 } from "./lib/ipc";
 import { clearDebug } from "./lib/debugLog";
-import { PencilIcon } from "./lib/icons";
+import { FilesIcon, PencilIcon, SourceControlIcon } from "./lib/icons";
 import { installPrimarySelectionBridge } from "./lib/primary";
 import { SessionFlagsProvider } from "./lib/sessionFlagsContext";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
@@ -30,6 +30,10 @@ const WORKSPACE_KEY = "mangouste.workspaceRoot";
 const PERMISSION_MODE_KEY = "mangouste.permissionMode";
 const MODEL_KEY = "mangouste.model";
 const ACTIVE_REPO_KEY = "mangouste.activeRepo";
+const SIDEBAR_VIEW_KEY = "mangouste.sidebarView";
+
+/** The left sidebar shows one of these at a time. */
+type SidebarView = "explorer" | "git";
 
 /**
  * Shared no-op for callbacks handed to inactive panes.
@@ -128,6 +132,19 @@ export default function App() {
    * never be persisted, since the size loader rejects it and resets to 300.
    */
   const [leftCollapsed, setLeftCollapsed] = useState(false);
+  /**
+   * Which left view is showing.
+   *
+   * Stacked, the tree and the SCM pane each got a dozen rows on a laptop and
+   * neither was readable, so they are tabs and only one is visible at a time.
+   */
+  const [sidebarView, setSidebarView] = useState<SidebarView>(() => {
+    const stored = localStorage.getItem(SIDEBAR_VIEW_KEY);
+    return stored === "git" || stored === "explorer" ? stored : "explorer";
+  });
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_VIEW_KEY, sidebarView);
+  }, [sidebarView]);
   const [refitToken, setRefitToken] = useState(0);
 
   /** Reveal the panel and refit it, for a terminal chord pressed while hidden. */
@@ -138,7 +155,6 @@ export default function App() {
 
   const [leftWidth, resizeLeft] = usePersistentSize("mangouste.leftWidth", 300, 160, 700);
   const [rightWidth, resizeRight] = usePersistentSize("mangouste.rightWidth", 300, 180, 700);
-  const [treeHeight, resizeTree] = usePersistentSize("mangouste.treeHeight", 380, 120, 1200);
   // Third element, not the hook's own `resize`: the panel is clamped against the
   // live column height below, which the hook's fixed [80,900] range cannot see.
   const [terminalHeight, , setTerminalHeight] = usePersistentSize(
@@ -749,6 +765,18 @@ export default function App() {
         event.preventDefault();
         openDashboard();
       }
+      // Ctrl+Shift+E / Ctrl+Shift+G pick a left view, as in VSCode. Picking one
+      // while the sidebar is collapsed reveals it rather than doing nothing.
+      if (event.ctrlKey && event.shiftKey && (event.key === "e" || event.key === "E")) {
+        event.preventDefault();
+        setSidebarView("explorer");
+        setLeftCollapsed(false);
+      }
+      if (event.ctrlKey && event.shiftKey && (event.key === "g" || event.key === "G")) {
+        event.preventDefault();
+        setSidebarView("git");
+        setLeftCollapsed(false);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -871,13 +899,48 @@ export default function App() {
             display: leftCollapsed ? "none" : "flex",
           }}
         >
-          <div style={{ height: treeHeight, flex: `0 0 ${treeHeight}px`, display: "flex" }}>
+          <div className="sidebar-tabs" role="tablist">
+            <button
+              className="sidebar-tab"
+              role="tab"
+              aria-selected={sidebarView === "explorer"}
+              data-active={sidebarView === "explorer"}
+              onClick={() => setSidebarView("explorer")}
+              title="Explorer (Ctrl+Shift+E)"
+            >
+              <FilesIcon />
+              Explorer
+            </button>
+            <button
+              className="sidebar-tab"
+              role="tab"
+              aria-selected={sidebarView === "git"}
+              data-active={sidebarView === "git"}
+              onClick={() => setSidebarView("git")}
+              title="Source control (Ctrl+Shift+G)"
+            >
+              <SourceControlIcon />
+              Source Control
+            </button>
+          </div>
+          {/* Both views stay mounted and the inactive one is hidden with
+              `display`: unmounting the SCM pane would throw away a half-typed
+              commit message and the loaded history on every glance at the
+              tree, and remounting it re-runs the whole git read. */}
+          <div
+            className="sidebar-view"
+            style={{ display: sidebarView === "explorer" ? "flex" : "none" }}
+          >
             {activeRepo && (
               <FileTree root={activeRepo} onOpenFile={openFile} selectedPath={selectedFile} />
             )}
           </div>
-          <Resizer orientation="horizontal" onDelta={resizeTree} />
-          {activeRepo && <GitPane cwd={activeRepo} onShowDiff={showDiff} />}
+          <div
+            className="sidebar-view"
+            style={{ display: sidebarView === "git" ? "flex" : "none" }}
+          >
+            {activeRepo && <GitPane cwd={activeRepo} onShowDiff={showDiff} />}
+          </div>
         </div>
 
         {!leftCollapsed && <Resizer orientation="vertical" onDelta={resizeLeft} />}

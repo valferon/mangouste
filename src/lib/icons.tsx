@@ -31,6 +31,17 @@ function Icon({ children, className, ...rest }: IconProps) {
   );
 }
 
+/** Explorer glyph: a document in front of the folder it lives in. */
+export function FilesIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M1.8 12.5V3.2h3.4l1.2 1.6h3.8v2" />
+      <path d="M9.2 6.5h2.6L14.2 9v4.5a.8.8 0 0 1-.8.8H8.4a.8.8 0 0 1-.8-.8V7.3a.8.8 0 0 1 .8-.8Z" />
+      <path d="M11.6 6.6V9h2.4" />
+    </Icon>
+  );
+}
+
 /** Source-control glyph: a side branch curving back into the trunk. */
 export function SourceControlIcon(props: IconProps) {
   return (
