@@ -2,8 +2,9 @@
 
 # mangouste
 
-Single-window, multi-repo Claude Code workbench. Replaces running one
-VSCode window per repository.
+A lightweight watcher and coordinator for many concurrent Claude Code sessions.
+Single-window and multi-repo, so it also replaces running one VSCode window per
+repository — but the reason it exists is the *n* sessions, not the one window.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -27,6 +28,38 @@ VSCode window per repository.
 `Ctrl+Shift+E` / `Ctrl+Shift+G`, and the button for the open view collapses it.
 Both views stay mounted — glancing at the tree must not throw away a half-typed
 commit message.
+
+## What it is for
+
+Running `claude` is not the problem; the CLI does that fine. Running eight of
+them across six repos and knowing which one wants you — that is the problem.
+
+So the assumption behind every pane here is *n* sessions in flight, most of them
+unattended at any moment:
+
+- **The Sessions rail is the watch surface**, not a nav tree. Every session in
+  `~/.claude/projects` on one screen, one line each, grouped by repo and ordered
+  by real conversational activity. The status column is the whole point:
+  `awaiting` is blocked on you, `pendingReview` finished while you were looking
+  elsewhere, `interrupted` went quiet mid-turn. See
+  [Sessions sidebar](#sessions-sidebar) for how each is decided.
+- **Fan-out stays visible.** Subagents and Workflow runs nest under their session
+  and hold it active, because a fanned-out session writes nothing to its own
+  transcript for minutes at a time and a naive reader calls that finished.
+- **Sessions this window did not start still count.** The rail reads the
+  transcripts on disk, so a `claude` in a bare terminal, or one from last week,
+  sits in the same list as the panes here.
+- **Nothing unmounts when hidden.** A turn keeps streaming in a chat tab you are
+  not looking at, an unsaved buffer survives a tab switch, and each repo's shells
+  keep their scrollback while another repo is in front.
+- **Steering is one keystroke from watching.** Same window, so answering an
+  `awaiting` session, reading its diff, and running the command it suggests do not
+  cost three context switches. `Ctrl+P` to the repo, `Ctrl+N` for a new session,
+  `Ctrl+\`` for its terminal.
+
+Coordinating here means reading and steering, not automating. No rule engine
+answers a prompt for you and no scheduler decides what runs next — the watcher
+tells you which session to look at, and the workbench makes the next move cheap.
 
 ## Requirements
 
@@ -298,6 +331,22 @@ lose yours, overwrite anyway, or keep editing.
 
 Tabs never unmount for the same reason: hiding is not unmounting, so switching
 tabs cannot silently drop an unsaved buffer, and closing one asks before it does.
+
+## Terminal
+
+`Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the
+one in front side by side, `Ctrl+Shift+W` closes a pane. `Ctrl+Shift+M` moves the
+whole panel between the bottom of the column and the right of the chat, and each
+dock remembers the size it was last dragged to under its own key — a stored
+height means nothing as a width.
+
+The dock switch is one `flex-direction` on a wrapper, deliberately: the panel
+keeps its place among that wrapper's children in both orientations, because React
+re-parenting it would unmount it and `TerminalPane`'s cleanup closes its pty. For
+the same reason a hidden pane — another repo's, another tab's, the whole panel
+collapsed — is a pane with `display: none` and a live shell behind it, never an
+absent one. `refitToken` is what re-runs xterm's `fit()` once the box has layout
+again, since a `display: none` box has no measurable size.
 
 ## X11 selection behaviour
 
