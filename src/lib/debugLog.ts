@@ -8,6 +8,8 @@
  * the log survives the drawer being closed.
  */
 
+import { KEYS, readString, writeString } from "./persist";
+
 export interface DebugEntry {
   seq: number;
   /** Wall-clock ms of the first occurrence. */
@@ -127,11 +129,11 @@ export function debugVersion(): number {
 // Costly and noisy, so opt-in, and it only applies when the process is
 // (re)spawned.
 
-const CLI_DEBUG_KEY = "mangouste.cliDebug";
+const CLI_DEBUG_KEY = KEYS.prefs.cliDebug;
 
 export function cliDebugEnabled(): boolean {
   try {
-    return localStorage.getItem(CLI_DEBUG_KEY) === "1";
+    return readString(CLI_DEBUG_KEY) === "1";
   } catch {
     return false;
   }
@@ -139,7 +141,7 @@ export function cliDebugEnabled(): boolean {
 
 export function setCliDebug(enabled: boolean): void {
   try {
-    localStorage.setItem(CLI_DEBUG_KEY, enabled ? "1" : "0");
+    writeString(CLI_DEBUG_KEY, enabled ? "1" : "0");
   } catch {
     // Private mode: the toggle just does not persist.
   }

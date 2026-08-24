@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { fetchUsage, gitStatus } from "../lib/ipc";
 import type { ClaudeUsage, ProjectGroup } from "../lib/types";
 import { copyText } from "../lib/editing";
+import { KEYS, readString, writeString } from "../lib/persist";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { useFlags } from "../lib/sessionFlagsContext";
 
@@ -21,7 +22,7 @@ interface StatusPanelProps {
 }
 
 /** Usage reads an OAuth token, so it stays opt-in and off by default. */
-const USAGE_ENABLED_KEY = "mangouste.usageEnabled";
+const USAGE_ENABLED_KEY = KEYS.prefs.usageEnabled;
 const USAGE_REFRESH_MS = 5 * 60_000;
 
 function compact(n: number): string {
@@ -77,7 +78,7 @@ function UsageBar({
 export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: StatusPanelProps) {
   const menu = useMenu();
   const [usageEnabled, setUsageEnabled] = useState(
-    () => localStorage.getItem(USAGE_ENABLED_KEY) === "true",
+    () => readString(USAGE_ENABLED_KEY) === "true",
   );
   const [usage, setUsage] = useState<ClaudeUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -96,7 +97,7 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
   }, [usageEnabled]);
 
   useEffect(() => {
-    localStorage.setItem(USAGE_ENABLED_KEY, String(usageEnabled));
+    writeString(USAGE_ENABLED_KEY, String(usageEnabled));
     if (!usageEnabled) {
       setUsage(null);
       setUsageError(null);

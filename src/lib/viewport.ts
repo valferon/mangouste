@@ -9,8 +9,9 @@
 
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { KEYS, readNumber, writeString } from "./persist";
 
-const ZOOM_KEY = "mangouste.zoom";
+const ZOOM_KEY = KEYS.prefs.zoom;
 
 /**
  * The zoom ladder, as in a browser.
@@ -24,9 +25,8 @@ export const DEFAULT_ZOOM = 1;
 
 /** Remembered zoom, clamped to the ladder so a hand-edited value cannot stick. */
 export function loadZoom(): number {
-  const stored = Number(localStorage.getItem(ZOOM_KEY));
-  if (!Number.isFinite(stored) || stored <= 0) return DEFAULT_ZOOM;
-  return nearestZoom(stored);
+  const stored = readNumber(ZOOM_KEY, DEFAULT_ZOOM);
+  return stored > 0 ? nearestZoom(stored) : DEFAULT_ZOOM;
 }
 
 function nearestZoom(factor: number): number {
@@ -42,7 +42,7 @@ export function stepZoom(factor: number, direction: 1 | -1): number {
 }
 
 export async function applyZoom(factor: number): Promise<void> {
-  localStorage.setItem(ZOOM_KEY, String(factor));
+  writeString(ZOOM_KEY, String(factor));
   try {
     await getCurrentWebview().setZoom(factor);
   } catch {

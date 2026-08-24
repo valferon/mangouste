@@ -1,12 +1,15 @@
 /** Theme handling. `system` follows the desktop's light/dark preference. */
 
+import { KEYS, readEnum, writeString } from "./persist";
+
 export type Theme = "system" | "light" | "dark";
 
-const THEME_KEY = "mangouste.theme";
+export const THEMES: readonly Theme[] = ["system", "light", "dark"];
+
+const THEME_KEY = KEYS.prefs.theme;
 
 export function loadTheme(): Theme {
-  const stored = localStorage.getItem(THEME_KEY);
-  return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+  return readEnum(THEME_KEY, THEMES, "system");
 }
 
 /**
@@ -17,7 +20,7 @@ export function loadTheme(): Theme {
  * and the app follows the desktop live, without a listener.
  */
 export function applyTheme(theme: Theme): void {
-  localStorage.setItem(THEME_KEY, theme);
+  writeString(THEME_KEY, theme);
   const root = document.documentElement;
   if (theme === "system") {
     root.removeAttribute("data-theme");

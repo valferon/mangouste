@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { KEYS, readJson, writeJson } from "./persist";
 import type { SessionMeta, SessionStatus } from "./types";
 
 /**
@@ -9,8 +10,8 @@ import type { SessionMeta, SessionStatus } from "./types";
  * it. They live in `localStorage` because they are per-person and per-machine:
  * nothing on disk should change because you archived a row.
  */
-const SEEN_KEY = "mangouste.sessionsSeen";
-const ARCHIVED_KEY = "mangouste.sessionsArchived";
+const SEEN_KEY = KEYS.overlay.sessionsSeen;
+const ARCHIVED_KEY = KEYS.overlay.sessionsArchived;
 
 /**
  * One session's read state.
@@ -33,21 +34,44 @@ const EMPTY: Mark = { w: 0, seenAt: 0, unread: 0 };
 /** How many recently-checked sessions stay visually "warm". */
 const CHECKED_SET_SIZE = 5;
 
-function readJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
+/**
+ * Shape guards for the two stored values.
+ *
+ * This overlay is the whole of `pendingReview` and drives every status dot, so a
+ * malformed mark is not a cosmetic problem — a `w` of `undefined` makes
+ * `lastActivityMs <= w` false forever and pins a session unread. Marks are
+ * checked per entry and bad ones dropped, rather than the whole map discarded:
+ * one corrupt row must not cost you the read state of every other session.
+ */
+function isMark(value: unknown): value is Mark {
+  if (typeof value !== "object" || value === null) return false;
+  const mark = value as Record<string, unknown>;
+  return (
+    Number.isFinite(mark.w) && Number.isFinite(mark.seenAt) && Number.isFinite(mark.unread)
+  );
 }
 
-function writeJson(key: string, value: unknown): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // A full or blocked store costs the flag, not the pane.
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Drop the entries that are not marks, keeping the rest. Exported for its test:
+    "one corrupt row costs one row" is the property worth pinning. */
+export function cleanMarks(raw: Record<string, unknown>): Record<string, Mark> {
+  const marks: Record<string, Mark> = {};
+  for (const [id, mark] of Object.entries(raw)) {
+    if (isMark(mark)) marks[id] = mark;
   }
+  return marks;
+}
+
+/** Same treatment for the archive map, whose values are plain booleans. */
+export function cleanFlags(raw: Record<string, unknown>): Record<string, boolean> {
+  const flags: Record<string, boolean> = {};
+  for (const [id, flag] of Object.entries(raw)) {
+    if (typeof flag === "boolean") flags[id] = flag;
+  }
+  return flags;
 }
 
 export interface SessionFlags {
@@ -90,9 +114,11 @@ export interface SessionFlags {
 }
 
 export function useSessionFlags(): SessionFlags {
-  const [marks, setMarks] = useState<Record<string, Mark>>(() => readJson(SEEN_KEY, {}));
+  const [marks, setMarks] = useState<Record<string, Mark>>(() =>
+    cleanMarks(readJson<Record<string, unknown>>(SEEN_KEY, {}, isPlainObject)),
+  );
   const [archived, setArchivedMap] = useState<Record<string, boolean>>(() =>
-    readJson(ARCHIVED_KEY, {}),
+    cleanFlags(readJson<Record<string, unknown>>(ARCHIVED_KEY, {}, isPlainObject)),
   );
 
   const markOf = useCallback((id: string): Mark => marks[id] ?? EMPTY, [marks]);

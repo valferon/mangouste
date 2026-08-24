@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { readNumber, writeString } from "../lib/persist";
 
 interface ResizerProps {
   /** `vertical` drags left/right (a column edge); `horizontal` drags up/down. */
@@ -57,15 +58,17 @@ export function Resizer({ orientation, onDelta }: ResizerProps) {
  */
 export function usePersistentSize(key: string, initial: number, min: number, max: number) {
   const [size, setSize] = useState(() => {
-    const stored = Number(localStorage.getItem(key));
-    return Number.isFinite(stored) && stored > 0 ? clamp(stored, min, max) : initial;
+    // A stored 0 (or a negative) is not a size, it is a collapsed pane written
+    // by an older build — fall back rather than clamp it up to `min`.
+    const stored = readNumber(key, 0);
+    return stored > 0 ? clamp(stored, min, max) : initial;
   });
 
   // Debounced: a drag lands one `setSize` per pointer event, and a synchronous
   // write per frame is the expensive half of resizing. The only thing lost is a
   // size the window was closed within a quarter second of.
   useEffect(() => {
-    const timer = setTimeout(() => localStorage.setItem(key, String(size)), 250);
+    const timer = setTimeout(() => writeString(key, String(size)), 250);
     return () => clearTimeout(timer);
   }, [key, size]);
 
