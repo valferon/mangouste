@@ -35,6 +35,17 @@ const SIDEBAR_VIEW_KEY = "mangouste.sidebarView";
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "git";
 
+/** The activity rail, in order. `hint` is the chord shown in the tooltip. */
+const ACTIVITY_ITEMS: {
+  view: SidebarView;
+  label: string;
+  hint: string;
+  Glyph: (props: { className?: string }) => React.ReactElement;
+}[] = [
+  { view: "explorer", label: "Explorer", hint: "Ctrl+Shift+E", Glyph: FilesIcon },
+  { view: "git", label: "Source Control", hint: "Ctrl+Shift+G", Glyph: SourceControlIcon },
+];
+
 /**
  * Shared no-op for callbacks handed to inactive panes.
  *
@@ -145,6 +156,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(SIDEBAR_VIEW_KEY, sidebarView);
   }, [sidebarView]);
+  /**
+   * Rail click: switch views, or collapse when the view is already showing.
+   *
+   * Same as VSCode — the rail button for the open view is the collapse toggle,
+   * and any other button both switches and reveals.
+   */
+  const toggleSidebarView = useCallback(
+    (view: SidebarView) => {
+      setLeftCollapsed((collapsed) => (sidebarView === view ? !collapsed : false));
+      setSidebarView(view);
+    },
+    [sidebarView],
+  );
   const [refitToken, setRefitToken] = useState(0);
 
   /** Reveal the panel and refit it, for a terminal chord pressed while hidden. */
@@ -890,6 +914,28 @@ export default function App() {
       </div>
 
       <div className="workbench">
+        {/* The rail sits outside the sidebar so it survives a collapse: it is
+            what you click to bring the sidebar back. */}
+        <div className="activity-bar" role="tablist" aria-label="Sidebar views">
+          {ACTIVITY_ITEMS.map(({ view, label, hint, Glyph }) => {
+            const active = sidebarView === view && !leftCollapsed;
+            return (
+              <button
+                key={view}
+                className="activity-item"
+                role="tab"
+                aria-selected={active}
+                aria-label={label}
+                data-active={active}
+                onClick={() => toggleSidebarView(view)}
+                title={`${label} (${hint})`}
+              >
+                <Glyph />
+              </button>
+            );
+          })}
+        </div>
+
         <div
           className="sidebar"
           style={{
@@ -899,30 +945,6 @@ export default function App() {
             display: leftCollapsed ? "none" : "flex",
           }}
         >
-          <div className="sidebar-tabs" role="tablist">
-            <button
-              className="sidebar-tab"
-              role="tab"
-              aria-selected={sidebarView === "explorer"}
-              data-active={sidebarView === "explorer"}
-              onClick={() => setSidebarView("explorer")}
-              title="Explorer (Ctrl+Shift+E)"
-            >
-              <FilesIcon />
-              Explorer
-            </button>
-            <button
-              className="sidebar-tab"
-              role="tab"
-              aria-selected={sidebarView === "git"}
-              data-active={sidebarView === "git"}
-              onClick={() => setSidebarView("git")}
-              title="Source control (Ctrl+Shift+G)"
-            >
-              <SourceControlIcon />
-              Source Control
-            </button>
-          </div>
           {/* Both views stay mounted and the inactive one is hidden with
               `display`: unmounting the SCM pane would throw away a half-typed
               commit message and the loaded history on every glance at the
