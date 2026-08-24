@@ -36,6 +36,7 @@ export const CHORD = {
   newTerminal: "Ctrl+Shift+T",
   splitTerminal: "Ctrl+Shift+5",
   closeTerminal: "Ctrl+Shift+W",
+  dockTerminal: "Ctrl+Shift+M",
   terminalCopy: "Ctrl+Shift+C",
   terminalPaste: "Ctrl+Shift+V",
 
@@ -98,6 +99,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: CHORD.newTerminal, what: "New terminal tab" },
       { keys: CHORD.splitTerminal, what: "Split the terminal tab" },
       { keys: CHORD.closeTerminal, what: "Close the terminal pane" },
+      { keys: CHORD.dockTerminal, what: "Move the panel between the bottom and the right" },
       { keys: CHORD.terminalCopy, what: "Copy the selection" },
       { keys: CHORD.terminalPaste, what: "Paste" },
     ],

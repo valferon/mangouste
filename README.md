@@ -360,8 +360,9 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Ctrl+,` | Settings |
 | `Ctrl+\`` | Toggle terminal |
 | `Ctrl+Shift+T` | New terminal tab |
-| `Ctrl+Shift+5` | Split terminal vertically |
+| `Ctrl+Shift+5` | Split terminal side by side |
 | `Ctrl+Shift+W` | Close terminal pane |
+| `Ctrl+Shift+M` | Dock the terminal panel bottom / right |
 | `Ctrl+B` | Toggle left sidebar |
 | `Ctrl+Shift+E/G` | Explorer / Source Control |
 | `Ctrl+Shift+D` | Dashboard |

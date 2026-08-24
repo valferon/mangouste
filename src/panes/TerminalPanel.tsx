@@ -17,6 +17,9 @@ export interface TerminalActions {
   closePane: () => void;
 }
 
+/** Which edge of the centre column the panel is docked to. */
+export type TerminalDock = "bottom" | "right";
+
 /** One shell. `id` is the key the Rust side stores the pty under. */
 interface TerminalSlot {
   id: string;
@@ -69,8 +72,10 @@ interface TerminalPanelProps {
   /** Repo in front. Its group is the one the tab strip and stack show. */
   repo: string;
   visible: boolean;
-  /** Panel height in pixels, owned by the parent's drag handle. */
-  height: number;
+  /** Panel size along the docked edge, in pixels, owned by the parent's drag handle. */
+  size: number;
+  /** Bottom of the column, or its right-hand side. */
+  dock: TerminalDock;
   /** Bumped by the parent when the panel's box changes, to force a refit. */
   refitToken: number;
   themeKey: string;
@@ -78,6 +83,8 @@ interface TerminalPanelProps {
   onClose: () => void;
   /** Show the panel, for a chord pressed while it is hidden. */
   onRequestShow: () => void;
+  /** Move the panel to the other edge. */
+  onDock: (dock: TerminalDock) => void;
   /** Publishes new/split/close upward, for the menu bar. */
   onRegisterActions?: (actions: TerminalActions | null) => void;
 }
@@ -95,11 +102,13 @@ interface TerminalPanelProps {
 export function TerminalPanel({
   repo,
   visible,
-  height,
+  size,
+  dock,
   refitToken,
   themeKey,
   onClose,
   onRequestShow,
+  onDock,
   onRegisterActions,
 }: TerminalPanelProps) {
   const menu = useMenu();
@@ -129,7 +138,7 @@ export function TerminalPanel({
     setGroups((current) => (current[repo] ? current : { ...current, [repo]: makeGroup() }));
   }, [visible, repo]);
 
-  useEffect(() => setShowToken((token) => token + 1), [repo, group?.activeTab, visible]);
+  useEffect(() => setShowToken((token) => token + 1), [repo, group?.activeTab, visible, dock]);
 
   const addTab = useCallback(() => {
     if (!repo) return;
@@ -313,13 +322,19 @@ export function TerminalPanel({
         danger: true,
         run: () => closeTab(tabId),
       },
+      "separator",
+      {
+        label: dock === "right" ? "Move Panel to the Bottom" : "Move Panel to the Right",
+        accelerator: CHORD.dockTerminal,
+        run: () => onDock(dock === "right" ? "bottom" : "right"),
+      },
       {
         label: "Hide Terminal Panel",
         accelerator: CHORD.toggleTerminal,
         run: onClose,
       },
     ],
-    [addTab, splitTab, closeTab, group, onClose],
+    [addTab, splitTab, closeTab, group, dock, onDock, onClose],
   );
 
   // Panel chords, captured at the window so they never reach a shell.
@@ -338,7 +353,9 @@ export function TerminalPanel({
             ? splitTab
             : event.code === "KeyW"
               ? closeActiveSlot
-              : null;
+              : event.code === "KeyM"
+                ? () => onDock(dock === "right" ? "bottom" : "right")
+                : null;
       if (!handler) return;
       event.preventDefault();
       event.stopPropagation();
@@ -346,15 +363,20 @@ export function TerminalPanel({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [addTab, splitTab, closeActiveSlot]);
+  }, [addTab, splitTab, closeActiveSlot, dock, onDock]);
 
   return (
     <div
       className="terminal-panel"
-      // Shrinkable, unlike the editor above it, whose `flex: 1` basis of 0 leaves
-      // it nothing to give: when the column is shorter than the stored height,
-      // the panel is the item that yields rather than overflowing the bottom.
-      style={{ height, flex: `0 1 ${height}px`, display: visible ? "flex" : "none" }}
+      data-dock={dock}
+      // Shrinkable, unlike the chat beside it, whose `flex: 1` basis of 0 leaves
+      // it nothing to give: when the column is smaller than the stored size, the
+      // panel is the item that yields rather than overflowing its edge.
+      style={{
+        ...(dock === "right" ? { width: size } : { height: size }),
+        flex: `0 1 ${size}px`,
+        display: visible ? "flex" : "none",
+      }}
     >
       <div
         className="terminal-bar"
@@ -402,7 +424,7 @@ export function TerminalPanel({
           <button
             className="toggle-button"
             onClick={splitTab}
-            title="Split terminal vertically (Ctrl+Shift+5)"
+            title="Split terminal side by side (Ctrl+Shift+5)"
             disabled={!group}
           >
             ⇔

@@ -8,7 +8,11 @@ import { QuickOpen } from "./panes/QuickOpen";
 import { Settings } from "./panes/Settings";
 import { StatusPanel, type ChatStats } from "./panes/StatusPanel";
 import { SessionsPane } from "./panes/SessionsPane";
-import { TerminalPanel, type TerminalActions } from "./panes/TerminalPanel";
+import {
+  TerminalPanel,
+  type TerminalActions,
+  type TerminalDock,
+} from "./panes/TerminalPanel";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
@@ -48,6 +52,7 @@ const PERMISSION_MODE_KEY = "mangouste.permissionMode";
 const MODEL_KEY = "mangouste.model";
 const ACTIVE_REPO_KEY = "mangouste.activeRepo";
 const SIDEBAR_VIEW_KEY = "mangouste.sidebarView";
+const TERMINAL_DOCK_KEY = "mangouste.terminalDock";
 
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "git";
@@ -99,6 +104,10 @@ const TERMINAL_MIN_HEIGHT = 80;
 
 /** Space the editor keeps above the terminal, however far the divider is dragged. */
 const TERMINAL_EDITOR_FLOOR = 140;
+
+/** The same pair for a right-docked panel, where the axis is width. */
+const TERMINAL_MIN_WIDTH = 200;
+const TERMINAL_CHAT_FLOOR = 320;
 
 /** There is one dashboard, so its tab has a fixed id rather than a minted one. */
 const DASHBOARD_TAB = "dashboard";
@@ -216,6 +225,21 @@ function Workbench() {
     [sidebarView],
   );
   const [refitToken, setRefitToken] = useState(0);
+  /**
+   * Which edge the terminal panel sits on.
+   *
+   * Only a `flex-direction` and which axis the stored size applies to: the panel
+   * keeps its place in the tree either way, because moving it would unmount it
+   * and its cleanup kills every shell behind it.
+   */
+  const [terminalDock, setTerminalDock] = useState<TerminalDock>(() =>
+    localStorage.getItem(TERMINAL_DOCK_KEY) === "right" ? "right" : "bottom",
+  );
+  useEffect(() => {
+    localStorage.setItem(TERMINAL_DOCK_KEY, terminalDock);
+    // The panel's box changes shape, so every grid in it has to be re-fitted.
+    setRefitToken((token) => token + 1);
+  }, [terminalDock]);
 
   /** The two Help sheets. Neither holds state worth keeping while closed. */
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -263,45 +287,66 @@ function Workbench() {
     80,
     900,
   );
-  /** The column the terminal panel shares with the editor, for that clamp. */
-  const centerColumn = useRef<HTMLDivElement>(null);
+  // A separate key, so each dock remembers the size it was last dragged to
+  // rather than inheriting a height that means nothing as a width.
+  const [terminalWidth, , setTerminalWidth] = usePersistentSize(
+    "mangouste.terminalWidth",
+    420,
+    200,
+    1200,
+  );
+  /** The box the terminal panel shares with the editor, for that clamp. */
+  const centerBody = useRef<HTMLDivElement>(null);
+
+  /** The floor and the setter for whichever axis the dock is measured on. */
+  const terminalAxis = useCallback(
+    () =>
+      terminalDock === "right"
+        ? { min: TERMINAL_MIN_WIDTH, setSize: setTerminalWidth }
+        : { min: TERMINAL_MIN_HEIGHT, setSize: setTerminalHeight },
+    [terminalDock, setTerminalWidth, setTerminalHeight],
+  );
 
   /**
-   * Largest panel height that still leaves the editor something.
+   * Largest panel size that still leaves the editor something.
    *
    * A stored height taller than the window used to push the panel straight past
    * the bottom of the workbench, which clips at the status bar — so the terminal
    * looked like it ran underneath it, with its last rows unreachable.
    */
   const terminalLimit = useCallback(() => {
-    const column = centerColumn.current?.clientHeight ?? 0;
-    return Math.max(TERMINAL_MIN_HEIGHT, column - TERMINAL_EDITOR_FLOOR);
-  }, []);
+    const body = centerBody.current;
+    return terminalDock === "right"
+      ? Math.max(TERMINAL_MIN_WIDTH, (body?.clientWidth ?? 0) - TERMINAL_CHAT_FLOOR)
+      : Math.max(TERMINAL_MIN_HEIGHT, (body?.clientHeight ?? 0) - TERMINAL_EDITOR_FLOOR);
+  }, [terminalDock]);
 
+  // Both docks grow the panel as the divider is dragged *towards* the editor,
+  // so the delta is subtracted either way — left for a width, up for a height.
   const dragTerminal = useCallback(
     (delta: number) => {
       const limit = terminalLimit();
-      setTerminalHeight((current) =>
-        Math.min(Math.max(current - delta, TERMINAL_MIN_HEIGHT), limit),
-      );
+      const { min, setSize } = terminalAxis();
+      setSize((current) => Math.min(Math.max(current - delta, min), limit));
       setRefitToken((token) => token + 1);
     },
-    [terminalLimit, setTerminalHeight],
+    [terminalLimit, terminalAxis],
   );
 
   // Re-clamp when the window resizes, since the limit moves with it.
   useEffect(() => {
-    const column = centerColumn.current;
-    if (!column) return;
+    const body = centerBody.current;
+    if (!body) return;
+    const { setSize } = terminalAxis();
     const clamp = () => {
       const limit = terminalLimit();
-      setTerminalHeight((current) => (current > limit ? limit : current));
+      setSize((current) => (current > limit ? limit : current));
     };
     clamp();
     const observer = new ResizeObserver(clamp);
-    observer.observe(column);
+    observer.observe(body);
     return () => observer.disconnect();
-  }, [terminalLimit, setTerminalHeight]);
+  }, [terminalLimit, terminalAxis]);
 
   /* ---------- X11 selection behaviour ---------- */
 
@@ -1212,13 +1257,25 @@ function Workbench() {
       },
       "separator",
       {
+        label: "Dock to the Bottom",
+        checked: terminalDock === "bottom",
+        run: () => setTerminalDock("bottom"),
+      },
+      {
+        label: "Dock to the Right",
+        accelerator: CHORD.dockTerminal,
+        checked: terminalDock === "right",
+        run: () => setTerminalDock("right"),
+      },
+      "separator",
+      {
         label: "Terminal Panel",
         accelerator: CHORD.toggleTerminal,
         checked: terminalVisible,
         run: toggleTerminal,
       },
     ],
-    [showTerminal, terminalVisible, toggleTerminal],
+    [showTerminal, terminalVisible, toggleTerminal, terminalDock],
   );
 
   /**
@@ -1440,7 +1497,7 @@ function Workbench() {
 
         {!leftCollapsed && <Resizer orientation="vertical" onDelta={resizeLeft} />}
 
-        <div className="center-column" ref={centerColumn}>
+        <div className="center-column">
           <div
             className="tab-strip"
             onContextMenu={(event) =>
@@ -1595,89 +1652,106 @@ function Workbench() {
             </button>
           </div>
 
-          {/* Every chat tab stays mounted: hiding is not unmounting, so a turn
-              keeps streaming while you read another session. */}
-          {chatTabs.map((tab) => (
-            <div
-              key={tab.id}
-              style={{
-                display: tab.id === activeTab ? "flex" : "none",
-                flex: 1,
-                minHeight: 0,
-              }}
-            >
-              <ChatPane
-                chatId={tab.id}
-                cwd={tab.cwd}
-                visible={tab.id === activeTab}
-                resume={tab.sessionId}
-                resumeFile={tab.resumeFile}
-                onSessionId={sessionIdHandlerFor(tab.id)}
-                onOpenFile={openFile}
-                onSystemMessage={setSystemMessage}
-                onPhase={tab.id === activeTab ? setPhase : noop}
-                onStatus={statusHandlerFor(tab.id)}
-                onStats={tab.id === activeTab ? handleChatStats : noop}
-                permissionMode={permissionMode}
-                model={modelAlias}
-                onModel={setModelAlias}
-              />
-            </div>
-          ))}
+          <div
+            className="center-body"
+            ref={centerBody}
+            // The one thing a dock change touches, besides which axis the stored
+            // size applies to. The panel keeps its place among these children in
+            // both directions, because React re-parenting it would unmount it and
+            // its cleanup closes every pty behind it.
+            style={{ flexDirection: terminalDock === "right" ? "row" : "column" }}
+          >
+            <div className="center-content">
+              {/* Every chat tab stays mounted: hiding is not unmounting, so a turn
+                  keeps streaming while you read another session. */}
+              {chatTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  style={{
+                    display: tab.id === activeTab ? "flex" : "none",
+                    flex: 1,
+                    minHeight: 0,
+                  }}
+                >
+                  <ChatPane
+                    chatId={tab.id}
+                    cwd={tab.cwd}
+                    visible={tab.id === activeTab}
+                    resume={tab.sessionId}
+                    resumeFile={tab.resumeFile}
+                    onSessionId={sessionIdHandlerFor(tab.id)}
+                    onOpenFile={openFile}
+                    onSystemMessage={setSystemMessage}
+                    onPhase={tab.id === activeTab ? setPhase : noop}
+                    onStatus={statusHandlerFor(tab.id)}
+                    onStats={tab.id === activeTab ? handleChatStats : noop}
+                    permissionMode={permissionMode}
+                    model={modelAlias}
+                    onModel={setModelAlias}
+                  />
+                </div>
+              ))}
 
-          {/* File tabs stay mounted for the same reason chat tabs do: unmounting
-              one would throw away an unsaved draft on a tab switch, silently.
-              `visible` is what keeps their Ctrl+S handlers from all firing. */}
-          {fileTabs.map((tab) => (
-            <div
-              key={tab.id}
-              style={{
-                display: tab.id === activeTab ? "flex" : "none",
-                flex: 1,
-                minHeight: 0,
-              }}
-            >
-              <FileView
-                path={tab.path}
-                visible={tab.id === activeTab}
-                onDirtyChange={handleFileDirty}
-                onRegisterSave={registerFileSave}
-              />
+              {/* File tabs stay mounted for the same reason chat tabs do: unmounting
+                  one would throw away an unsaved draft on a tab switch, silently.
+                  `visible` is what keeps their Ctrl+S handlers from all firing. */}
+              {fileTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  style={{
+                    display: tab.id === activeTab ? "flex" : "none",
+                    flex: 1,
+                    minHeight: 0,
+                  }}
+                >
+                  <FileView
+                    path={tab.path}
+                    visible={tab.id === activeTab}
+                    onDirtyChange={handleFileDirty}
+                    onRegisterSave={registerFileSave}
+                  />
+                </div>
+              ))}
+              {currentTab?.kind === "diff" && (
+                <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+                  <DiffView patch={currentTab.patch} />
+                </div>
+              )}
+              {currentTab?.kind === "dashboard" && (
+                <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+                  <Dashboard
+                    groups={sessionGroups}
+                    onResume={handleResume}
+                    onSelectRepo={handleSelectRepo}
+                  />
+                </div>
+              )}
             </div>
-          ))}
-          {currentTab?.kind === "diff" && (
-            <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-              <DiffView patch={currentTab.patch} />
-            </div>
-          )}
-          {currentTab?.kind === "dashboard" && (
-            <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-              <Dashboard
-                groups={sessionGroups}
-                onResume={handleResume}
-                onSelectRepo={handleSelectRepo}
-              />
-            </div>
-          )}
 
-          {terminalVisible && (
-            <Resizer orientation="horizontal" onDelta={dragTerminal} />
-          )}
-          {/* Hidden, never unmounted, and holding every repo's terminals at
-              once: unmounting a pane runs its cleanup, which closes the pty and
-              kills the shell, so neither Ctrl+` nor a repo switch may take a
-              pane out of the tree. The toggle bumps `refitToken`, which re-runs
-              fit() once the box has layout again. */}
-          <TerminalPanel
-            repo={activeRepo}
-            visible={terminalVisible}
-            height={terminalHeight}
-            refitToken={refitToken}
-            themeKey={theme}
-            onClose={() => setTerminalVisible(false)}
-            onRequestShow={showTerminal}
-            onRegisterActions={registerTerminalActions}
-          />
+            {terminalVisible && (
+              <Resizer
+                orientation={terminalDock === "right" ? "vertical" : "horizontal"}
+                onDelta={dragTerminal}
+              />
+            )}
+            {/* Hidden, never unmounted, and holding every repo's terminals at
+                once: unmounting a pane runs its cleanup, which closes the pty and
+                kills the shell, so neither Ctrl+` nor a repo switch may take a
+                pane out of the tree. The toggle bumps `refitToken`, which re-runs
+                fit() once the box has layout again. */}
+            <TerminalPanel
+              repo={activeRepo}
+              visible={terminalVisible}
+              size={terminalDock === "right" ? terminalWidth : terminalHeight}
+              dock={terminalDock}
+              refitToken={refitToken}
+              themeKey={theme}
+              onClose={() => setTerminalVisible(false)}
+              onRequestShow={showTerminal}
+              onDock={setTerminalDock}
+              onRegisterActions={registerTerminalActions}
+            />
+          </div>
         </div>
 
         <Resizer orientation="vertical" onDelta={(delta) => resizeRight(-delta)} />

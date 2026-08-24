@@ -417,6 +417,27 @@ body {
   min-height: 0;
 }
 
+/* Everything under the tab strip: the editor and the terminal panel, divided
+   along whichever axis the panel is docked on. `flex-direction` is the only
+   thing the dock switch changes here, and it is set inline. */
+.center-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The editor side of that division. Shrinkable on both axes, so the panel's
+   stored size is what wins and the tab bodies inside re-fit rather than
+   pushing the panel off its edge. */
+.center-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -1569,12 +1590,19 @@ select {
 .terminal-panel {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   /* Nothing may paint past the panel: an oversized xterm grid would otherwise
      spill over the status bar, which is the one thing below it. */
   overflow: hidden;
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
+}
+
+/* Right-docked, the divider it needs a rule for is the one beside the chat. */
+.terminal-panel[data-dock="right"] {
+  border-top: none;
+  border-left: 1px solid var(--border);
 }
 
 /* One row per repo, stacked; only the front one is displayed. */
