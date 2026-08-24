@@ -95,14 +95,34 @@ jobs:
       # that cannot start. `signingIdentity: "-"` in tauri.conf.json asks the
       # bundler for an ad-hoc signature; this asserts it actually applied one,
       # since the failure would otherwise only show up on a user's Mac.
-      - name: Verify the macOS bundle is signed
+      #
+      # Checked inside the mounted .dmg rather than in bundle/macos, because the
+      # dmg bundler deletes the .app once it has been copied into the image --
+      # and the copy in the image is the one people actually run. `lipo` goes
+      # with it: a universal bundle missing a slice is the other way this
+      # artifact can be broken without the build saying so.
+      - name: Verify the macOS bundle is signed and universal
         if: runner.os == 'macOS'
         run: |
-          app="$(find src-tauri/target/${{ matrix.bundle-target }}/release/bundle \
-                 -maxdepth 2 -name '*.app' -print -quit)"
-          test -n "$app" || { echo "no .app was bundled"; exit 1; }
+          dmg="$(find src-tauri/target/${{ matrix.bundle-target }}/release/bundle/dmg \
+                 -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg" || { echo "no .dmg was bundled"; exit 1; }
+          mount="$(mktemp -d)"
+          # Detach even when a check below fails, so a failed run does not leave
+          # the image attached to the runner.
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly -quiet
+          app="$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app" || { echo "no .app inside $dmg"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --display --verbose=2 "$app"
+          bin="$(find "$app/Contents/MacOS" -maxdepth 1 -type f -perm -u+x -print -quit)"
+          archs="$(lipo -archs "$bin")"
+          echo "$bin: $archs"
+          case "$archs" in
+            *arm64*x86_64* | *x86_64*arm64*) ;;
+            *) echo "not a universal binary"; exit 1 ;;
+          esac
 
       # Tauri hardcodes the pre-t64 `libgtk-3-0` into Depends, which has no
       # candidate on 24.04, so the generated .deb will not install until the
