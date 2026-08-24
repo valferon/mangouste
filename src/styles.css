@@ -65,14 +65,14 @@
    below; every colour is defined here first so no token is only defined inside
    a media query. */
 :root {
-  --bg: #1f1f1f;
-  --bg-elevated: #181818;
-  --bg-panel: #1f1f1f;
-  --bg-hover: #2a2d2e;
-  --bg-active: #04395e;
-  --border: #2b2b2b;
-  --fg: #cccccc;
-  --fg-dim: #8b8b8b;
+  --bg: #232323;
+  --bg-elevated: #1c1c1c;
+  --bg-panel: #232323;
+  --bg-hover: #323639;
+  --bg-active: #0a4a78;
+  --border: #3c3c3c;
+  --fg: #e6e6e6;
+  --fg-dim: #aaaaaa;
   --fg-bright: #ffffff;
   --accent: #0078d4;
   --accent-fg: #ffffff;
@@ -89,17 +89,17 @@
   --chip-fg: #9cdcfe;
   --chip-head-bg: #4b3a6b;
   --chip-head-fg: #d9b3ff;
-  --status-idle: #4a4a4a;
-  --track: #ffffff14;
-  --scrollbar-thumb: #4a4a4a80;
-  --scrollbar-thumb-hover: #6a6a6a;
+  --status-idle: #6e6e6e;
+  --track: #ffffff1f;
+  --scrollbar-thumb: #7979799e;
+  --scrollbar-thumb-hover: #8f8f8f;
   --scrim: #0006;
   --shadow: #000a;
   /* xterm paints to a canvas and cannot inherit CSS, so the full 16-colour ANSI
      ramp lives here and is read out at runtime. VSCode Dark+ values. */
-  --term-black: #3b3b3b;
-  --term-white: #cccccc;
-  --term-bright-black: #666666;
+  --term-black: #4a4a4a;
+  --term-white: #e6e6e6;
+  --term-bright-black: #8a8a8a;
   --term-bright-red: #f14c4c;
   --term-bright-green: #23d18b;
   --term-bright-yellow: #f5f543;
@@ -109,7 +109,7 @@
   --term-bright-white: #e5e5e5;
   /* Code-block syntax ramp, by role rather than by highlight.js scope name, so
      the mapping below can move without retuning the palette. VSCode Dark+. */
-  --syn-comment: #6a9955;
+  --syn-comment: #7fb069;
   --syn-keyword: #569cd6;
   --syn-control: #c586c0;
   --syn-string: #ce9178;
