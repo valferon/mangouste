@@ -120,6 +120,36 @@ slices, so the Intel half is a cross-compile. Tests run native arm64, because
 `universal-apple-darwin` is a Tauri pseudo-target that `cargo test --target`
 will not accept.
 
+### Installing on macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/valferon/mangouste/main/scripts/install-macos.sh | bash
+```
+
+`| bash`, not `| sh`. Re-run it to update; it skips the work when the installed
+version already matches, and `--force` reinstalls anyway.
+
+That one command exists because of a single extended attribute. A browser
+attaches `com.apple.quarantine` to a download; Gatekeeper then assesses the app,
+finds no notarization, and the *kernel* refuses to execute it — the icon bounces
+and nothing starts, with `AppleSystemPolicy: Security policy would not allow
+process` in the system log. The verdict is cached against the binary's cdhash, so
+clearing the flag afterwards does not reopen it. `curl` attaches no such flag, so
+fetching the image from a script sidesteps the assessment entirely and the app
+launches the way a locally built one does.
+
+Dragging the `.dmg` from a browser download still works, but only with the
+ceremony the script exists to avoid: `xattr -cr /Applications/mangouste.app`
+*before* the first launch, and if it has already been refused once,
+`codesign --force --deep --sign -` to change the hash the denial was cached
+against.
+
+Notarization is the real fix — a stapled build opens by double-click with no
+terminal involved — and it needs an Apple Developer ID, six repo secrets, and
+nothing else: Tauri's bundler signs and staples when they are present.
+
+### Signing
+
 The `.dmg` is ad-hoc signed (`signingIdentity: "-"`) but not notarized. Ad-hoc
 is not cosmetic on Apple Silicon: an arm64 binary with no valid signature is
 killed on launch rather than warned about, so CI asserts the signature exists
