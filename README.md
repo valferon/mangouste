@@ -89,8 +89,11 @@ Override with `MANGOUSTE_CLAUDE_BIN`.
 ```bash
 npm install
 npm run app          # tauri dev
+npm test             # vitest, frontend
 npm run app:build    # deb + AppImage in src-tauri/target/release/bundle
 ```
+
+`cargo test` in `src-tauri` covers the Rust side. CI runs both before bundling.
 
 A locally built `.deb` will not install until its `Depends` is repaired — Tauri
 appends its own hardcoded `libgtk-3-0`, which has no candidate on Ubuntu 24.04.
@@ -348,6 +351,23 @@ collapsed — is a pane with `display: none` and a live shell behind it, never a
 absent one. `refitToken` is what re-runs xterm's `fit()` once the box has layout
 again, since a `display: none` box has no measurable size.
 
+## Tests
+
+Rust owns the parsing and the process handling, and has the older suite:
+`cargo test`, 16 tests over the transcript scanner, the stats accumulator, the
+`ps` shapes and the workspace writer.
+
+The frontend suite is `npm test` (vitest, node environment, no jsdom) and
+deliberately covers only pure functions: the menu model's tidy/expand rules and
+cursor arithmetic, chord parsing, path arithmetic, the persistence guards, and
+the user-agent parsing behind Help ▸ About. Nothing drives React. The rule of
+thumb is that if a test would need a DOM, the logic under it probably wants
+extracting first — which is how `lib/menuModel.ts` came out of `lib/menu.tsx`.
+
+It has already earned itself: `readNumber` returned `0` for a stored empty
+string, because `Number("")` is `0` and passes `isFinite`. That is a collapsed
+pane size, restored silently on every launch.
+
 ## X11 selection behaviour
 
 WebKitGTK does not wire PRIMARY into webview-editable content, so both halves of
@@ -393,6 +413,28 @@ the bar and the submenus, and one letter jumps to the next entry starting with
 it. A mouse-up is ignored for the first 250 ms after a menu opens — a menu that
 flipped upward to fit on screen puts a row under the pointer, and the release of
 the click that opened it would otherwise pick that row.
+
+### One declaration per action
+
+Every action is a `Command` — id, label, chord, `run`, plus `checked`/`disabled` —
+built once in `Workbench` and read by everything else. `src/panes/menus.ts` names
+commands by id and never restates them, so it describes *where* an action appears
+and nothing about what it is.
+
+The chord string is the binding, not just the label: `matchChord` in
+`src/lib/commands.ts` parses the same `"Ctrl+Shift+E"` the accelerator column
+prints. Before this there were three copies of every action — a hand-written
+`event.ctrlKey && event.shiftKey && event.key === "e"`, a display string, and a
+menu entry — and nothing tied them together.
+
+Two details the matcher earns its keep on. It compares `KeyboardEvent.code`, so
+`Ctrl+Shift+5` still fires on a layout where that key sends `%`. And it demands
+an *exact* modifier match, so `Ctrl+N` stays off `Ctrl+Shift+N` — two commands
+answering one keystroke is the failure mode a looser test invites.
+
+Commands marked `shellFirst` stand down when the keystroke landed in a terminal.
+That is the whole of the readline exception, and it travels with the command
+instead of living as a list of special cases in the key handler.
 
 ## Keybindings
 

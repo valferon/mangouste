@@ -337,34 +337,6 @@ export function TerminalPanel({
     [addTab, splitTab, closeTab, group, dock, onDock, onClose],
   );
 
-  // Panel chords, captured at the window so they never reach a shell.
-  //
-  // xterm listens on its own textarea, so stopping propagation here — in the
-  // capture phase, before the event reaches the target — is what keeps
-  // Ctrl+Shift+T out of the terminal as a control byte. Keyed on `code`, since
-  // shifted "5" arrives as "%" on most layouts.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
-      const handler =
-        event.code === "KeyT"
-          ? addTab
-          : event.code === "Digit5" || event.code === "Backslash"
-            ? splitTab
-            : event.code === "KeyW"
-              ? closeActiveSlot
-              : event.code === "KeyM"
-                ? () => onDock(dock === "right" ? "bottom" : "right")
-                : null;
-      if (!handler) return;
-      event.preventDefault();
-      event.stopPropagation();
-      handler();
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [addTab, splitTab, closeActiveSlot, dock, onDock]);
-
   return (
     <div
       className="terminal-panel"

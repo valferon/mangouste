@@ -16,7 +16,16 @@ import {
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
-import { MenuBar, type BarMenu } from "./panes/MenuBar";
+import { MenuBar } from "./panes/MenuBar";
+import {
+  appEntries,
+  buildBarMenus,
+  ID,
+  tabMenu,
+  viewEntries,
+  type TabMenuContext,
+} from "./panes/menus";
+import { PaneBoundary } from "./panes/PaneBoundary";
 import {
   claudeKill,
   discoverRepos,
@@ -29,12 +38,14 @@ import {
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
 import { FilesIcon, MongooseLogo, PencilIcon, SourceControlIcon } from "./lib/icons";
+import { runChord, type Command } from "./lib/commands";
 import { CHORD } from "./lib/keybindings";
-import { MenuProvider, useMenu, type MenuEntry } from "./lib/menu";
-import { relativePath } from "./lib/paths";
+import { MenuProvider, useMenu } from "./lib/menu";
+import { KEYS, readEnum, readString, writeString } from "./lib/persist";
 import { installPrimarySelectionBridge } from "./lib/primary";
 import { SessionFlagsProvider } from "./lib/sessionFlagsContext";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
+import type { ChatTab, Tab } from "./lib/tabs";
 import type { ProjectGroup, RepoInfo, SessionMeta } from "./lib/types";
 import {
   applyZoom,
@@ -46,13 +57,14 @@ import {
 } from "./lib/viewport";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-/** Where repos are discovered from, remembered between runs. */
-const WORKSPACE_KEY = "mangouste.workspaceRoot";
-const PERMISSION_MODE_KEY = "mangouste.permissionMode";
-const MODEL_KEY = "mangouste.model";
-const ACTIVE_REPO_KEY = "mangouste.activeRepo";
-const SIDEBAR_VIEW_KEY = "mangouste.sidebarView";
-const TERMINAL_DOCK_KEY = "mangouste.terminalDock";
+/* Persisted keys all come from the catalogue in `lib/persist.ts`, so a reset or
+   a migration can enumerate them without grepping for string literals. */
+const WORKSPACE_KEY = KEYS.state.workspaceRoot;
+const PERMISSION_MODE_KEY = KEYS.prefs.permissionMode;
+const MODEL_KEY = KEYS.prefs.model;
+const ACTIVE_REPO_KEY = KEYS.state.activeRepo;
+const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
+const TERMINAL_DOCK_KEY = KEYS.state.terminalDock;
 
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "git";
@@ -75,29 +87,6 @@ const ACTIVITY_ITEMS: {
  * downstream, which is what made all four Tauri listeners rebind per render.
  */
 const noop = () => {};
-
-/**
- * A chat tab is one `claude` process.
- *
- * Sessions in the same repo are separate tabs rather than one swapping pane, so
- * switching between them does not tear down a turn that is still streaming.
- */
-interface ChatTab {
-  kind: "chat";
-  /** Unique tab id, and the chat id the backend routes events by. */
-  id: string;
-  cwd: string;
-  /** Resume target. `null` until the CLI reports the uuid for a fresh session. */
-  sessionId: string | null;
-  /** Transcript path backing `sessionId`, for rendering history on open. */
-  resumeFile: string | null;
-}
-
-type Tab =
-  | ChatTab
-  | { id: string; kind: "file"; label: string; path: string }
-  | { id: string; kind: "diff"; label: string; patch: string }
-  | { id: string; kind: "dashboard"; label: string };
 
 /** Floor for the terminal panel, matching the size hook's own minimum. */
 const TERMINAL_MIN_HEIGHT = 80;
@@ -143,7 +132,7 @@ export default function App() {
 function Workbench() {
   const menu = useMenu();
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(
-    () => localStorage.getItem(WORKSPACE_KEY) ?? "",
+    () => readString(WORKSPACE_KEY),
   );
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   /** Session groups lifted from the sidebar, so quick-open can rank by recency. */
@@ -152,10 +141,10 @@ function Workbench() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [permissionMode, setPermissionMode] = useState(
-    () => localStorage.getItem(PERMISSION_MODE_KEY) ?? "acceptEdits",
+    () => readString(PERMISSION_MODE_KEY, "acceptEdits"),
   );
   /** `--model` alias new panes spawn with; "default" leaves the flag off. */
-  const [modelAlias, setModelAlias] = useState(() => localStorage.getItem(MODEL_KEY) ?? "default");
+  const [modelAlias, setModelAlias] = useState(() => readString(MODEL_KEY, "default"));
   /** Live facts lifted out of the chat pane for the status panel. */
   const [chatStats, setChatStats] = useState<ChatStats>({
     sessionId: null,
@@ -165,7 +154,7 @@ function Workbench() {
     title: null,
   });
   const [activeRepo, setActiveRepo] = useState<string>(
-    () => localStorage.getItem(ACTIVE_REPO_KEY) ?? "",
+    () => readString(ACTIVE_REPO_KEY),
   );
 
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -204,12 +193,11 @@ function Workbench() {
    * Stacked, the tree and the SCM pane each got a dozen rows on a laptop and
    * neither was readable, so they are tabs and only one is visible at a time.
    */
-  const [sidebarView, setSidebarView] = useState<SidebarView>(() => {
-    const stored = localStorage.getItem(SIDEBAR_VIEW_KEY);
-    return stored === "git" || stored === "explorer" ? stored : "explorer";
-  });
+  const [sidebarView, setSidebarView] = useState<SidebarView>(() =>
+    readEnum<SidebarView>(SIDEBAR_VIEW_KEY, ["explorer", "git"], "explorer"),
+  );
   useEffect(() => {
-    localStorage.setItem(SIDEBAR_VIEW_KEY, sidebarView);
+    writeString(SIDEBAR_VIEW_KEY, sidebarView);
   }, [sidebarView]);
   /**
    * Rail click: switch views, or collapse when the view is already showing.
@@ -233,10 +221,10 @@ function Workbench() {
    * and its cleanup kills every shell behind it.
    */
   const [terminalDock, setTerminalDock] = useState<TerminalDock>(() =>
-    localStorage.getItem(TERMINAL_DOCK_KEY) === "right" ? "right" : "bottom",
+    readEnum<TerminalDock>(TERMINAL_DOCK_KEY, ["bottom", "right"], "bottom"),
   );
   useEffect(() => {
-    localStorage.setItem(TERMINAL_DOCK_KEY, terminalDock);
+    writeString(TERMINAL_DOCK_KEY, terminalDock);
     // The panel's box changes shape, so every grid in it has to be re-fitted.
     setRefitToken((token) => token + 1);
   }, [terminalDock]);
@@ -356,11 +344,11 @@ function Workbench() {
   useEffect(() => applyTheme(theme), [theme]);
 
   useEffect(() => {
-    localStorage.setItem(PERMISSION_MODE_KEY, permissionMode);
+    writeString(PERMISSION_MODE_KEY, permissionMode);
   }, [permissionMode]);
 
   useEffect(() => {
-    localStorage.setItem(MODEL_KEY, modelAlias);
+    writeString(MODEL_KEY, modelAlias);
   }, [modelAlias]);
 
   /* ---------- workspace discovery ---------- */
@@ -374,7 +362,7 @@ function Workbench() {
 
   useEffect(() => {
     if (!workspaceRoot) return;
-    localStorage.setItem(WORKSPACE_KEY, workspaceRoot);
+    writeString(WORKSPACE_KEY, workspaceRoot);
     void discoverRepos(workspaceRoot)
       .then((found) => setRepos(found.filter((repo) => repo.isGit)))
       .catch(() => setRepos([]));
@@ -387,7 +375,7 @@ function Workbench() {
   }, [repos, activeRepo]);
 
   useEffect(() => {
-    if (activeRepo) localStorage.setItem(ACTIVE_REPO_KEY, activeRepo);
+    if (activeRepo) writeString(ACTIVE_REPO_KEY, activeRepo);
   }, [activeRepo]);
 
   const handleGroups = useCallback((groups: ProjectGroup[]) => setSessionGroups(groups), []);
@@ -886,78 +874,6 @@ function Workbench() {
 
   /* ---------- keyboard ---------- */
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "F11") {
-        event.preventDefault();
-        void toggleFullScreen();
-      }
-      if (event.ctrlKey && !event.shiftKey && !event.altKey) {
-        // Both the unshifted and the shifted face of each key, so a layout
-        // where "+" needs Shift still zooms.
-        if (event.key === "=" || event.key === "+") {
-          event.preventDefault();
-          setZoom((current) => stepZoom(current, 1));
-        }
-        if (event.key === "-" || event.key === "_") {
-          event.preventDefault();
-          setZoom((current) => stepZoom(current, -1));
-        }
-        if (event.key === "0") {
-          event.preventDefault();
-          setZoom(DEFAULT_ZOOM);
-        }
-      }
-      if (event.ctrlKey && !event.shiftKey && (event.key === "n" || event.key === "N")) {
-        if (!inTerminal(event) && activeRepo) {
-          event.preventDefault();
-          openNewChatTab(activeRepo);
-        }
-      }
-      if (event.ctrlKey && !event.shiftKey && (event.key === "w" || event.key === "W")) {
-        if (!inTerminal(event) && activeTabRef.current) {
-          event.preventDefault();
-          closeTab(activeTabRef.current);
-        }
-      }
-      // Ctrl+` toggles the panel, as in VSCode.
-      if (event.ctrlKey && event.key === "`") {
-        event.preventDefault();
-        toggleTerminal();
-      }
-      if (event.ctrlKey && (event.key === "," || event.key === "<")) {
-        event.preventDefault();
-        setSettingsOpen((open) => !open);
-      }
-      if (event.ctrlKey && (event.key === "p" || event.key === "P")) {
-        event.preventDefault();
-        setQuickOpen((open) => !open);
-      }
-      if (event.ctrlKey && (event.key === "b" || event.key === "B")) {
-        event.preventDefault();
-        setLeftCollapsed((collapsed) => !collapsed);
-      }
-      if (event.ctrlKey && event.shiftKey && (event.key === "d" || event.key === "D")) {
-        event.preventDefault();
-        openDashboard();
-      }
-      // Ctrl+Shift+E / Ctrl+Shift+G pick a left view, as in VSCode. Picking one
-      // while the sidebar is collapsed reveals it rather than doing nothing.
-      if (event.ctrlKey && event.shiftKey && (event.key === "e" || event.key === "E")) {
-        event.preventDefault();
-        setSidebarView("explorer");
-        setLeftCollapsed(false);
-      }
-      if (event.ctrlKey && event.shiftKey && (event.key === "g" || event.key === "G")) {
-        event.preventDefault();
-        setSidebarView("git");
-        setLeftCollapsed(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openDashboard, activeRepo, openNewChatTab, closeTab, toggleTerminal]);
-
   // The attached session's title lives in the scan, not in the chat stream.
   //
   // Authoritative on every exit, including the misses: bailing out early left
@@ -1083,74 +999,114 @@ function Workbench() {
     setRenaming({ id: tabId, sessionId, value: label });
   }, []);
 
-  /** Right-click on a tab in the strip. */
-  const tabMenu = useCallback(
-    (tab: Tab): MenuEntry[] => {
-      const label = tab.kind === "chat" ? chatLabel(tab) : tab.label;
-      const chat = tab.kind === "chat" ? tab : null;
-      const file = tab.kind === "file" ? tab : null;
-      // Pulled out of the tab so the closures below narrow: `chat.sessionId`
-      // inside a callback is still `string | null` however the entry is guarded.
-      const sessionId = chat?.sessionId ?? null;
-      const transcript = chat?.resumeFile ?? null;
-      return [
-        { header: label },
-        { label: "Close", accelerator: CHORD.closeTab, run: () => closeTab(tab.id) },
-        {
-          label: "Close Others",
-          disabled: visibleTabs.length < 2,
-          run: () => closeTabsExcept(tab.id),
-        },
-        { label: "Close All", run: () => closeTabsExcept(null) },
-        "separator",
-        sessionId && {
-          label: "Rename Session…",
-          run: () => startRename(tab.id, sessionId, label),
-        },
-        sessionId && { label: "Copy Session Id", run: () => void copyText(sessionId) },
-        chat && { label: "Copy Working Directory", run: () => void copyText(chat.cwd) },
-        transcript && {
-          label: "Reveal Transcript",
-          run: () => void revealPath(transcript),
-        },
-        file && {
-          label: "Save",
-          accelerator: CHORD.save,
-          disabled: !dirtyFiles[file.path],
-          run: () => void fileSaversRef.current.get(file.path)?.(),
-        },
-        file && { label: "Copy Path", run: () => void copyText(file.path) },
-        file && {
-          label: "Copy Relative Path",
-          run: () => void copyText(relativePath(activeRepo, file.path)),
-        },
-        file && { label: "Reveal in File Manager", run: () => void revealPath(file.path) },
-        "separator",
-        activeRepo && {
-          label: "New Session in this Repo",
-          accelerator: CHORD.newSession,
-          run: () => openNewChatTab(activeRepo),
-        },
-      ];
-    },
+  /** What `tabMenu` needs; the menu's shape lives in `panes/menus.ts`. */
+  const tabMenuContext = useMemo<TabMenuContext>(
+    () => ({
+      label: (tab) => (tab.kind === "chat" ? chatLabel(tab) : tab.label),
+      visibleCount: visibleTabs.length,
+      hasUnsavedChanges: (path) => Boolean(dirtyFiles[path]),
+      activeRepo,
+      onClose: closeTab,
+      onCloseOthers: closeTabsExcept,
+      onRename: startRename,
+      onSave: (path) => void fileSaversRef.current.get(path)?.(),
+      onNewSession: openNewChatTab,
+    }),
     [
       chatLabel,
-      closeTab,
-      closeTabsExcept,
       visibleTabs.length,
       dirtyFiles,
       activeRepo,
-      openNewChatTab,
+      closeTab,
+      closeTabsExcept,
       startRename,
+      openNewChatTab,
     ],
   );
 
-  /** The View menu's body, shared by the menu bar and the activity rail. */
-  const viewEntries = useCallback(
-    (): MenuEntry[] => [
+  /**
+   * Every action, declared once.
+   *
+   * The chord string is the binding as well as the label — `runChord` parses the
+   * same text the accelerator column prints — so a rename cannot leave the
+   * keyboard answering the old one. `checked` and `disabled` live here too,
+   * which is what lets a menu row and its keystroke agree about whether an
+   * action is available at all.
+   */
+  const commands = useMemo<Command[]>(
+    () => [
+      {
+        id: ID.newSession,
+        label: "New Session",
+        chord: CHORD.newSession,
+        shellFirst: true,
+        disabled: !activeRepo,
+        run: () => activeRepo && openNewChatTab(activeRepo),
+      },
+      {
+        id: ID.newTerminal,
+        label: "New Terminal",
+        chord: CHORD.newTerminal,
+        run: () => {
+          showTerminal();
+          terminalActions.current?.newTab();
+        },
+      },
+      {
+        id: ID.openRecent,
+        label: "Open Recent…",
+        chord: CHORD.quickOpen,
+        // A toggle, as the chord has always been: Ctrl+P closes the palette it
+        // opened. The menu row reads as "open", and opening an open palette is
+        // the one case where that differs — worth it to keep the chord honest.
+        run: () => setQuickOpen((open) => !open),
+      },
+      { id: ID.openRepo, label: "Open Repository…", run: () => void openRepoFromDisk() },
+      {
+        id: ID.workspaceRoot,
+        label: "Change Workspace Root…",
+        run: () => void pickWorkspaceRoot(),
+      },
+      {
+        id: ID.save,
+        label: "Save",
+        chord: CHORD.save,
+        disabled: !activeFile || !dirtyFiles[activeFile.path],
+        run: saveActiveFile,
+      },
+      {
+        id: ID.closeTab,
+        label: "Close Tab",
+        chord: CHORD.closeTab,
+        shellFirst: true,
+        disabled: !activeTab,
+        run: () => activeTab && closeTab(activeTab),
+      },
+      {
+        id: ID.settings,
+        label: "Settings…",
+        chord: CHORD.settings,
+        run: () => setSettingsOpen((open) => !open),
+      },
+      { id: ID.exit, label: "Exit", run: () => void closeWindow() },
+
+      {
+        id: ID.copyActivePath,
+        label: "Copy Path of Active File",
+        disabled: !activeFile,
+        run: () => activeFile && void copyText(activeFile.path),
+      },
+      {
+        id: ID.copySessionId,
+        label: "Copy Session Id",
+        disabled: !liveSessionId,
+        run: () => liveSessionId && void copyText(liveSessionId),
+      },
+
       ...ACTIVITY_ITEMS.map((item) => ({
+        id: item.view === "explorer" ? ID.explorer : ID.sourceControl,
         label: item.label,
-        accelerator: item.hint,
+        chord: item.hint,
         checked: sidebarView === item.view && !leftCollapsed,
         run: () => {
           setSidebarView(item.view);
@@ -1158,69 +1114,119 @@ function Workbench() {
         },
       })),
       {
+        id: ID.dashboard,
         label: "Dashboard",
-        accelerator: CHORD.dashboard,
+        chord: CHORD.dashboard,
         checked: activeTab === DASHBOARD_TAB,
         run: openDashboard,
       },
-      "separator",
       {
+        id: ID.toggleSidebar,
         label: "Sidebar",
-        accelerator: CHORD.toggleSidebar,
+        chord: CHORD.toggleSidebar,
         checked: !leftCollapsed,
         run: () => setLeftCollapsed((collapsed) => !collapsed),
       },
       {
+        id: ID.toggleTerminal,
         label: "Terminal Panel",
-        accelerator: CHORD.toggleTerminal,
+        chord: CHORD.toggleTerminal,
         checked: terminalVisible,
         run: toggleTerminal,
       },
       {
+        id: ID.debugLog,
         label: "Session Debug Log",
         checked: debugOpen,
         disabled: !activeChat,
         run: () => setDebugOpen((open) => !open),
       },
-      "separator",
+      // One command per theme rather than a cycling toggle: the menu shows which
+      // is active, and a radio group needs three addressable rows to do that.
+      ...(["system", "light", "dark"] as Theme[]).map((option) => ({
+        id: `view.theme.${option}`,
+        label: option,
+        checked: theme === option,
+        run: () => {
+          applyTheme(option);
+          setTheme(option);
+        },
+      })),
       {
-        label: "Appearance",
-        items: (["system", "light", "dark"] as Theme[]).map((option) => ({
-          label: option,
-          checked: theme === option,
-          run: () => {
-            applyTheme(option);
-            setTheme(option);
-          },
-        })),
+        id: ID.zoomIn,
+        label: "Zoom In",
+        chord: CHORD.zoomIn,
+        run: () => setZoom((current) => stepZoom(current, 1)),
       },
       {
-        label: "Zoom",
-        items: [
-          {
-            label: "Zoom In",
-            accelerator: CHORD.zoomIn,
-            run: () => setZoom((current) => stepZoom(current, 1)),
-          },
-          {
-            label: "Zoom Out",
-            accelerator: CHORD.zoomOut,
-            run: () => setZoom((current) => stepZoom(current, -1)),
-          },
-          {
-            label: `Reset Zoom (${Math.round(zoom * 100)}%)`,
-            accelerator: CHORD.zoomReset,
-            disabled: zoom === DEFAULT_ZOOM,
-            run: () => setZoom(DEFAULT_ZOOM),
-          },
-        ],
+        id: ID.zoomOut,
+        label: "Zoom Out",
+        chord: CHORD.zoomOut,
+        run: () => setZoom((current) => stepZoom(current, -1)),
       },
-      { label: "Full Screen", accelerator: CHORD.fullScreen, run: () => void toggleFullScreen() },
+      {
+        id: ID.zoomReset,
+        // The live percentage is why this label is built here and not in the
+        // menu module: the menus describe structure, not state.
+        label: `Reset Zoom (${Math.round(zoom * 100)}%)`,
+        chord: CHORD.zoomReset,
+        disabled: zoom === DEFAULT_ZOOM,
+        run: () => setZoom(DEFAULT_ZOOM),
+      },
+      {
+        id: ID.fullScreen,
+        label: "Full Screen",
+        chord: CHORD.fullScreen,
+        run: () => void toggleFullScreen(),
+      },
+
+      {
+        id: ID.splitTerminal,
+        label: "Split Terminal",
+        chord: CHORD.splitTerminal,
+        run: () => {
+          showTerminal();
+          terminalActions.current?.split();
+        },
+      },
+      {
+        id: ID.closeTerminalPane,
+        label: "Close Terminal Pane",
+        chord: CHORD.closeTerminal,
+        run: () => terminalActions.current?.closePane(),
+      },
+      {
+        id: ID.dockToggle,
+        // Named for where it goes, not where it is — the same wording the
+        // panel's own right-click uses, and a toggle like the chord always was.
+        label: terminalDock === "right" ? "Move Terminal to the Bottom" : "Move Terminal to the Right",
+        chord: CHORD.dockTerminal,
+        run: () => setTerminalDock(terminalDock === "right" ? "bottom" : "right"),
+      },
+
+      {
+        id: ID.shortcuts,
+        label: "Keyboard Shortcuts",
+        run: () => setShortcutsOpen(true),
+      },
+      { id: ID.documentation, label: "Documentation", run: () => void openExternal(REPO_URL) },
+      { id: ID.reportIssue, label: "Report an Issue", run: () => void openExternal(ISSUES_URL) },
+      { id: ID.about, label: "About mangouste", run: () => setAboutOpen(true) },
     ],
     [
+      activeRepo,
+      openNewChatTab,
+      showTerminal,
+      openRepoFromDisk,
+      pickWorkspaceRoot,
+      activeFile,
+      dirtyFiles,
+      saveActiveFile,
+      activeTab,
+      closeTab,
+      liveSessionId,
       sidebarView,
       leftCollapsed,
-      activeTab,
       openDashboard,
       terminalVisible,
       toggleTerminal,
@@ -1228,170 +1234,41 @@ function Workbench() {
       activeChat,
       theme,
       zoom,
+      terminalDock,
     ],
   );
 
-  /** The terminal actions, as menu entries. Dead until the panel registers. */
-  const terminalEntries = useCallback(
-    (): MenuEntry[] => [
-      {
-        label: "New Terminal",
-        accelerator: CHORD.newTerminal,
-        run: () => {
-          showTerminal();
-          terminalActions.current?.newTab();
-        },
-      },
-      {
-        label: "Split Terminal",
-        accelerator: CHORD.splitTerminal,
-        run: () => {
-          showTerminal();
-          terminalActions.current?.split();
-        },
-      },
-      {
-        label: "Close Terminal Pane",
-        accelerator: CHORD.closeTerminal,
-        run: () => terminalActions.current?.closePane(),
-      },
-      "separator",
-      {
-        label: "Dock to the Bottom",
-        checked: terminalDock === "bottom",
-        run: () => setTerminalDock("bottom"),
-      },
-      {
-        label: "Dock to the Right",
-        accelerator: CHORD.dockTerminal,
-        checked: terminalDock === "right",
-        run: () => setTerminalDock("right"),
-      },
-      "separator",
-      {
-        label: "Terminal Panel",
-        accelerator: CHORD.toggleTerminal,
-        checked: terminalVisible,
-        run: toggleTerminal,
-      },
-    ],
-    [showTerminal, terminalVisible, toggleTerminal, terminalDock],
-  );
+  const barMenus = useMemo(() => buildBarMenus(commands), [commands]);
+  const viewMenu = useCallback(() => viewEntries(commands), [commands]);
 
   /**
-   * What the `"app"` sentinel and an unclaimed right-click expand to.
+   * The one keyboard entry point.
    *
-   * Registered rather than passed, because the provider is this component's own
-   * parent — see `App` above.
+   * `runChord` walks the registry and parses the same chord string the menus
+   * print, so there is no second copy of the matcher to drift from the labels.
+   * Commands marked `shellFirst` are dropped when the keystroke landed in a
+   * terminal, which is the whole of the readline exception.
    */
-  const appEntries = useCallback(
-    (): MenuEntry[] => [
-      { label: "Open Recent…", accelerator: CHORD.quickOpen, run: () => setQuickOpen(true) },
-      activeRepo && {
-        label: "New Session in this Repo",
-        accelerator: CHORD.newSession,
-        run: () => openNewChatTab(activeRepo),
-      },
-      "separator",
-      {
-        label: "Sidebar",
-        accelerator: CHORD.toggleSidebar,
-        checked: !leftCollapsed,
-        run: () => setLeftCollapsed((collapsed) => !collapsed),
-      },
-      {
-        label: "Terminal Panel",
-        accelerator: CHORD.toggleTerminal,
-        checked: terminalVisible,
-        run: toggleTerminal,
-      },
-      "separator",
-      { label: "Settings…", accelerator: CHORD.settings, run: () => setSettingsOpen(true) },
-    ],
-    [activeRepo, openNewChatTab, leftCollapsed, terminalVisible, toggleTerminal],
-  );
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const eligible = inTerminal(event)
+        ? commands.filter((command) => !command.shellFirst)
+        : commands;
+      if (!runChord(eligible, event)) return;
+      // Swallowed, not just defaulted: xterm listens on its own textarea, so an
+      // unstopped Ctrl+Shift+T reaches the shell as a control byte as well as
+      // opening a tab. Capture phase below is what gets us here first.
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [commands]);
 
   useEffect(() => {
-    menu.setFallback(appEntries);
+    menu.setFallback(() => appEntries(commands));
     return () => menu.setFallback(null);
-  }, [menu, appEntries]);
-
-  const barMenus: BarMenu[] = [
-    {
-      id: "file",
-      label: "File",
-      items: [
-        activeRepo && {
-          label: "New Session",
-          accelerator: CHORD.newSession,
-          run: () => openNewChatTab(activeRepo),
-        },
-        {
-          label: "New Terminal",
-          accelerator: CHORD.newTerminal,
-          run: () => {
-            showTerminal();
-            terminalActions.current?.newTab();
-          },
-        },
-        "separator",
-        { label: "Open Recent…", accelerator: CHORD.quickOpen, run: () => setQuickOpen(true) },
-        { label: "Open Repository…", run: () => void openRepoFromDisk() },
-        { label: "Change Workspace Root…", run: () => void pickWorkspaceRoot() },
-        "separator",
-        {
-          label: "Save",
-          accelerator: CHORD.save,
-          disabled: !activeFile || !dirtyFiles[activeFile.path],
-          run: saveActiveFile,
-        },
-        {
-          label: "Close Tab",
-          accelerator: CHORD.closeTab,
-          disabled: !activeTab,
-          run: () => activeTab && closeTab(activeTab),
-        },
-        "separator",
-        { label: "Settings…", accelerator: CHORD.settings, run: () => setSettingsOpen(true) },
-        { label: "Exit", run: () => void closeWindow() },
-      ],
-    },
-    {
-      id: "edit",
-      label: "Edit",
-      // A thunk: the Edit menu is about whatever holds the caret, and focus
-      // moves without any state changing, so a snapshot taken at render time
-      // would describe the wrong field.
-      items: () => [
-        "editing",
-        "separator",
-        {
-          label: "Copy Path of Active File",
-          disabled: !activeFile,
-          run: () => activeFile && void copyText(activeFile.path),
-        },
-        {
-          label: "Copy Session Id",
-          disabled: !liveSessionId,
-          run: () => liveSessionId && void copyText(liveSessionId),
-        },
-      ],
-    },
-    { id: "view", label: "View", items: viewEntries },
-    { id: "terminal", label: "Terminal", items: terminalEntries },
-    {
-      id: "help",
-      label: "Help",
-      items: [
-        { label: "Keyboard Shortcuts", run: () => setShortcutsOpen(true) },
-        "separator",
-        { label: "Documentation", run: () => void openExternal(REPO_URL) },
-        { label: "Report an Issue", run: () => void openExternal(ISSUES_URL) },
-        "separator",
-        { label: "About mangouste", run: () => setAboutOpen(true) },
-      ],
-    },
-  ];
+  }, [menu, commands]);
 
   return (
     <div className="app">
@@ -1443,7 +1320,7 @@ function Workbench() {
           className="activity-bar"
           role="tablist"
           aria-label="Sidebar views"
-          onContextMenu={(event) => menu.openContextMenu(event, viewEntries())}
+          onContextMenu={(event) => menu.openContextMenu(event, viewMenu())}
         >
           {ACTIVITY_ITEMS.map(({ view, label, hint, Glyph }) => {
             const active = sidebarView === view && !leftCollapsed;
@@ -1482,7 +1359,9 @@ function Workbench() {
             style={{ display: sidebarView === "explorer" ? "flex" : "none" }}
           >
             {activeRepo && (
-              <FileTree root={activeRepo} onOpenFile={openFile} selectedPath={selectedFile} />
+              <PaneBoundary label="explorer">
+                <FileTree root={activeRepo} onOpenFile={openFile} selectedPath={selectedFile} />
+              </PaneBoundary>
             )}
           </div>
           <div
@@ -1490,7 +1369,9 @@ function Workbench() {
             style={{ display: sidebarView === "git" ? "flex" : "none" }}
           >
             {activeRepo && (
-              <GitPane cwd={activeRepo} onShowDiff={showDiff} onOpenFile={openFile} />
+              <PaneBoundary label="source control">
+                <GitPane cwd={activeRepo} onShowDiff={showDiff} onOpenFile={openFile} />
+              </PaneBoundary>
             )}
           </div>
         </div>
@@ -1535,7 +1416,7 @@ function Workbench() {
                     onClick={() => setActiveTab(tab.id)}
                     onContextMenu={(event) => {
                       setActiveTab(tab.id);
-                      menu.openContextMenu(event, tabMenu(tab));
+                      menu.openContextMenu(event, tabMenu(tab, tabMenuContext));
                     }}
                     onAuxClick={(event) => {
                       // Middle-click closes, as in VSCode.
@@ -1673,6 +1554,7 @@ function Workbench() {
                     minHeight: 0,
                   }}
                 >
+                  <PaneBoundary label={chatLabel(tab)}>
                   <ChatPane
                     chatId={tab.id}
                     cwd={tab.cwd}
@@ -1689,6 +1571,7 @@ function Workbench() {
                     model={modelAlias}
                     onModel={setModelAlias}
                   />
+                  </PaneBoundary>
                 </div>
               ))}
 
@@ -1704,26 +1587,32 @@ function Workbench() {
                     minHeight: 0,
                   }}
                 >
-                  <FileView
-                    path={tab.path}
-                    visible={tab.id === activeTab}
-                    onDirtyChange={handleFileDirty}
-                    onRegisterSave={registerFileSave}
-                  />
+                  <PaneBoundary label={tab.path}>
+                    <FileView
+                      path={tab.path}
+                      visible={tab.id === activeTab}
+                      onDirtyChange={handleFileDirty}
+                      onRegisterSave={registerFileSave}
+                    />
+                  </PaneBoundary>
                 </div>
               ))}
               {currentTab?.kind === "diff" && (
                 <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-                  <DiffView patch={currentTab.patch} />
+                  <PaneBoundary label={currentTab.label}>
+                    <DiffView patch={currentTab.patch} />
+                  </PaneBoundary>
                 </div>
               )}
               {currentTab?.kind === "dashboard" && (
                 <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-                  <Dashboard
-                    groups={sessionGroups}
-                    onResume={handleResume}
-                    onSelectRepo={handleSelectRepo}
-                  />
+                  <PaneBoundary label="dashboard">
+                    <Dashboard
+                      groups={sessionGroups}
+                      onResume={handleResume}
+                      onSelectRepo={handleSelectRepo}
+                    />
+                  </PaneBoundary>
                 </div>
               )}
             </div>
@@ -1757,7 +1646,10 @@ function Workbench() {
         <Resizer orientation="vertical" onDelta={(delta) => resizeRight(-delta)} />
 
         <div className="sidebar" style={{ width: rightWidth, flex: `0 0 ${rightWidth}px` }}>
-          <StatusPanel groups={sessionGroups} cwd={activeRepo} stats={chatStats} />
+          <PaneBoundary label="status">
+            <StatusPanel groups={sessionGroups} cwd={activeRepo} stats={chatStats} />
+          </PaneBoundary>
+          <PaneBoundary label="sessions">
           <SessionsPane
             activeSessionId={liveSessionId}
             activeCwd={activeRepo}
@@ -1766,6 +1658,7 @@ function Workbench() {
             onResume={handleResume}
             onNewSession={handleNewSession}
           />
+          </PaneBoundary>
         </div>
       </div>
 
