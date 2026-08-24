@@ -127,6 +127,18 @@ jobs:
             plutil -extract "$key" raw "$app/Contents/Info.plist" >/dev/null \
               || { echo "Info.plist was not merged: $key is missing"; exit 1; }
           done
+          # Ad-hoc and hardened runtime together is a launch-denial path, not a
+          # hardening: AMFI enforces library validation and JIT restrictions
+          # against a signature that carries no team identity, and the bundle
+          # cannot be notarized anyway. It also blocks `sample` and `lldb` from
+          # reading the process, which is the one thing that makes a launch hang
+          # diagnosable. `hardenedRuntime: false` turns it off; this keeps it off.
+          flags="$(codesign -d --verbose=2 "$app" 2>&1 |
+                   sed -n 's/^CodeDirectory .*flags=\([^ ]*\).*/\1/p')"
+          echo "signature flags: $flags"
+          case "$flags" in
+            *runtime*) echo "hardened runtime is on again"; exit 1 ;;
+          esac
           bin="$(find "$app/Contents/MacOS" -maxdepth 1 -type f -perm -u+x -print -quit)"
           archs="$(lipo -archs "$bin")"
           echo "$bin: $archs"

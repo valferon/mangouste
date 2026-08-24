@@ -86,6 +86,7 @@ fn watch_sessions(app: AppHandle) {
 /// only there — Linux and Windows draw the menu bar inside the window.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    trace("building the macOS menu");
     let package = app.package_info();
     let config = app.config();
     let about = AboutMetadata {
@@ -143,11 +144,31 @@ fn mac_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         ],
     )?;
 
-    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+    let menu = Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu]);
+    trace("macOS menu built");
+    menu
+}
+
+/// Startup breadcrumbs, for the launch that draws nothing.
+///
+/// A windowed app that hangs before its window appears is opaque from the
+/// outside: the window is configured hidden and shown at the end of `setup`, so
+/// "no window" covers everything from a wedged phase in here to a process that
+/// never reached `main` at all. Whether any of these lines appear, and which is
+/// last, is the difference between those two — and on macOS it is the only
+/// signal available, since a hardened-runtime binary cannot be sampled.
+///
+/// Off unless asked for: `MANGOUSTE_TRACE_STARTUP=1`, and stderr, so a launch
+/// from a terminal shows it and a launch from a launcher does not care.
+fn trace(phase: &str) {
+    if std::env::var_os("MANGOUSTE_TRACE_STARTUP").is_some() {
+        eprintln!("mangouste: {phase}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    trace("run");
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -157,7 +178,9 @@ pub fn run() {
         .manage(sessions::SessionCache::default())
         .manage(stats::StatsCache::default())
         .setup(|app| {
+            trace("setup");
             watch_sessions(app.handle().clone());
+            trace("session watcher started");
             // Warm the login-shell PATH probe off the main thread: the first
             // chat start is a synchronous command, and on macOS resolving that
             // PATH means running the user's shell. Nothing waits on this — a
@@ -165,6 +188,7 @@ pub fn run() {
             std::thread::spawn(|| {
                 let _ = env::child_path();
             });
+            trace("path probe spawned");
 
             let permission: tauri::State<'_, Arc<permission::PermissionState>> = app.state();
             let manager: tauri::State<'_, Arc<chats::ChatManager>> = app.state();
@@ -172,6 +196,7 @@ pub fn run() {
             // Fixed path, not pid-derived: the socket is baked into each child's
             // --mcp-config, so it has to be stable for the app's lifetime.
             let socket = chats::runtime_dir().join("permission.sock");
+            trace(&format!("runtime dir resolved ({})", socket.display()));
             let handle = app.handle().clone();
             let owner = Arc::clone(&manager);
             // Raising the window is what a second launch of a single-instance
@@ -197,6 +222,8 @@ pub fn run() {
                     }
                 },
             );
+
+            trace("permission bridge settled");
 
             if let Err(collision) = started {
                 // The running instance took the launch: it is now in front, and
@@ -228,6 +255,7 @@ pub fn run() {
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 let _ = window.show();
             }
+            trace("window shown");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -297,6 +325,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.menu(mac_menu);
 
+    trace("building the app");
     builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

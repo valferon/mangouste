@@ -127,8 +127,25 @@ before the artifact is uploaded. Notarization it does not have, so Gatekeeper
 still quarantines the download:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/mangouste.app
+xattr -cr /Applications/mangouste.app
 ```
+
+The hardened runtime is off (`hardenedRuntime: false`), against Tauri's default.
+It is not a hardening on an ad-hoc signature: AMFI enforces library validation
+and JIT restrictions against a signature with no team identity, the bundle
+cannot be notarized regardless, and it blocks `sample` and `lldb` from reading
+the process — which is the only way to diagnose a launch that draws no window.
+CI asserts the flag stays off.
+
+`MANGOUSTE_TRACE_STARTUP=1` prints a line per startup phase to stderr, which is
+what to reach for when a launch hangs before its window:
+
+```bash
+MANGOUSTE_TRACE_STARTUP=1 /Applications/mangouste.app/Contents/MacOS/mangouste
+```
+
+Whether any line appears at all separates a wedged phase from a process that
+never reached `main`.
 
 Four things are macOS-specific rather than shared, and each is a real difference
 in the platform rather than a shim:
