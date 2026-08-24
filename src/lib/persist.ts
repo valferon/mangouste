@@ -38,6 +38,9 @@ export const KEYS = {
     terminalHeight: "mangouste.terminalHeight",
     terminalWidth: "mangouste.terminalWidth",
     terminalDock: "mangouste.terminalDock",
+    openTabs: "mangouste.openTabs",
+    activeTab: "mangouste.activeTab",
+    terminalOpen: "mangouste.terminalOpen",
   },
   prefs: {
     theme: "mangouste.theme",
@@ -46,6 +49,7 @@ export const KEYS = {
     model: "mangouste.model",
     usageEnabled: "mangouste.usageEnabled",
     cliDebug: "mangouste.cliDebug",
+    restoreTabs: "mangouste.restoreTabs",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
@@ -174,6 +178,53 @@ export function writeString(key: string, value: string): void {
   } catch {
     // See writeJson.
   }
+}
+
+/**
+ * Read a boolean stored as the literal "true" or "false".
+ *
+ * Anything else — a missing key, a torn write, a "1" from some other build — is
+ * the fallback, not a guess. StatusPanel's usageEnabled predates this helper and
+ * hand-rolls the same encoding over readString/writeString; it is left alone.
+ */
+export function readBoolean(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeBoolean(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, value ? "true" : "false");
+  } catch {
+    // See writeJson.
+  }
+}
+
+/**
+ * Read a map of booleans, validated entry by entry.
+ *
+ * The same principle as cleanFlags in sessionStore.ts: one corrupt entry must
+ * not cost every other repo its setting, so the bad entries are dropped and the
+ * rest kept. Arrays and null are not plain objects — both parse and both would
+ * enumerate as something map-shaped — so they yield {} outright.
+ */
+export function readBoolMap(key: string): Record<string, boolean> {
+  const raw = readJson<Record<string, unknown>>(
+    key,
+    {},
+    (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+  );
+  const map: Record<string, boolean> = {};
+  for (const [entry, flag] of Object.entries(raw)) {
+    if (typeof flag === "boolean") map[entry] = flag;
+  }
+  return map;
 }
 
 /** Read a finite number, optionally clamped. Anything else is the fallback. */

@@ -5,6 +5,8 @@ interface SettingsProps {
   onTheme: (theme: Theme) => void;
   permissionMode: string;
   onPermissionMode: (mode: string) => void;
+  restoreTabs: boolean;
+  onRestoreTabs: (on: boolean) => void;
   workspaceRoot: string;
   onWorkspaceRoot: (root: string) => void;
   onClose: () => void;
@@ -18,6 +20,8 @@ export function Settings({
   onTheme,
   permissionMode,
   onPermissionMode,
+  restoreTabs,
+  onRestoreTabs,
   workspaceRoot,
   onWorkspaceRoot,
   onClose,
@@ -71,6 +75,22 @@ export function Settings({
         <p className="setting-hint">
           Applied to newly started sessions. <code>default</code> stalls in this app:
           permission prompts are not answered yet.
+        </p>
+
+        <div className="setting-row">
+          <label>Restore sessions on startup</label>
+          <div className="segmented">
+            <button data-active={restoreTabs} onClick={() => onRestoreTabs(true)}>
+              on
+            </button>
+            <button data-active={!restoreTabs} onClick={() => onRestoreTabs(false)}>
+              off
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          Restored sessions come back as tabs, but a tab does not start its{" "}
+          <code>claude</code> process or read its transcript until you open it.
         </p>
 
         <div className="setting-row">

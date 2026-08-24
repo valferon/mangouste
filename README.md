@@ -335,6 +335,18 @@ lose yours, overwrite anyway, or keep editing.
 Tabs never unmount for the same reason: hiding is not unmounting, so switching
 tabs cannot silently drop an unsaved buffer, and closing one asks before it does.
 
+The strip itself survives a relaunch: the open tabs are persisted as they change
+and come back on the next start (Settings can turn this off). Chat tabs come
+back *cold*, the way Firefox restores a window — the tab sits in the strip under
+its name, but the `claude` process is not spawned and the transcript is not read
+until the first time you open it. Restoring eight tabs eagerly would mean eight
+CLI processes and eight transcript reads at boot, most of them for tabs you
+wanted to keep, not resume. Two kinds of tab do not come back: diff tabs, whose
+patch is derived output that would otherwise sit whole in `localStorage`, and
+"New session" tabs that never got a session id — with no session to resume and
+no transcript to render, restoring one would be a blank pane pretending to be
+history.
+
 ## Terminal
 
 `Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the
@@ -350,6 +362,17 @@ the same reason a hidden pane — another repo's, another tab's, the whole panel
 collapsed — is a pane with `display: none` and a live shell behind it, never an
 absent one. `refitToken` is what re-runs xterm's `fit()` once the box has layout
 again, since a `display: none` box has no measurable size.
+
+Whether the panel is open at all is a per-repo fact, remembered across
+restarts. The shells were already split per repo — a hidden repo's set stays
+alive behind whichever one is in front — so a single visibility flag was the
+missing half of that split: closing the panel to read a diff in one repo should
+not also close it in the repo where you live in the shell. A repo you have
+never touched still opens with the panel shown, as before. Switching into a
+repo whose panel was hidden is one more of those `display: none` transitions,
+so it too bumps `refitToken` — the panel had no measurable size while another
+repo was in front, and its grids must be re-fitted before they are worth
+looking at.
 
 ## Tests
 
@@ -471,7 +494,8 @@ There is no repo dropdown. The Sessions rail *is* the repo list: click a group
 label to switch the file tree, git pane, and terminal to that repo; click the
 twisty to collapse it. Each repo keeps its own terminals, and they keep running
 while another repo is in front — switching back finds the same shells with their
-scrollback, not fresh logins. `Ctrl+P` opens a type-to-filter palette ranked by real
+scrollback, not fresh logins, and the panel open or hidden the way you left it
+there. `Ctrl+P` opens a type-to-filter palette ranked by real
 session recency, with every other git repo under `~/workspace` below that.
 Matching is a subsequence test on the repo name plus a substring test on the
 full path, so `pay` finds `payments-service` and `ws/an` finds `~/workspace/ansible`.

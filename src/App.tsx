@@ -41,11 +41,28 @@ import { FilesIcon, MongooseLogo, PencilIcon, SourceControlIcon } from "./lib/ic
 import { runChord, type Command } from "./lib/commands";
 import { CHORD } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
-import { KEYS, readEnum, readString, writeString } from "./lib/persist";
+import {
+  KEYS,
+  readBoolean,
+  readBoolMap,
+  readEnum,
+  readJson,
+  readString,
+  writeBoolean,
+  writeJson,
+  writeString,
+} from "./lib/persist";
 import { installPrimarySelectionBridge } from "./lib/primary";
 import { SessionFlagsProvider } from "./lib/sessionFlagsContext";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
-import type { ChatTab, Tab } from "./lib/tabs";
+import {
+  cleanStoredTabs,
+  restoreTab,
+  storedTabId,
+  toStoredTab,
+  type ChatTab,
+  type Tab,
+} from "./lib/tabs";
 import type { ProjectGroup, RepoInfo, SessionMeta } from "./lib/types";
 import {
   applyZoom,
@@ -102,6 +119,40 @@ const TERMINAL_CHAT_FLOOR = 320;
 const DASHBOARD_TAB = "dashboard";
 
 /**
+ * The tab strip as the last run left it, rebuilt synchronously.
+ *
+ * Called from the `tabs` initializer rather than an effect because the repo
+ * seed effect below runs on first commit: an effect-based restore loses that
+ * race and the seed mints a duplicate fresh tab before the restored ones land.
+ * Restored rows are deduped by id and by session on the way in — openSessionTab
+ * dedupes by sessionId so two processes can never append to one transcript,
+ * and a store written by a crash mid-update could hold the same session twice.
+ * The `new-<n>` counter needs no seeding against these ids: `toStoredTab`
+ * drops unstarted sessions, so a restored id always carries a uuid, never a
+ * counter value the next fresh tab could collide with.
+ */
+function loadRestoredTabs(): Tab[] {
+  if (!readBoolean(KEYS.prefs.restoreTabs, true)) return [];
+  const stored = cleanStoredTabs(
+    readJson<unknown[]>(KEYS.state.openTabs, [], Array.isArray),
+  );
+  const seenIds = new Set<string>();
+  const seenSessions = new Set<string>();
+  const restored: Tab[] = [];
+  for (const entry of stored) {
+    const id = storedTabId(entry);
+    if (seenIds.has(id)) continue;
+    if (entry.kind === "chat") {
+      if (seenSessions.has(entry.sessionId)) continue;
+      seenSessions.add(entry.sessionId);
+    }
+    seenIds.add(id);
+    restored.push(restoreTab(entry));
+  }
+  return restored;
+}
+
+/**
  * Whether a keystroke landed in a shell, which has a prior claim on some chords.
  *
  * Ctrl+W is readline's delete-word and Ctrl+N is history-forward, so binding
@@ -145,6 +196,19 @@ function Workbench() {
   );
   /** `--model` alias new panes spawn with; "default" leaves the flag off. */
   const [modelAlias, setModelAlias] = useState(() => readString(MODEL_KEY, "default"));
+  /**
+   * Whether the last run's tabs come back on launch.
+   *
+   * Gates only the read in the tab initialisers below — the strip is recorded
+   * either way, so switching this back on restores the run before, not an
+   * empty strip frozen from whenever it was switched off.
+   */
+  const [restoreTabs, setRestoreTabs] = useState(() =>
+    readBoolean(KEYS.prefs.restoreTabs, true),
+  );
+  useEffect(() => {
+    writeBoolean(KEYS.prefs.restoreTabs, restoreTabs);
+  }, [restoreTabs]);
   /** Live facts lifted out of the chat pane for the status panel. */
   const [chatStats, setChatStats] = useState<ChatStats>({
     sessionId: null,
@@ -157,8 +221,68 @@ function Workbench() {
     () => readString(ACTIVE_REPO_KEY),
   );
 
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeTab, setActiveTab] = useState("");
+  const [tabs, setTabs] = useState<Tab[]>(loadRestoredTabs);
+  const [activeTab, setActiveTab] = useState(() => {
+    // Checked against the list actually restored above: `currentTab` has no
+    // fallback branch, so a dangling id — the diff tab dropped at save time, a
+    // corrupt row dropped at load, the "New session" tab toStoredTab refuses —
+    // would leave the centre pane blank. The fallback must never settle on a
+    // chat from a non-active repo: such a tab would be visible for the first
+    // commit, and ChatPane's warm latch fires on that commit — before the
+    // repo-seed effect below can re-focus — spawning a background `claude` and
+    // reading its transcript at boot for a tab the strip does not even show.
+    const remembered = readString(KEYS.state.activeTab);
+    if (tabs.some((tab) => tab.id === remembered)) return remembered;
+    const fallback = tabs.find(
+      (tab) => tab.kind !== "chat" || tab.cwd === activeRepo,
+    );
+    return fallback?.id ?? "";
+  });
+  /**
+   * Restored chat tabs that have not been looked at since boot.
+   *
+   * The Firefox lazy-tab trade: a cold pane mounts but spawns no `claude`
+   * process and reads no transcript until its first activation, so eight
+   * restored tabs cost the strip eight labels at boot instead of eight CLIs
+   * and eight transcript reads. Never persisted — coldness is a fact about
+   * this run (this tab has not been shown since launch), not a preference;
+   * written to disk it would survive into a run where the tab had been front
+   * and centre for hours.
+   */
+  const [coldTabs, setColdTabs] = useState<Set<string>>(
+    () => new Set(tabs.filter((tab) => tab.kind === "chat").map((tab) => tab.id)),
+  );
+  // Warming is one-way: the first activation pays the spawn and the transcript
+  // read, and nothing puts a pane back to sleep — ChatPane's own latch is
+  // monotonic for the same reason.
+  useEffect(() => {
+    setColdTabs((current) => {
+      if (!current.has(activeTab)) return current;
+      const next = new Set(current);
+      next.delete(activeTab);
+      return next;
+    });
+  }, [activeTab]);
+  // Written through on every commit rather than from inside the setTabs
+  // updaters: React may run an updater twice (the claudeKill in forceCloseTab
+  // was moved outside for exactly that reason), and an effect only sees
+  // committed state. Riding on [tabs] also catches the session-id write-back
+  // in handleSessionId and the resumeFile back-fill below without either
+  // knowing about persistence, so a restart just after the CLI announces its
+  // uuid still resumes instead of respawning fresh and orphaning the
+  // transcript. The pair is written together so a restored activeTab always
+  // points into the list it was stored with. `flatMap` because
+  // `filter(Boolean)` does not narrow `(StoredTab | null)[]` in TypeScript.
+  useEffect(() => {
+    writeJson(
+      KEYS.state.openTabs,
+      tabs.flatMap((tab) => {
+        const stored = toStoredTab(tab);
+        return stored ? [stored] : [];
+      }),
+    );
+    writeString(KEYS.state.activeTab, activeTab);
+  }, [tabs, activeTab]);
   /**
    * Paths whose editor holds unsaved changes, for the tab mark and the close
    * guard. Keyed by path because that is what the editor knows; a file tab's id
@@ -178,7 +302,27 @@ function Workbench() {
   /** Makes each fresh tab id unique, so a new session never reuses a chat id. */
   const newSessionCounter = useRef(0);
 
-  const [terminalVisible, setTerminalVisible] = useState(true);
+  /**
+   * Terminal visibility per repo root, persisted.
+   *
+   * TerminalPanel already keys its shells by repo precisely so a hidden repo's
+   * shells stay alive; one shared boolean was the missing half of that split —
+   * hiding the panel to read a chat in one repo blanked the terminal in every
+   * other. A repo with no entry opens with a terminal showing, as the old
+   * single boolean always did.
+   */
+  const [terminalOpen, setTerminalOpen] = useState<Record<string, boolean>>(
+    () => readBoolMap(KEYS.state.terminalOpen),
+  );
+  const terminalVisible = terminalOpen[activeRepo] ?? true;
+  useEffect(() => {
+    // The "" entry is the no-repo window's flag (see showTerminal below): it
+    // must work while the run lasts and mean nothing after it, so it is
+    // stripped here rather than persisted.
+    const persistable = { ...terminalOpen };
+    delete persistable[""];
+    writeJson(KEYS.state.terminalOpen, persistable);
+  }, [terminalOpen]);
   /**
    * Explicit collapse, mirroring `terminalVisible`.
    *
@@ -253,17 +397,60 @@ function Workbench() {
     terminalActions.current = actions;
   }, []);
 
-  /** Reveal the panel and refit it, for a terminal chord pressed while hidden. */
+  /**
+   * Reveal the panel and refit it, for a terminal chord pressed while hidden.
+   *
+   * Every write here and below touches the ACTIVE repo's entry only. With no
+   * repo discovered the entry lands under "", deliberately: an empty workspace
+   * still shows the panel, and it must stay hideable there — the old single
+   * boolean always was. That flag lives only in state; the persist effect
+   * above strips it, since a flag under "" is garbage that would outlive the
+   * run.
+   */
   const showTerminal = useCallback(() => {
-    setTerminalVisible(true);
+    setTerminalOpen((current) =>
+      current[activeRepo] === true ? current : { ...current, [activeRepo]: true },
+    );
     setRefitToken((token) => token + 1);
-  }, []);
+  }, [activeRepo]);
 
   /** Ctrl+`, the titlebar button and the menus all go through this. */
   const toggleTerminal = useCallback(() => {
-    setTerminalVisible((visible) => !visible);
+    setTerminalOpen((current) => ({
+      ...current,
+      // Absent means "never touched", which the derived read above renders as
+      // open — so the first toggle of a fresh repo must hide, not show.
+      [activeRepo]: !(current[activeRepo] ?? true),
+    }));
     setRefitToken((token) => token + 1);
-  }, []);
+  }, [activeRepo]);
+
+  /**
+   * The panel's own close button. Hidden is not unmounted, so this only flips
+   * the active repo's flag; hiding needs no refit.
+   */
+  const hideTerminal = useCallback(() => {
+    setTerminalOpen((current) =>
+      current[activeRepo] === false ? current : { ...current, [activeRepo]: false },
+    );
+  }, [activeRepo]);
+
+  /**
+   * Re-fit on a hidden→shown flip of the derived visibility, however caused.
+   *
+   * Switching repos can take the panel from hidden to shown without any of the
+   * show/toggle paths running, and a `display: none` box has no measurable
+   * size, so without this the grids come back fitted to a zero box.
+   * TerminalPanel's own showToken covers a pane going visible inside an
+   * already-open panel — not the panel itself. The previous value lives in a
+   * ref so a repo switch that leaves visibility alone bumps nothing.
+   */
+  const wasTerminalVisible = useRef(terminalVisible);
+  useEffect(() => {
+    const was = wasTerminalVisible.current;
+    wasTerminalVisible.current = terminalVisible;
+    if (!was && terminalVisible) setRefitToken((token) => token + 1);
+  }, [terminalVisible]);
 
   const [leftWidth, resizeLeft] = usePersistentSize("mangouste.leftWidth", 300, 160, 700);
   const [rightWidth, resizeRight] = usePersistentSize("mangouste.rightWidth", 300, 180, 700);
@@ -1559,6 +1746,7 @@ function Workbench() {
                     chatId={tab.id}
                     cwd={tab.cwd}
                     visible={tab.id === activeTab}
+                    cold={coldTabs.has(tab.id)}
                     resume={tab.sessionId}
                     resumeFile={tab.resumeFile}
                     onSessionId={sessionIdHandlerFor(tab.id)}
@@ -1635,7 +1823,7 @@ function Workbench() {
               dock={terminalDock}
               refitToken={refitToken}
               themeKey={theme}
-              onClose={() => setTerminalVisible(false)}
+              onClose={hideTerminal}
               onRequestShow={showTerminal}
               onDock={setTerminalDock}
               onRegisterActions={registerTerminalActions}
@@ -1668,6 +1856,8 @@ function Workbench() {
           onTheme={setTheme}
           permissionMode={permissionMode}
           onPermissionMode={setPermissionMode}
+          restoreTabs={restoreTabs}
+          onRestoreTabs={setRestoreTabs}
           workspaceRoot={workspaceRoot}
           onWorkspaceRoot={setWorkspaceRoot}
           onClose={() => setSettingsOpen(false)}

@@ -3,11 +3,14 @@ import {
   allKeys,
   initStore,
   KEYS,
+  readBoolean,
+  readBoolMap,
   readEnum,
   readJson,
   readNumber,
   readString,
   SCHEMA_VERSION,
+  writeBoolean,
   writeJson,
 } from "./persist";
 
@@ -180,10 +183,64 @@ describe("readJson", () => {
   });
 });
 
+describe("readBoolean", () => {
+  it("round-trips what writeBoolean stored", () => {
+    vi.stubGlobal("localStorage", fakeStore());
+    writeBoolean("flag", true);
+    expect(readBoolean("flag", false)).toBe(true);
+    writeBoolean("flag", false);
+    expect(readBoolean("flag", true)).toBe(false);
+  });
+
+  it("falls back on anything that is not the literal true or false", () => {
+    // "1", "yes", a torn write — none of them get to mean anything.
+    vi.stubGlobal("localStorage", fakeStore({ junk: "1", torn: "tru" }));
+    expect(readBoolean("junk", true)).toBe(true);
+    expect(readBoolean("torn", false)).toBe(false);
+    expect(readBoolean("absent", true)).toBe(true);
+  });
+});
+
+describe("readBoolMap", () => {
+  it("drops a bad entry and keeps the rest", () => {
+    // One corrupt entry costs one entry, not every repo's setting.
+    vi.stubGlobal(
+      "localStorage",
+      fakeStore({ map: '{"a":true,"b":"yes","c":false,"d":1}' }),
+    );
+    expect(readBoolMap("map")).toEqual({ a: true, c: false });
+  });
+
+  it("yields an empty map for an array", () => {
+    // An array parses and enumerates like a map, so it needs its own refusal.
+    vi.stubGlobal("localStorage", fakeStore({ map: "[true,false]" }));
+    expect(readBoolMap("map")).toEqual({});
+  });
+
+  it("yields an empty map for null", () => {
+    // `typeof null` is "object"; the guard must not be fooled by it.
+    vi.stubGlobal("localStorage", fakeStore({ map: "null" }));
+    expect(readBoolMap("map")).toEqual({});
+  });
+
+  it("yields an empty map for a missing key", () => {
+    vi.stubGlobal("localStorage", fakeStore());
+    expect(readBoolMap("absent")).toEqual({});
+  });
+});
+
 describe("write failures", () => {
   it("swallow a blocked store instead of taking the caller down", () => {
     vi.stubGlobal("localStorage", hostileStore());
     expect(() => writeJson("k", { a: 1 })).not.toThrow();
     expect(readString("k", "fallback")).toBe("fallback");
+  });
+
+  it("leave the boolean helpers on their fallbacks, never throwing", () => {
+    vi.stubGlobal("localStorage", hostileStore());
+    expect(() => writeBoolean("k", true)).not.toThrow();
+    expect(readBoolean("k", true)).toBe(true);
+    expect(readBoolean("k", false)).toBe(false);
+    expect(readBoolMap("k")).toEqual({});
   });
 });

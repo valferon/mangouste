@@ -67,6 +67,16 @@ interface ChatPaneProps {
    * the transcript once it is shown again.
    */
   visible: boolean;
+  /**
+   * Restored but never shown: hold off the spawn and the transcript read.
+   *
+   * Distinct from `visible` — that means "on screen now", this means "has never
+   * been shown". Restored tabs all mount at boot, and a warm mount costs a
+   * `claude` process and a 400-record transcript read each; eight restored tabs
+   * must not spawn eight CLIs before the first click. Both costs are paid on
+   * first activation instead.
+   */
+  cold: boolean;
   /** Session uuid to resume; `null` starts a fresh transcript. */
   resume: string | null;
   /** Transcript path backing `resume`, used to render history. */
@@ -934,6 +944,7 @@ export const ChatPane = memo(function ChatPane({
   chatId,
   cwd,
   visible,
+  cold,
   resume,
   resumeFile,
   onSessionId,
@@ -956,6 +967,16 @@ export const ChatPane = memo(function ChatPane({
   const [attachments, setAttachments] = useState<PendingImage[]>([]);
   const [running, setRunning] = useState(false);
   const [alive, setAlive] = useState(false);
+  /**
+   * Whether this pane has earned its process.
+   *
+   * A cold-restored pane spawns nothing and reads no transcript until it is
+   * first shown, and this latch only ever goes false -> true. Deriving it from
+   * `visible` instead would re-run the mount effect on every hide/show — whose
+   * cleanup retires and detaches the live instance, and whose re-run wipes and
+   * re-hydrates the transcript.
+   */
+  const [warmed, setWarmed] = useState(!cold);
   const [permissionMode, setPermissionMode] = useState<string>(defaultPermissionMode);
   /** Tools the user chose to always allow, for this pane's lifetime. */
   const alwaysAllowRef = useRef<Set<string>>(new Set());
@@ -980,8 +1001,13 @@ export const ChatPane = memo(function ChatPane({
   const [sessionId, setSessionId] = useState<string | null>(resume);
   const [costUsd, setCostUsd] = useState<number | null>(null);
   const [model, setModel] = useState<string | null>(null);
-  /** What the transport is doing right now, in plain technical terms. */
-  const [phase, setPhase] = useState("idle");
+  /**
+   * What the transport is doing right now, in plain technical terms.
+   *
+   * A cold pane rests at "not started" so the status bar says why nothing is
+   * moving; the first spawn overwrites it the same way it overwrites "idle".
+   */
+  const [phase, setPhase] = useState(cold ? "not started" : "idle");
   /** The tool call whose result the CLI is still waiting on. */
   const [pendingTool, setPendingTool] = useState<PendingTool | null>(null);
   /** What the /proc probe says is executing under the CLI right now. */
@@ -1056,6 +1082,27 @@ export const ChatPane = memo(function ChatPane({
     onSessionIdRef.current = onSessionId;
     onSystemMessageRef.current = onSystemMessage;
   });
+  /*
+   * The mount-time snapshot in permissionModeRef/modelAliasRef is fine for a
+   * warm pane — it spawns immediately. A cold pane can sit for minutes while a
+   * pick in another pane moves App's defaults, and its eventual first spawn
+   * must use the defaults of now, not of boot. Sync only while no spawn has
+   * ever been asked for: past that point this is exactly the
+   * teardown-on-mode-change bug described above permissionModeRef, and it would
+   * clobber a mode the user armed in this pane's own strip. State moves with
+   * the refs, or the mode switches would highlight a choice the spawn ignores.
+   * This effect sits above the mount effect, so on the commit that warms the
+   * latch it still runs before the first start().
+   */
+  useEffect(() => {
+    if (startGenerationRef.current !== 0) return;
+    permissionModeRef.current = defaultPermissionMode;
+    setPermissionMode(defaultPermissionMode);
+    setSpawnedPermissionMode(defaultPermissionMode);
+    modelAliasRef.current = defaultModelAlias;
+    setModelAlias(defaultModelAlias);
+    setSpawnedModelAlias(defaultModelAlias);
+  }, [defaultPermissionMode, defaultModelAlias]);
   /** Mirrors `sessionId` state for the stable frame handler. */
   const sessionIdRef = useRef<string | null>(resume);
 
@@ -1086,9 +1133,13 @@ export const ChatPane = memo(function ChatPane({
     if (awaitingPermission) return "awaiting" as const;
     if (running) return "active" as const;
     // `alive` is false before the first start resolves as well as after an exit,
-    // so a pane that has not spawned yet must not read as a dead one.
+    // so a pane that has not spawned yet must not read as a dead one. "not
+    // started" is the cold pane's resting phase and belongs to the same family.
     if (!alive) {
-      return phase === "idle" || phase === "attaching" || phase === "starting claude"
+      return phase === "idle" ||
+        phase === "not started" ||
+        phase === "attaching" ||
+        phase === "starting claude"
         ? ("idle" as const)
         : ("interrupted" as const);
     }
@@ -1255,9 +1306,27 @@ export const ChatPane = memo(function ChatPane({
   );
 
   const start = useCallback(() => spawn("attach"), [spawn]);
-  const restart = useCallback(() => spawn("restart"), [spawn]);
+  /**
+   * On a pane that never spawned, restart IS the first start: there is no
+   * process to kill, so warming the latch lets the mount effect run the one
+   * attach. Calling spawn("restart") here instead would race the visibility
+   * flip — restart spawns generation N, the flip spawns N+1, and the pane is
+   * wiped and re-hydrated twice for one intent.
+   */
+  const restart = useCallback(() => {
+    if (!warmed) {
+      setWarmed(true);
+      return Promise.resolve();
+    }
+    return spawn("restart");
+  }, [spawn, warmed]);
 
   useEffect(() => {
+    // A cold pane owes nothing yet: no spawn, no transcript read — and no
+    // cleanup, or unmounting a never-shown pane would resolve a pending it
+    // never created and detach a process it never started. The latch flipping
+    // true re-runs this effect, and that one run is the fresh-mount path.
+    if (!warmed) return;
     void start();
     const pending = startRef.current;
     return () => {
@@ -1274,7 +1343,16 @@ export const ChatPane = memo(function ChatPane({
         void claudeDetach(chatId);
       });
     };
-  }, [start, chatId]);
+  }, [start, chatId, warmed]);
+
+  // First show is what pays for the process. The latch is also warmed when the
+  // parent stops calling the pane cold — App drops a tab from its cold set the
+  // moment it becomes active, and that prop can land before `visible` does.
+  // Both firing in one commit is fine: setting an already-true latch is a no-op,
+  // so there is still exactly one spawn.
+  useEffect(() => {
+    if (visible || !cold) setWarmed(true);
+  }, [visible, cold]);
 
   /* ---------- frame handling ---------- */
 
@@ -1533,6 +1611,12 @@ export const ChatPane = memo(function ChatPane({
         // Each child names its own chat id on its prompt server's command line,
         // so an ask says who raised it. The old test was "am I the pane with a
         // turn in flight", which is only ever right when one chat is live.
+        //
+        // Unlike the instance-filtered listeners above, this one can land in a
+        // cold pane — a detached daemon under this chat id raising an ask. On
+        // purpose: a tab blocked on a human should say "awaiting" before it is
+        // ever shown. The first spawn wipes the card with the rest of the
+        // pre-spawn items and gets it back through status.pendingPermissions.
         if (request.chatId !== chatId) return;
         logDebug(chatId, "permission", `ask · ${request.toolName}`, request);
         if (
@@ -1924,9 +2008,10 @@ export const ChatPane = memo(function ChatPane({
   const timeline = useMemo(() => toTimeline(items, toolResults), [items, toolResults]);
 
   const statusLabel = useMemo(() => {
-    if (!alive) return "stopped";
+    // "stopped" claims an exit; a cold pane simply has not started yet.
+    if (!alive) return warmed ? "stopped" : "not started";
     return running ? "working…" : "ready";
-  }, [alive, running]);
+  }, [alive, running, warmed]);
 
   /**
    * The whole transcript as text, for "Copy Conversation".
@@ -2064,7 +2149,11 @@ export const ChatPane = memo(function ChatPane({
             value={draft}
             onPaste={(event) => void onPaste(event)}
             placeholder={
-              alive ? "Message Claude…  (/ for commands, @ for files)" : "Not running"
+              alive
+                ? "Message Claude…  (/ for commands, @ for files)"
+                : warmed
+                  ? "Not running"
+                  : "Not started"
             }
             onChange={(event) => {
               setDraft(event.target.value);
