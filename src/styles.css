@@ -4283,3 +4283,56 @@ select {
   flex: 1;
   color: var(--fg-dim);
 }
+
+/* ---------- pane error boundary ---------- */
+
+/* Fills whatever box the pane would have had, so a failed centre pane does not
+   collapse the column around it. */
+.pane-error {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.pane-error-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pane-error-message {
+  align-self: stretch;
+  max-height: 40vh;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-left: 2px solid var(--red);
+  border-radius: 3px;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pane-error .setting-hint {
+  margin: 6px 0 0;
+}
+
+.pane-error .setting-row {
+  padding: 8px 0 0;
+}
+
+.pane-error .setting-row .toggle-button {
+  border-color: var(--border);
+}
