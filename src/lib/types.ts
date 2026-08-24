@@ -148,6 +148,13 @@ export interface RepoStatus {
   files: FileStatus[];
 }
 
+export interface BranchList {
+  current: string | null;
+  local: string[];
+  /** Remote-tracking branches, remote prefix kept (`origin/main`). */
+  remote: string[];
+}
+
 export interface ChatStatus {
   chatId: string;
   /** Monotonic spawn id, used to discard events from a superseded process. */
@@ -397,4 +404,129 @@ export interface StatsSummary {
   bytesRead: number;
   scanMs: number;
   generatedAtMs: number;
+}
+
+/* ---------- CLI control protocol ---------- */
+
+/*
+ * Shapes returned by `control_request` frames on the chat's stdin/stdout.
+ *
+ * These are the CLI's own panel data — what `/model`, `/mcp` and `/context`
+ * render in the interactive TUI. A `--print` session refuses to run those
+ * commands (they are Ink components), but it answers every request below, so
+ * the panels can be rebuilt here. See `src/lib/control.ts`.
+ */
+
+/** One entry of the CLI's slash-command catalog, from `initialize`. */
+export interface SlashCommand {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  aliases?: string[];
+}
+
+export interface ModelOption {
+  value: string;
+  resolvedModel: string;
+  displayName: string;
+  description: string;
+  supportsEffort?: boolean;
+  supportedEffortLevels?: string[];
+  supportsFastMode?: boolean;
+  supportsAutoMode?: boolean;
+}
+
+export interface AgentSummary {
+  name: string;
+  description: string;
+}
+
+export interface AccountInfo {
+  email?: string;
+  organization?: string;
+  subscriptionType?: string;
+  apiProvider?: string;
+}
+
+/**
+ * Everything the CLI reports about a freshly connected session.
+ *
+ * `commands` is already filtered to what this environment can actually run:
+ * the interactive-only commands (`/help`, `/status`, `/permissions`) are absent,
+ * which is exactly the set mangouste supplies itself.
+ */
+export interface InitializeResult {
+  commands: SlashCommand[];
+  models: ModelOption[];
+  agents: AgentSummary[];
+  account: AccountInfo | null;
+  output_style: string | null;
+  available_output_styles: string[];
+  current_permission_mode: string | null;
+  session_state: string | null;
+  pid: number | null;
+}
+
+export interface McpServerStatus {
+  name: string;
+  /** `connected` | `pending` | `needs-auth` | `failed` | `disabled`. */
+  status: string;
+  scope?: string;
+  config?: { type?: string; url?: string; command?: string };
+}
+
+export interface McpStatusResult {
+  mcpServers: McpServerStatus[];
+}
+
+export interface ContextCategory {
+  name: string;
+  tokens: number;
+  /** Deferred tool schemas are counted but not yet loaded into the prompt. */
+  isDeferred?: boolean;
+}
+
+export interface ContextUsageResult {
+  categories: ContextCategory[];
+  totalTokens: number;
+  maxTokens: number;
+  percentage: number;
+}
+
+/** One plan rate-limit window. Keys with a different shape are skipped by the panel. */
+export interface RateLimitWindow {
+  utilization: number;
+  resets_at: string | null;
+}
+
+export interface ControlUsageResult {
+  session: {
+    total_cost_usd: number;
+    total_duration_ms: number;
+    total_lines_added: number;
+    total_lines_removed: number;
+  };
+  subscription_type: string | null;
+  rate_limits_available: boolean;
+  /** Window name to utilization. Null entries mean the plan has no such window. */
+  rate_limits: Record<string, unknown> | null;
+}
+
+export interface ControlSettingsResult {
+  effective: Record<string, unknown>;
+  sources?: Record<string, unknown>;
+}
+
+export interface BinaryVersionResult {
+  version: string;
+  buildTime?: string;
+}
+
+export interface ReloadSkillsResult {
+  skills: SlashCommand[];
+}
+
+export interface ReloadPluginsResult {
+  commands: SlashCommand[];
+  agents?: AgentSummary[];
 }

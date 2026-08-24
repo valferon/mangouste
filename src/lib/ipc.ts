@@ -2,7 +2,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
+  BranchList,
   ChatStatus,
   ClaudeUsage,
   ClipboardImage,
@@ -19,6 +21,29 @@ import type {
   StatsSummary,
   TerminalInfo,
 } from "./types";
+
+/* ---------- external links ---------- */
+
+/** Schemes the OS handler is allowed to see. Anything else stays in the app. */
+const OPENABLE = /^(?:https?|mailto|tel):/i;
+
+/**
+ * Hand a link to the desktop's default application.
+ *
+ * The webview has nowhere to navigate to — `window.open` is inert inside it and
+ * a plain anchor would replace the app itself — so every link has to leave
+ * through the opener plugin. Resolves to `false` when the scheme is not one we
+ * hand out or the platform refused, so callers can fall back to copying.
+ */
+export async function openExternal(url: string): Promise<boolean> {
+  if (!OPENABLE.test(url)) return false;
+  try {
+    await openUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /* ---------- selection + clipboard ---------- */
 
@@ -212,6 +237,37 @@ export const gitDiffFile = (cwd: string, path: string, staged = false) =>
   invoke<string>("git_diff_file", { cwd, path, staged });
 export const gitBranches = (cwd: string) => invoke<string[]>("git_branches", { cwd });
 export const gitRoot = (cwd: string) => invoke<string | null>("git_root", { cwd });
+export const gitStage = (cwd: string, paths: string[]) =>
+  invoke<void>("git_stage", { cwd, paths });
+export const gitUnstage = (cwd: string, paths: string[]) =>
+  invoke<void>("git_unstage", { cwd, paths });
+export const gitCommit = (cwd: string, message: string, amend = false) =>
+  invoke<string>("git_commit", { cwd, message, amend });
+
+/**
+ * Irreversible: drops worktree edits to `tracked` and deletes `untracked`.
+ * Only ever called behind a confirmation in the pane.
+ */
+export const gitDiscard = (cwd: string, tracked: string[], untracked: string[]) =>
+  invoke<void>("git_discard", { cwd, tracked, untracked });
+
+/* Network commands. Each resolves to git's own combined output, which the pane
+   shows verbatim — a push rejection reads better in git's words than in ours. */
+export const gitFetch = (cwd: string, remote?: string) =>
+  invoke<string>("git_fetch", { cwd, remote });
+/** Fast-forward only unless `rebase` is set, so no implicit merge commit. */
+export const gitPull = (cwd: string, rebase = false) =>
+  invoke<string>("git_pull", { cwd, rebase });
+export const gitPush = (cwd: string, setUpstream = false) =>
+  invoke<string>("git_push", { cwd, setUpstream });
+
+export const gitBranchList = (cwd: string) => invoke<BranchList>("git_branch_list", { cwd });
+export const gitCheckout = (cwd: string, branch: string) =>
+  invoke<string>("git_checkout", { cwd, branch });
+export const gitCreateBranch = (cwd: string, name: string) =>
+  invoke<string>("git_create_branch", { cwd, name });
+export const gitMerge = (cwd: string, branch: string) =>
+  invoke<string>("git_merge", { cwd, branch });
 
 /* ---------- dashboard statistics ---------- */
 

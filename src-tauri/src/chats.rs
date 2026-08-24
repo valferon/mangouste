@@ -313,11 +313,12 @@ impl ChatManager {
 // Headless `--print` sessions never get the interactive CLI's AI-generated
 // title, so every chat this app spawns shows up as a bare uuid in session
 // pickers. Fix, in rank order:
-//   1. As soon as the transcript exists, append an `ai-title` derived from
-//      the first user prompt — the session has a real name from the start.
-//   2. When the first turn ends, ask Haiku for a better title in the
-//      background; on success it supersedes the derived one (same kind,
-//      later record wins). On any failure the derived title just sticks.
+//   1. As soon as the transcript exists, ask Haiku for a title in the
+//      background and append it as an `ai-title`. One `ai-title` is written
+//      per session, so the name never changes under the user mid-turn.
+//   2. If that call gives nothing usable — no binary, rate limit, timeout,
+//      empty reply — fall back to a title derived from the first user
+//      prompt, so an unnamed session is never an outcome.
 //   3. An explicit rename appends a `custom-title`, the record kind
 //      `claude --name` writes, which outranks every `ai-title` in every
 //      lister — this app, the CLI picker, the VS Code extension.
@@ -416,28 +417,24 @@ fn append_title_records(
         .is_ok()
 }
 
-enum TitleWrite {
-    /// This call appended the derived title — the session was unnamed.
-    Wrote,
-    /// A title record already exists; nothing was written.
-    Already,
-    /// No transcript yet, or the append failed; worth retrying.
-    Failed,
+enum TitleState {
+    /// The transcript exists and carries no name — ours to name.
+    Untitled,
+    /// A title record is already there; a resumed session keeps its name.
+    Named,
+    /// No transcript yet; worth checking again on the next frame.
+    Missing,
 }
 
-/// Give an untitled session its derived name. Never overwrites: a resumed
-/// session the user or CLI already named keeps its name.
-fn write_title_records(session_id: &str, title: &str) -> TitleWrite {
+/// Whether this session still needs a name.
+fn title_state(session_id: &str) -> TitleState {
     let Some(path) = transcript_path(session_id) else {
-        return TitleWrite::Failed;
+        return TitleState::Missing;
     };
     if has_title_record(&path) {
-        return TitleWrite::Already;
-    }
-    if append_title_records(&path, session_id, "ai-title", "aiTitle", title) {
-        TitleWrite::Wrote
+        TitleState::Named
     } else {
-        TitleWrite::Failed
+        TitleState::Untitled
     }
 }
 
@@ -447,36 +444,73 @@ pub fn titlegen_dir() -> PathBuf {
     std::env::temp_dir().join("mangouste-titlegen")
 }
 
-/// Ask Haiku for a better title in the background. Best-effort by design:
-/// any failure — no binary, rate limit, empty reply — leaves the derived
-/// title in place. Appending is safe even if the user renamed meanwhile,
-/// because a `custom-title` outranks this record wherever titles are read.
-fn spawn_haiku_title(session_id: String, prompt: String) {
+/// Budget for the naming call. Past this the derived title is written instead:
+/// a session showing a bare uuid while a hung child is waited on is worse than
+/// a plainer name that lands promptly.
+const TITLE_TIMEOUT_MS: u64 = 20_000;
+
+/// Ask Haiku to name a session from its first prompt. `None` on every failure
+/// mode — no binary, rate limit, timeout, unusable reply — which the caller
+/// reads as "use the derived title".
+fn haiku_title(prompt: &str) -> Option<String> {
+    let dir = titlegen_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let ask = format!(
+        "Generate a concise 3-7 word title for a coding session that began \
+         with this request. Reply with only the title — no quotes, no \
+         trailing punctuation.\n\nRequest: {prompt}"
+    );
+    let mut child = Command::new(claude_binary())
+        .args(["-p", "--model", "haiku"])
+        .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_TITLEGEN)
+        .arg(&ask)
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // `output()` would block forever on a hung child, and the fallback cannot
+    // be written until this returns, so the wait is polled and the child killed
+    // if it outstays the budget.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(TITLE_TIMEOUT_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Models reach for quotes and trailing periods however firmly they are told
+    // not to, and `derive_title` keeps the line to one collapsed 60-char line.
+    let first = text.trim().lines().next().unwrap_or("").trim();
+    derive_title(first.trim_matches('"').trim_end_matches('.').trim())
+}
+
+/// Name an untitled session in the background: Haiku first, the prompt-derived
+/// title if that yields nothing. Off the stdout pump because the model call
+/// takes seconds and a stall there stops the chat.
+fn spawn_session_title(session_id: String, derived: String) {
     std::thread::spawn(move || {
-        let dir = titlegen_dir();
-        if std::fs::create_dir_all(&dir).is_err() {
+        let title = haiku_title(&derived).unwrap_or(derived);
+        // Re-checked rather than assumed: a rename or the CLI's own title can
+        // have landed while the model was thinking, and it keeps precedence.
+        if !matches!(title_state(&session_id), TitleState::Untitled) {
             return;
         }
-        let ask = format!(
-            "Generate a concise 3-7 word title for a coding session that began \
-             with this request. Reply with only the title — no quotes, no \
-             trailing punctuation.\n\nRequest: {prompt}"
-        );
-        let output = Command::new(claude_binary())
-            .args(["-p", "--model", "haiku"])
-            .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_TITLEGEN)
-            .arg(&ask)
-            .current_dir(&dir)
-            .stdin(Stdio::null())
-            .output();
-        let Ok(output) = output else { return };
-        if !output.status.success() {
-            return;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let Some(title) = derive_title(text.trim().lines().next().unwrap_or("")) else {
-            return;
-        };
         if let Some(path) = transcript_path(&session_id) {
             let _ = append_title_records(&path, &session_id, "ai-title", "aiTitle", &title);
         }
@@ -1001,10 +1035,6 @@ pub fn start(
         let titled = Arc::clone(&titled);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            // Whether this thread named the session itself, as opposed to
-            // finding a name already there; only then is a Haiku upgrade due.
-            let mut auto_titled = false;
-            let mut haiku_spawned = false;
             // Bytes, not `lines()`: that iterator ends on the first non-UTF-8
             // byte, and this thread is the pipe's only reader — the child would
             // then block on its next write while `alive` still reports the chat
@@ -1039,37 +1069,26 @@ pub fn start(
                                 *slot = Some(id.to_string());
                             }
                         }
-                        // Title the session the moment it can be titled: the
-                        // transcript appears just after the first user frame,
-                        // and waiting for the turn to end left long first
-                        // turns showing a bare uuid the whole time.
+                        // Start naming the session the moment it can be
+                        // named: the transcript appears just after the first
+                        // user frame, and waiting for the turn to end left
+                        // long first turns showing a bare uuid the whole time.
                         if !titled.load(Ordering::SeqCst) {
                             let candidate = title_candidate.lock().clone();
                             let session = session_id.lock().clone();
-                            if let (Some(title), Some(sid)) = (candidate, session) {
-                                match write_title_records(&sid, &title) {
-                                    TitleWrite::Wrote => {
+                            if let (Some(prompt), Some(sid)) = (candidate, session) {
+                                match title_state(&sid) {
+                                    TitleState::Untitled => {
                                         titled.store(true, Ordering::SeqCst);
-                                        auto_titled = true;
+                                        spawn_session_title(sid, prompt);
                                     }
-                                    TitleWrite::Already => titled.store(true, Ordering::SeqCst),
-                                    TitleWrite::Failed => {}
+                                    TitleState::Named => titled.store(true, Ordering::SeqCst),
+                                    TitleState::Missing => {}
                                 }
                             }
                         }
                         if value.get("type").and_then(|v| v.as_str()) == Some("result") {
                             running.store(false, Ordering::SeqCst);
-                            // First turn done: upgrade the derived title via
-                            // Haiku. Only for sessions this thread named —
-                            // resumed ones keep the name they already carry.
-                            if auto_titled && !haiku_spawned {
-                                haiku_spawned = true;
-                                let sid = session_id.lock().clone();
-                                let prompt = title_candidate.lock().clone();
-                                if let (Some(sid), Some(prompt)) = (sid, prompt) {
-                                    spawn_haiku_title(sid, prompt);
-                                }
-                            }
                         }
                         manager.emit(
                             EVENT_MESSAGE,

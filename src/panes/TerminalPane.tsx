@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { onPtyData, onPtyExit, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
+import { onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
 
 interface TerminalPaneProps {
   id: string;
@@ -130,7 +130,9 @@ export function TerminalPane({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
+    // The addon's own handler calls `window.open`, which a webview ignores, so
+    // a detected URL has to be handed to the desktop browser explicitly.
+    term.loadAddon(new WebLinksAddon((_event, uri) => void openExternal(uri)));
     term.open(host);
     fit.fit();
 

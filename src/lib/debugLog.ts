@@ -12,7 +12,7 @@ export interface DebugEntry {
   seq: number;
   /** Wall-clock ms of the first occurrence. */
   at: number;
-  kind: "frame" | "stream" | "stderr" | "cli" | "phase" | "probe" | "send" | "permission" | "exit";
+  kind: "frame" | "stream" | "stderr" | "cli" | "phase" | "probe" | "send" | "permission" | "exit" | "control";
   label: string;
   /**
    * Payload for the expanded row, as a capped text snapshot; absent for

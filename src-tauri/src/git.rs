@@ -316,3 +316,321 @@ pub fn git_root(cwd: String) -> Option<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// Reject a path list that git could read as options, and refuse an empty list
+/// so a mistaken call can never widen to "every path in the repo".
+///
+/// Every caller also passes `--` before the paths; this is the second line of
+/// defence, since the frontend sources these from `git_status` output.
+fn checked_paths(paths: &[String]) -> Result<Vec<&str>, String> {
+    if paths.is_empty() {
+        return Err("no paths given".to_string());
+    }
+    paths
+        .iter()
+        .map(|p| {
+            if p.is_empty() {
+                Err("empty path".to_string())
+            } else {
+                Ok(p.as_str())
+            }
+        })
+        .collect()
+}
+
+/// Whether HEAD resolves. False in a fresh repo before the first commit, where
+/// the index has no committed side to be restored from.
+fn has_head(cwd: &str) -> bool {
+    git(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok()
+}
+
+/// Stage the given paths. `--` keeps a path such as `-x` a path, and `--all`
+/// picks up deletions as well as edits and new files.
+#[tauri::command(async)]
+pub fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+    let paths = checked_paths(&paths)?;
+    let mut args = vec!["add", "--all", "--"];
+    args.extend(paths);
+    git(&cwd, &args).map(|_| ())
+}
+
+/// Unstage the given paths, leaving the worktree untouched.
+#[tauri::command(async)]
+pub fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+    let paths = checked_paths(&paths)?;
+    // Before the first commit there is no HEAD to restore the index entry from,
+    // so the only way back to "untracked" is to drop the entry outright.
+    let mut args = if has_head(&cwd) {
+        vec!["restore", "--staged", "--"]
+    } else {
+        vec!["rm", "--cached", "-r", "--quiet", "--"]
+    };
+    args.extend(paths);
+    git(&cwd, &args).map(|_| ())
+}
+
+/// Commit what is staged. Returns git's own summary line for the status bar.
+///
+/// `amend` rewrites the previous commit instead of adding one, which is only
+/// offered when HEAD exists and nothing has been pushed — the pane decides that.
+#[tauri::command(async)]
+pub fn git_commit(cwd: String, message: String, amend: Option<bool>) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("commit message is empty".to_string());
+    }
+    // `-m` consumes the next argument as its value, so a message starting with
+    // `-` cannot be re-read as a flag.
+    let mut args = vec!["commit", "-m", &message];
+    if amend.unwrap_or(false) {
+        args.push("--amend");
+    }
+    let stdout = git(&cwd, &args)?;
+    Ok(stdout.trim().to_string())
+}
+
+/// Run git with every interactive credential path closed off.
+///
+/// A network command that decides to ask for a password would otherwise block
+/// on a terminal this process does not have, and the whole call would hang until
+/// the app is killed. Failing fast with git's own error is far better: the user
+/// can fix their credential helper and retry.
+fn git_network(cwd: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Unset rather than set: an empty GIT_ASKPASS is still "run this", so
+        // removing the variables is what actually disables the GUI prompters.
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    // Progress goes to stderr even on success, so both streams are returned and
+    // the caller shows whichever is non-empty.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(stderr.trim().to_string());
+    }
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
+    Ok(combined.trim().to_string())
+}
+
+/// A branch or remote name coming from the frontend. Rejects anything that
+/// could be read as an option or escape the ref namespace, so a crafted name
+/// cannot turn into a flag.
+fn checked_ref(name: &str, what: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(format!("not a {what}: {name}"));
+    }
+    if name.starts_with('-') || name.contains("..") || name.starts_with('/') {
+        return Err(format!("not a {what}: {name}"));
+    }
+    let ok = name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/-_.+@".contains(&b));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("not a {what}: {name}"))
+    }
+}
+
+/// `git fetch --prune`, so branch lists lose refs deleted upstream.
+#[tauri::command(async)]
+pub fn git_fetch(cwd: String, remote: Option<String>) -> Result<String, String> {
+    let remote = remote.unwrap_or_default();
+    // No `--no-tags`: git's default tag auto-following is what a user expects
+    // from a fetch button, and `--prune` alone does not touch tags.
+    let mut args = vec!["fetch", "--prune"];
+    if !remote.is_empty() {
+        checked_ref(&remote, "remote")?;
+        args.push("--");
+        args.push(&remote);
+    } else {
+        args.push("--all");
+    }
+    git_network(&cwd, &args)
+}
+
+/// Pull the current branch's upstream.
+///
+/// `--ff-only` by default: a pull that would have to merge, on a repo whose
+/// worktree the user is mid-edit in, is exactly the case where an implicit
+/// merge commit is the wrong answer. Pass `rebase` for the other behaviour.
+#[tauri::command(async)]
+pub fn git_pull(cwd: String, rebase: Option<bool>) -> Result<String, String> {
+    let args: &[&str] = if rebase.unwrap_or(false) {
+        &["pull", "--rebase"]
+    } else {
+        &["pull", "--ff-only"]
+    };
+    git_network(&cwd, args)
+}
+
+/// The remote to push a new branch to: `origin` when it exists, else the first
+/// one configured. `None` when the repo has no remotes at all.
+fn default_remote(cwd: &str) -> Option<String> {
+    let remotes = git(cwd, &["remote"]).ok()?;
+    let names: Vec<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .collect();
+    names
+        .iter()
+        .find(|r| **r == "origin")
+        .or_else(|| names.first())
+        .map(|r| r.to_string())
+}
+
+/// Push the current branch. `set_upstream` covers the first push of a new branch.
+///
+/// There is deliberately no force option: a forced push is not something the
+/// sidebar should make a one-click action.
+#[tauri::command(async)]
+pub fn git_push(cwd: String, set_upstream: Option<bool>) -> Result<String, String> {
+    if set_upstream.unwrap_or(false) {
+        let remote = default_remote(&cwd).ok_or("this repository has no remote")?;
+        // `HEAD` rather than a branch name from the frontend: the branch being
+        // pushed is always the checked-out one, and git resolves the destination
+        // name from it.
+        return git_network(&cwd, &["push", "--set-upstream", &remote, "HEAD"]);
+    }
+    git_network(&cwd, &["push"])
+}
+
+/// Local and remote branch names plus the current one, for the branch menu.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchList {
+    pub current: Option<String>,
+    pub local: Vec<String>,
+    /// Remote-tracking branches, with the remote prefix kept (`origin/main`).
+    pub remote: Vec<String>,
+}
+
+#[tauri::command(async)]
+pub fn git_branch_list(cwd: String) -> Result<BranchList, String> {
+    let format = "--format=%(refname:short)";
+    let local = git(&cwd, &["branch", "--sort=-committerdate", format])?;
+    let remote = git(&cwd, &["branch", "--remotes", "--sort=-committerdate", format])?;
+    let current = git(&cwd, &["branch", "--show-current"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let lines = |s: String| -> Vec<String> {
+        s.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            // `origin/HEAD -> origin/main` is a symref, not a branch to check out.
+            .filter(|l| !l.contains("->"))
+            .map(str::to_string)
+            .collect()
+    };
+
+    Ok(BranchList {
+        current,
+        local: lines(local),
+        remote: lines(remote),
+    })
+}
+
+/// Whether a local branch by this exact name exists.
+fn is_local_branch(cwd: &str, branch: &str) -> bool {
+    git(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
+}
+
+/// For a remote-tracking name, the local branch name it corresponds to.
+///
+/// Derived by stripping an actual configured remote's prefix rather than
+/// splitting on the first `/`, so `origin/feature/x` yields `feature/x` and a
+/// local branch genuinely called `feature/x` is left alone.
+fn local_name_for_remote(cwd: &str, branch: &str) -> Option<String> {
+    let remotes = git(cwd, &["remote"]).ok()?;
+    remotes
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .find_map(|remote| branch.strip_prefix(&format!("{remote}/")))
+        .filter(|rest| !rest.is_empty())
+        .map(str::to_string)
+}
+
+/// Switch branches. Fails rather than discarding anything when the worktree
+/// has changes that would be overwritten — git's own refusal is the guard.
+///
+/// `switch` rather than `checkout` on purpose: `checkout <name>` also accepts
+/// paths, so a branch name that happens to match a file would silently discard
+/// that file's changes instead of moving HEAD. `switch` only ever takes a branch.
+#[tauri::command(async)]
+pub fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
+    checked_ref(&branch, "branch")?;
+
+    // Which form to use is decided by looking refs up, not by guessing from the
+    // name: a local branch is very often called `feature/x`, and handing that to
+    // `--track` creates a *new* local `x` tracking it rather than switching to
+    // it — a silent wrong answer instead of an error.
+    if is_local_branch(&cwd, &branch) {
+        return git(&cwd, &["switch", "--", &branch]).map(|s| s.trim().to_string());
+    }
+
+    // A remote-tracking name whose local branch already exists: switch to the
+    // local one. `--track` would refuse, and picking `origin/main` from the list
+    // plainly means "work on main".
+    if let Some(local) = local_name_for_remote(&cwd, &branch) {
+        if is_local_branch(&cwd, &local) {
+            return git(&cwd, &["switch", "--", &local]).map(|s| s.trim().to_string());
+        }
+    }
+
+    // Otherwise create the local branch with its upstream already set.
+    git(&cwd, &["switch", "--track", "--", &branch]).map(|s| s.trim().to_string())
+}
+
+/// Create a branch at HEAD and switch to it.
+#[tauri::command(async)]
+pub fn git_create_branch(cwd: String, name: String) -> Result<String, String> {
+    checked_ref(&name, "branch name")?;
+    git(&cwd, &["switch", "--create", &name]).map(|s| s.trim().to_string())
+}
+
+/// Merge `branch` into the current one. `--no-commit` is not used: the default
+/// behaviour (fast-forward when possible, merge commit otherwise) is what the
+/// VSCode SCM menu does, and a conflict is left in the worktree to resolve.
+#[tauri::command(async)]
+pub fn git_merge(cwd: String, branch: String) -> Result<String, String> {
+    checked_ref(&branch, "branch")?;
+    let stdout = git(&cwd, &["merge", "--no-edit", "--end-of-options", &branch])?;
+    Ok(stdout.trim().to_string())
+}
+
+/// Throw away worktree changes for the given paths, and delete untracked files
+/// among them. Irreversible — the pane confirms before calling this.
+///
+/// `restore --worktree` covers tracked files; an untracked path has nothing to
+/// restore from, so it is removed instead. Which is which comes from the caller's
+/// own status read, passed as two separate lists so this never has to guess.
+#[tauri::command(async)]
+pub fn git_discard(cwd: String, tracked: Vec<String>, untracked: Vec<String>) -> Result<(), String> {
+    if tracked.is_empty() && untracked.is_empty() {
+        return Err("no paths given".to_string());
+    }
+    if !tracked.is_empty() {
+        let paths = checked_paths(&tracked)?;
+        let mut args = vec!["restore", "--worktree", "--"];
+        args.extend(paths);
+        git(&cwd, &args)?;
+    }
+    if !untracked.is_empty() {
+        let paths = checked_paths(&untracked)?;
+        // `-ff` also removes nested untracked repositories, which `-f` refuses;
+        // without it a stray clone makes the whole call fail.
+        let mut args = vec!["clean", "-ffdq", "--"];
+        args.extend(paths);
+        git(&cwd, &args)?;
+    }
+    Ok(())
+}

@@ -135,6 +135,17 @@ pub fn run() {
             git::git_diff_file,
             git::git_branches,
             git::git_root,
+            git::git_stage,
+            git::git_unstage,
+            git::git_commit,
+            git::git_discard,
+            git::git_fetch,
+            git::git_pull,
+            git::git_push,
+            git::git_branch_list,
+            git::git_checkout,
+            git::git_create_branch,
+            git::git_merge,
             // usage
             usage::fetch_usage,
             // dashboard statistics

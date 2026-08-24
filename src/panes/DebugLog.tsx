@@ -22,6 +22,7 @@ const KINDS: DebugEntry["kind"][] = [
   "send",
   "permission",
   "exit",
+  "control",
 ];
 
 function clock(at: number): string {

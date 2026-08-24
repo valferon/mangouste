@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { clipboardSet } from "../lib/ipc";
+import { highlightCode } from "../lib/highlight";
+import { clipboardSet, openExternal } from "../lib/ipc";
 
 interface MarkdownProps {
   children: string;
@@ -30,6 +31,10 @@ function CodeBlock({ language, code }: { language: string | null; code: string }
     }
   }, [code]);
 
+  // Re-tokenising is the expensive part of rendering a streaming message, and
+  // the deltas that do not touch this block must not pay for it.
+  const tokens = useMemo(() => highlightCode(code, language), [code, language]);
+
   return (
     <div className="code-block">
       <div className="code-head">
@@ -39,7 +44,7 @@ function CodeBlock({ language, code }: { language: string | null; code: string }
         </button>
       </div>
       <pre>
-        <code>{code}</code>
+        <code className="hljs">{tokens}</code>
       </pre>
     </div>
   );
@@ -81,16 +86,29 @@ export const Markdown = memo(function Markdown({ children, onOpenFile }: Markdow
             }
             return <CodeBlock language={fenced?.[1] ?? null} code={text} />;
           },
-          // Links would navigate the whole webview away from the app.
+          // Following a link in place would navigate the whole webview away
+          // from the app, so it goes to the desktop browser instead. Modifier
+          // clicks copy, which is all a link could do before.
           a({ href, children: content }) {
             return (
               <a
                 href={href}
                 onClick={(event) => {
                   event.preventDefault();
-                  if (href) void clipboardSet(href);
+                  if (!href) return;
+                  if (event.metaKey || event.ctrlKey || event.altKey) {
+                    void clipboardSet(href);
+                    return;
+                  }
+                  // A scheme the OS will not take (or a bare `#anchor`) is
+                  // still worth copying rather than swallowing the click.
+                  void openExternal(href).then((opened) => {
+                    if (!opened) void clipboardSet(href);
+                  });
                 }}
-                title={`${href} — click to copy`}
+                title={`${href} — click to open, ${
+                  navigator.platform.includes("Mac") ? "⌘" : "Ctrl"
+                }-click to copy`}
               >
                 {content}
               </a>

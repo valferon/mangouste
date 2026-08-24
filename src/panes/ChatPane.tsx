@@ -16,13 +16,35 @@ import {
   onClaudeStderr,
   onClaudeToolActivity,
   readSessionTranscript,
+  searchFiles,
 } from "../lib/ipc";
+import {
+  abortControl,
+  controlInitialize,
+  controlSetModel,
+  controlSetPermissionMode,
+  resolveControlResponse,
+} from "../lib/control";
+import {
+  applyCompletion,
+  buildMenu,
+  detectTrigger,
+  filterMenu,
+  parseCommandEcho,
+  parseSlash,
+  toNative,
+  type ComposerTrigger,
+  type NativeCommand,
+} from "../lib/slashCommands";
 import { Activity } from "./Activity";
+import { ComposerMenu, type ComposerMenuItem } from "./ComposerMenu";
+import { ControlPanel } from "./ControlPanels";
 import { Markdown } from "./Markdown";
 import { ToolDiff, toolDiffLines } from "./Viewer";
 import { cliDebugEnabled, logDebug } from "../lib/debugLog";
 import type {
   ClaudeFrame,
+  InitializeResult,
   PermissionRequest,
   ContentBlock,
   TextBlock,
@@ -90,7 +112,22 @@ type ChatItem =
   | { kind: "user"; key: string; text: string }
   | { kind: "assistant"; key: string; blocks: ContentBlock[] }
   | { kind: "result"; key: string; text: string; costUsd?: number; turns?: number; isError: boolean }
-  | { kind: "permission"; key: string; request: PermissionRequest; decided: string | null };
+  | { kind: "permission"; key: string; request: PermissionRequest; decided: string | null }
+  // A command answered in-app over the control protocol. The item only names
+  // the command; the panel fetches its own data, so an answer arriving does not
+  // re-render the timeline.
+  | { kind: "panel"; key: string; command: NativeCommand; args: string };
+
+/** Everything a control panel needs that is not in its timeline entry. */
+interface PanelContext {
+  chatId: string;
+  cwd: string;
+  sessionId: string | null;
+  catalog: InitializeResult | null;
+  permissionMode: string;
+  onModelApplied: (value: string) => void;
+  onPermissionModeApplied: (mode: string) => void;
+}
 
 const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"] as const;
 
@@ -466,6 +503,10 @@ function frameLabel(frame: ClaudeFrame): string {
     }
     case "result":
       return `result · ${frame.subtype ?? "done"}${frame.is_error ? " · error" : ""}`;
+    case "control_response": {
+      const envelope = frame.response as { subtype?: string; request_id?: string } | undefined;
+      return `control_response · ${envelope?.subtype ?? "?"}`;
+    }
     default:
       return frame.type;
   }
@@ -604,6 +645,7 @@ type TimelineEntry = { key: string; state?: string } & (
   | { kind: "tool"; block: ToolUseBlock }
   | { kind: "unknown"; block: ContentBlock }
   | { kind: "permission"; request: PermissionRequest; decided: string | null }
+  | { kind: "panel"; command: NativeCommand; args: string }
   | {
       kind: "result";
       text: string;
@@ -659,6 +701,15 @@ function toTimeline(
           state: item.decided ? (item.decided === "deny" ? "error" : "done") : "waiting",
         });
         break;
+      case "panel":
+        entries.push({
+          kind: "panel",
+          key: item.key,
+          command: item.command,
+          args: item.args,
+          state: "done",
+        });
+        break;
       case "result":
         entries.push({
           kind: "result",
@@ -676,6 +727,39 @@ function toTimeline(
 }
 
 /**
+ * A typed message, or the echo of a slash command the CLI ran.
+ *
+ * Transcripts record a ran command as `<command-name>` with its output in
+ * `<local-command-stdout>`, so a resumed session would otherwise show raw XML
+ * in the middle of the conversation.
+ */
+const UserMessage = memo(function UserMessage({ text }: { text: string }) {
+  const echo = useMemo(() => parseCommandEcho(text), [text]);
+  if (!echo) return <div className="bubble-user text">{text}</div>;
+  return (
+    <div className="bubble-user">
+      {echo.name && (
+        <div className="command-echo">
+          <span className="command-chip">{echo.name}</span>
+          {echo.args && <span className="command-args">{echo.args}</span>}
+        </div>
+      )}
+      {echo.rest && <div className="text">{echo.rest}</div>}
+      {echo.stdout.map((chunk, index) => (
+        <pre className="command-output selectable" key={`out-${index}`}>
+          {chunk}
+        </pre>
+      ))}
+      {echo.stderr.map((chunk, index) => (
+        <pre className="command-output selectable" data-error="true" key={`err-${index}`}>
+          {chunk}
+        </pre>
+      ))}
+    </div>
+  );
+});
+
+/**
  * The rendered timeline rows, split out of ChatPane and memoized so composer
  * keystrokes — which only touch draft state — do not re-reconcile up to
  * MAX_ITEMS rows on every character.
@@ -685,6 +769,7 @@ const Timeline = memo(function Timeline({
   toolResults,
   onOpenFile,
   onDecide,
+  panelContext,
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
@@ -694,6 +779,7 @@ const Timeline = memo(function Timeline({
     behavior: "allow" | "deny",
     always?: boolean,
   ) => Promise<void>;
+  panelContext: PanelContext;
 }) {
   return (
     <>
@@ -701,7 +787,21 @@ const Timeline = memo(function Timeline({
         <div key={entry.key} className="timeline-row" data-kind={entry.kind}>
           <span className="timeline-dot" data-state={entry.state ?? ""} />
           <div className="timeline-body">
-            {entry.kind === "user" && <div className="bubble-user text">{entry.text}</div>}
+            {entry.kind === "user" && <UserMessage text={entry.text} />}
+
+            {entry.kind === "panel" && (
+              <ControlPanel
+                chatId={panelContext.chatId}
+                command={entry.command}
+                args={entry.args}
+                cwd={panelContext.cwd}
+                sessionId={panelContext.sessionId}
+                catalog={panelContext.catalog}
+                permissionMode={panelContext.permissionMode}
+                onModelApplied={panelContext.onModelApplied}
+                onPermissionModeApplied={panelContext.onPermissionModeApplied}
+              />
+            )}
 
             {entry.kind === "text" && (
               <Markdown onOpenFile={onOpenFile}>{entry.text}</Markdown>
@@ -850,6 +950,18 @@ export const ChatPane = memo(function ChatPane({
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   /** Window the next request will carry, from the newest assistant usage block. */
   const [contextTokens, setContextTokens] = useState(0);
+  /**
+   * The CLI's own answer to `initialize`: its slash-command catalog, model
+   * list, agents and account. Null until the request lands, which is the only
+   * state the composer menu and the panels have to tolerate.
+   */
+  const [catalog, setCatalog] = useState<InitializeResult | null>(null);
+  /** Caret offset in the composer, which is what decides whether a menu opens. */
+  const [caret, setCaret] = useState(0);
+  /** Highlighted row in the autocomplete popup. */
+  const [menuCursor, setMenuCursor] = useState(0);
+  /** Results for an `@` mention, from mangouste's own file index. */
+  const [fileMatches, setFileMatches] = useState<string[]>([]);
 
   /** Spawn this pane is currently bound to; events from older spawns are dropped. */
   const instanceRef = useRef<number | null>(null);
@@ -873,6 +985,7 @@ export const ChatPane = memo(function ChatPane({
    */
   const startGenerationRef = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const stickyRef = useRef(true);
   const sequenceRef = useRef(0);
   const nextKey = () => `item-${sequenceRef.current++}`;
@@ -985,6 +1098,9 @@ export const ChatPane = memo(function ChatPane({
     setCostUsd(null);
     setModel(null);
     setContextTokens(0);
+    // Whatever was asked of the outgoing process will never be answered.
+    abortControl(chatId, "chat restarted");
+    setCatalog(null);
     const generation = (startGenerationRef.current += 1);
     const resumeTarget = resumeRef.current;
     const resumeFilePath = resumeFileRef.current;
@@ -1044,6 +1160,20 @@ export const ChatPane = memo(function ChatPane({
         // The live process may predate this pane, so the mode it was actually
         // spawned with is the backend's answer, not our local guess.
         if (status.permissionMode) setSpawnedPermissionMode(status.permissionMode);
+        // Announce the client and read back its catalog. Optional on the wire
+        // and safe on an attach — a process that is already initialized answers
+        // with its current state instead of re-running session setup — so both
+        // paths take it. Failure only costs the autocomplete menu its CLI half.
+        void controlInitialize(chatId)
+          .then((result) => {
+            if (generation !== startGenerationRef.current) return;
+            setCatalog(result);
+            logDebug(chatId, "control", `initialize · ${result.commands.length} commands`, result);
+          })
+          .catch((e: unknown) => {
+            if (generation !== startGenerationRef.current) return;
+            logDebug(chatId, "control", `initialize failed: ${String(e)}`);
+          });
         if (status.attached) {
           onSystemMessageRef.current(`attached to a running session (pid ${status.pid ?? "?"})`);
         }
@@ -1112,6 +1242,10 @@ export const ChatPane = memo(function ChatPane({
       // Everything the transport says lands in the debug log, deltas included;
       // consecutive identical stream events coalesce in the store.
       logDebug(chatId, frame.type === "stream_event" ? "stream" : "frame", frameLabel(frame), frame);
+      // An answer to one of this pane's control requests is not conversation:
+      // the control channel resolves the promise waiting on it and nothing
+      // downstream needs to see the frame.
+      if (resolveControlResponse(chatId, frame)) return;
       if (frame.session_id && frame.session_id !== sessionIdRef.current) {
         const resumeTarget = resumeRef.current;
         // A resume that lands on a different id means the CLI could not reopen
@@ -1380,6 +1514,9 @@ export const ChatPane = memo(function ChatPane({
         setPendingTool(null);
         setToolActivity(null);
         setTurnStartedAt(null);
+        // Nothing is going to answer the panels still waiting; a card saying so
+        // beats one spinning until its timeout.
+        abortControl(chatId, "claude exited");
         logDebug(chatId, "exit", `code ${event.code ?? "signal"}`);
         onSystemMessageRef.current(`claude exited (code ${event.code ?? "unknown"})`);
       }),
@@ -1407,13 +1544,126 @@ export const ChatPane = memo(function ChatPane({
     }
   }, [items, visible]);
 
+  // Coming to the front means you want to type: a new session, or a tab switch
+  // back to this one, should not need a click in the composer first.
+  useEffect(() => {
+    if (!visible) return;
+    composerRef.current?.focus();
+  }, [visible]);
+
+  /* ---------- composer autocomplete ---------- */
+
+  /** What the caret is sitting in: a `/command`, an `@mention`, or prose. */
+  const trigger: ComposerTrigger = useMemo(() => detectTrigger(draft, caret), [draft, caret]);
+  /** Native commands merged with the CLI's catalog; rebuilt only on reload. */
+  const menuEntries = useMemo(() => buildMenu(catalog?.commands ?? []), [catalog]);
+  const [menuDismissed, setMenuDismissed] = useState(false);
+
+  // A fresh trigger is a fresh list, so the highlight goes back to the top and
+  // an earlier Escape stops suppressing the menu.
+  useEffect(() => {
+    setMenuCursor(0);
+    setMenuDismissed(false);
+  }, [trigger?.kind, trigger?.query]);
+
+  /*
+   * `@` completion runs against mangouste's own file index rather than the
+   * CLI's `file_suggestions` control request: the index is already here, it
+   * answers locally, and it does not spend a round trip per keystroke.
+   */
+  useEffect(() => {
+    if (trigger?.kind !== "file") {
+      setFileMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const query = trigger.query;
+    const timer = setTimeout(() => {
+      void searchFiles(cwd, query, 20)
+        .then((entries) => {
+          if (!cancelled) setFileMatches(entries.map((e) => e.path));
+        })
+        .catch(() => {
+          if (!cancelled) setFileMatches([]);
+        });
+    }, 80);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [trigger?.kind, trigger?.query, cwd]);
+
+  const menuItems = useMemo<ComposerMenuItem[]>(() => {
+    if (!trigger) return [];
+    if (trigger.kind === "command") {
+      return filterMenu(menuEntries, trigger.query).map((entry) => ({
+        key: entry.name,
+        insert: `/${entry.name} `,
+        primary: `/${entry.name}`,
+        hint: entry.argumentHint,
+        secondary: entry.description,
+        // Marks the ones that never reach the CLI, so it is clear which cost a
+        // turn and which are answered in-app.
+        badge: entry.native ? "app" : undefined,
+      }));
+    }
+    return fileMatches.map((path) => {
+      const relative = path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : path;
+      return { key: path, insert: `@${relative} `, primary: relative, secondary: path };
+    });
+  }, [trigger, menuEntries, fileMatches, cwd]);
+
+  const menuOpen = trigger !== null && !menuDismissed && menuItems.length > 0;
+
+  const pickMenu = useCallback(
+    (index: number) => {
+      if (!trigger) return;
+      const item = menuItems[index];
+      if (!item) return;
+      const next = applyCompletion(draft, trigger, caret, item.insert);
+      setDraft(next.draft);
+      setCaret(next.caret);
+      // React writes the value after this handler returns, so the caret has to
+      // be placed on the next frame or it lands at the end of the old text.
+      requestAnimationFrame(() => {
+        const element = composerRef.current;
+        if (!element) return;
+        element.focus();
+        element.setSelectionRange(next.caret, next.caret);
+      });
+    },
+    [trigger, menuItems, draft, caret],
+  );
+
   /* ---------- composing ---------- */
 
   const send = useCallback(async () => {
     const text = draft.trim();
     // An image with no caption is still a message worth sending.
     if ((!text && attachments.length === 0) || !alive) return;
+
+    /*
+     * A command mangouste answers itself never reaches the CLI.
+     *
+     * These are the interactive panels a `--print` session refuses outright,
+     * plus the few it answers with one line of prose where the control protocol
+     * hands back the data the TUI panel is drawn from. Either way there is no
+     * turn and no tokens, so none of the running/elapsed bookkeeping applies.
+     */
+    const parsed = attachments.length === 0 ? parseSlash(text) : null;
+    const native = parsed ? toNative(parsed.name) : null;
+    if (parsed && native) {
+      setDraft("");
+      setCaret(0);
+      stickyRef.current = true;
+      appendItem({ kind: "user", key: nextKey(), text });
+      appendItem({ kind: "panel", key: nextKey(), command: native, args: parsed.args });
+      logDebug(chatId, "send", `/${native} · answered in-app`);
+      return;
+    }
+
     setDraft("");
+    setCaret(0);
     setAttachments([]);
     stickyRef.current = true;
     appendItem({
@@ -1454,13 +1704,40 @@ export const ChatPane = memo(function ChatPane({
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // The popup owns these keys while it is up, so they are intercepted
+      // before Enter can send a half-typed command name.
+      if (menuOpen) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setMenuCursor((cursor) => Math.min(cursor + 1, menuItems.length - 1));
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setMenuCursor((cursor) => Math.max(cursor - 1, 0));
+          return;
+        }
+        if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && !event.ctrlKey)) {
+          event.preventDefault();
+          pickMenu(menuCursor);
+          return;
+        }
+        if (event.key === "Escape") {
+          // preventDefault matters: the window-level handler reads it to decide
+          // whether Escape was already spoken for, and this one must not
+          // interrupt the turn as well.
+          event.preventDefault();
+          setMenuDismissed(true);
+          return;
+        }
+      }
       // VSCode chat semantics: Enter sends, Shift+Enter inserts a newline.
       if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey) {
         event.preventDefault();
         void send();
       }
     },
-    [send],
+    [menuOpen, menuItems.length, menuCursor, pickMenu, send],
   );
 
   const onPaste = useCallback(async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1518,6 +1795,86 @@ export const ChatPane = memo(function ChatPane({
     onStats({ sessionId, model, contextTokens, costUsd });
   }, [onStats, sessionId, model, contextTokens, costUsd]);
 
+  /*
+   * A control request moved the live process, so the composer switch that arms
+   * the next spawn has to move with it — otherwise the two disagree and the
+   * strip claims a pending change that already happened.
+   */
+  const applyModel = useCallback(
+    (value: string) => {
+      modelAliasRef.current = value;
+      setModelAlias(value);
+      setSpawnedModelAlias(value);
+      onModel(value);
+    },
+    [onModel],
+  );
+
+  const applyPermissionMode = useCallback((mode: string) => {
+    permissionModeRef.current = mode;
+    setPermissionMode(mode);
+    setSpawnedPermissionMode(mode);
+  }, []);
+
+  /*
+   * Composer picks go to the live process over the control channel, the same
+   * one /model and /permissions use, so a switch lands on the session already
+   * running instead of waiting for the next spawn. The choice is armed locally
+   * either way: with no process to talk to — or with a CLI too old to answer —
+   * it falls back to the pending-until-restart behaviour the strip advertises.
+   */
+  const pickModel = useCallback(
+    (alias: string) => {
+      modelAliasRef.current = alias;
+      setModelAlias(alias);
+      onModel(alias);
+      if (!alive) return;
+      void controlSetModel(chatId, alias === MODEL_DEFAULT ? null : alias)
+        .then((result) => {
+          const applied = result.model ?? alias;
+          logDebug(chatId, "control", `set_model · ${applied}`);
+          setSpawnedModelAlias(alias);
+        })
+        .catch((e) => {
+          logDebug(chatId, "control", `set_model failed: ${String(e)}`);
+        });
+    },
+    [alive, chatId, onModel],
+  );
+
+  const pickPermissionMode = useCallback(
+    (mode: string) => {
+      permissionModeRef.current = mode;
+      setPermissionMode(mode);
+      if (!alive) return;
+      void controlSetPermissionMode(chatId, mode)
+        .then((result) => {
+          const applied = result.mode ?? mode;
+          logDebug(chatId, "control", `set_permission_mode · ${applied}`);
+          permissionModeRef.current = applied;
+          setPermissionMode(applied);
+          setSpawnedPermissionMode(applied);
+        })
+        .catch((e) => {
+          logDebug(chatId, "control", `set_permission_mode failed: ${String(e)}`);
+        });
+    },
+    [alive, chatId],
+  );
+
+  const panelContext = useMemo<PanelContext>(
+    () => ({
+      chatId,
+      cwd,
+      sessionId,
+      catalog,
+      permissionMode: spawnedPermissionMode,
+      onModelApplied: applyModel,
+      onPermissionModeApplied: applyPermissionMode,
+    }),
+    [chatId, cwd, sessionId, catalog, spawnedPermissionMode, applyModel, applyPermissionMode],
+  );
+
   const timeline = useMemo(() => toTimeline(items, toolResults), [items, toolResults]);
 
   const statusLabel = useMemo(() => {
@@ -1533,6 +1890,7 @@ export const ChatPane = memo(function ChatPane({
           toolResults={toolResults}
           onOpenFile={onOpenFile}
           onDecide={decide}
+          panelContext={panelContext}
         />
 
         {running && !awaitingPermission && (
@@ -1573,14 +1931,35 @@ export const ChatPane = memo(function ChatPane({
             ))}
           </div>
         )}
-        <textarea
-          value={draft}
-          onPaste={(event) => void onPaste(event)}
-          placeholder={alive ? "Message Claude…  (Enter to send, Shift+Enter for newline)" : "Not running"}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={onKeyDown}
-          spellCheck={false}
-        />
+        <div className="composer-input">
+          <textarea
+            ref={composerRef}
+            value={draft}
+            onPaste={(event) => void onPaste(event)}
+            placeholder={
+              alive ? "Message Claude…  (/ for commands, @ for files)" : "Not running"
+            }
+            onChange={(event) => {
+              setDraft(event.target.value);
+              setCaret(event.target.selectionStart ?? event.target.value.length);
+            }}
+            // Fires on every caret move, arrow keys included, which is what
+            // decides whether an `@` mention is under the cursor.
+            onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
+            onFocus={() => setMenuDismissed(false)}
+            onBlur={() => setMenuDismissed(true)}
+            onKeyDown={onKeyDown}
+            spellCheck={false}
+          />
+          {menuOpen && (
+            <ComposerMenu
+              items={menuItems}
+              cursor={menuCursor}
+              onPick={pickMenu}
+              onHover={setMenuCursor}
+            />
+          )}
+        </div>
         <div className="composer-bar">
           <span
             className="status-dot"
@@ -1596,7 +1975,9 @@ export const ChatPane = memo(function ChatPane({
             title={
               modelAlias !== spawnedModelAlias
                 ? `Pending — running as "${spawnedModelAlias}". Restart to apply.`
-                : "Model (applies on restart)"
+                : alive
+                  ? "Model (applies to the running session)"
+                  : "Model (applies on next start)"
             }
           >
             {MODELS.map((alias) => (
@@ -1604,11 +1985,7 @@ export const ChatPane = memo(function ChatPane({
                 key={alias}
                 className="toggle-button"
                 data-active={alias === modelAlias}
-                onClick={() => {
-                  modelAliasRef.current = alias;
-                  setModelAlias(alias);
-                  onModel(alias);
-                }}
+                onClick={() => pickModel(alias)}
               >
                 {alias}
               </button>
@@ -1620,7 +1997,9 @@ export const ChatPane = memo(function ChatPane({
             title={
               permissionMode !== spawnedPermissionMode
                 ? `Pending — running as "${spawnedPermissionMode}". Restart to apply.`
-                : "Permission mode (applies on restart)"
+                : alive
+                  ? "Permission mode (applies to the running session)"
+                  : "Permission mode (applies on next start)"
             }
           >
             {PERMISSION_MODES.map((mode) => (
@@ -1628,10 +2007,7 @@ export const ChatPane = memo(function ChatPane({
                 key={mode}
                 className="toggle-button"
                 data-active={mode === permissionMode}
-                onClick={() => {
-                  permissionModeRef.current = mode;
-                  setPermissionMode(mode);
-                }}
+                onClick={() => pickPermissionMode(mode)}
               >
                 {MODE_LABELS[mode]}
               </button>

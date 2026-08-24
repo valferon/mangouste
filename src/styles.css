@@ -107,6 +107,19 @@
   --term-bright-magenta: #d670d6;
   --term-bright-cyan: #29b8db;
   --term-bright-white: #e5e5e5;
+  /* Code-block syntax ramp, by role rather than by highlight.js scope name, so
+     the mapping below can move without retuning the palette. VSCode Dark+. */
+  --syn-comment: #6a9955;
+  --syn-keyword: #569cd6;
+  --syn-control: #c586c0;
+  --syn-string: #ce9178;
+  --syn-number: #b5cea8;
+  --syn-function: #dcdcaa;
+  --syn-type: #4ec9b0;
+  --syn-variable: #9cdcfe;
+  --syn-constant: #4fc1ff;
+  --syn-tag: #569cd6;
+  --syn-regexp: #d16969;
 
   --font-ui: "Segoe UI", Ubuntu, "Droid Sans", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", "Ubuntu Mono", "Cascadia Mono", monospace;
@@ -164,6 +177,19 @@
   --term-bright-magenta: #bc05bc;
   --term-bright-cyan: #0598bc;
   --term-bright-white: #3b3b3b;
+  /* VSCode Light+. The dark ramp is unreadable on white — #b5cea8 numbers sit
+     at 1.5:1 there — so every role is re-picked, not tinted. */
+  --syn-comment: #008000;
+  --syn-keyword: #0000ff;
+  --syn-control: #af00db;
+  --syn-string: #a31515;
+  --syn-number: #098658;
+  --syn-function: #795e26;
+  --syn-type: #267f99;
+  --syn-variable: #001080;
+  --syn-constant: #0070c1;
+  --syn-tag: #800000;
+  --syn-regexp: #811f3f;
 }
 
 /* Follow the desktop when the user has not chosen explicitly. */
@@ -209,6 +235,17 @@
     --term-bright-magenta: #bc05bc;
     --term-bright-cyan: #0598bc;
     --term-bright-white: #3b3b3b;
+    --syn-comment: #008000;
+    --syn-keyword: #0000ff;
+    --syn-control: #af00db;
+    --syn-string: #a31515;
+    --syn-number: #098658;
+    --syn-function: #795e26;
+    --syn-type: #267f99;
+    --syn-variable: #001080;
+    --syn-constant: #0070c1;
+    --syn-tag: #800000;
+    --syn-regexp: #811f3f;
   }
 }
 
@@ -587,6 +624,176 @@ body {
 
 .status-code[data-untracked="true"] {
   color: var(--green);
+}
+
+/* ---------- source control: commit box, groups, branch menu ---------- */
+
+/* The commit box sits between the pane header and the scrolling body, so it
+   stays put while the change lists and history scroll under it. */
+.commit-box {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.commit-message {
+  width: 100%;
+  resize: vertical;
+  min-height: 40px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.commit-message:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.commit-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+/* Git's own output — a push summary, a rejection, "nothing to commit". Wraps
+   and is monospaced, because it is quoted verbatim. */
+.git-note {
+  flex: 0 0 auto;
+  max-height: 84px;
+  overflow: auto;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.git-note[data-error="true"] {
+  color: var(--red);
+}
+
+/* The SCM header carries a branch chip and five actions, so on a narrow rail
+   the title is the part that gives way rather than pushing buttons off. */
+.scm-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A group header is itself the collapse toggle, so it takes the pointer. */
+.pane-header.scm-group {
+  cursor: pointer;
+  user-select: none;
+}
+
+.pane-header.scm-group:hover {
+  background: var(--bg-hover);
+}
+
+.pane-header.scm-group .twisty {
+  width: 10px;
+  flex: 0 0 10px;
+  text-align: center;
+  font-size: 9px;
+}
+
+/* Actions replace nothing on a file row: the status code keeps its column on
+   the right, and the buttons appear in the gap the elided path leaves. */
+.scm-row .row-actions {
+  display: none;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.scm-row:hover .row-actions {
+  display: flex;
+  gap: 1px;
+}
+
+.scm-row .row-actions .icon-button {
+  padding: 1px 3px;
+  font-size: 12px;
+}
+
+.scm-row .status-code {
+  margin-left: auto;
+  text-align: right;
+}
+
+/* `margin-left: auto` on both the actions and the code would split the free
+   space between them; once the actions are shown, the code hugs them instead. */
+.scm-row:hover .status-code {
+  margin-left: 0;
+}
+
+/* The branch picker: filter on top, scrolling list under it. Inline rather than
+   floating, so it cannot be clipped by the sidebar's own overflow. */
+.branch-menu {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.branch-filter {
+  margin: 6px 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.branch-filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.branch-list {
+  max-height: 220px;
+  overflow: auto;
+}
+
+/* The branch chip doubles as the switch-branch button in the SCM header. */
+button.branch-chip {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.branch-chip:hover:not(:disabled) {
+  color: var(--fg-bright);
+}
+
+button.branch-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* ---------- sessions ---------- */
@@ -2400,6 +2607,100 @@ select {
   white-space: pre;
 }
 
+/* highlight.js scopes, mapped onto the --syn-* roles. Scopes with a sub-name
+   (`title.function`) reach the DOM as two classes (`hljs-title function_`),
+   which is why those selectors look the way they do. Anything unmapped —
+   operators, punctuation, parameters — stays var(--fg) on purpose: colouring
+   every token is what makes a block hard to read. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--syn-comment);
+}
+
+.hljs-keyword,
+.hljs-literal,
+.hljs-doctag,
+.hljs-selector-tag {
+  color: var(--syn-keyword);
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-subst {
+  color: var(--syn-control);
+}
+
+.hljs-string,
+.hljs-char,
+.hljs-symbol,
+.hljs-meta .hljs-string {
+  color: var(--syn-string);
+}
+
+.hljs-number {
+  color: var(--syn-number);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: var(--syn-function);
+}
+
+.hljs-built_in,
+.hljs-type,
+.hljs-class,
+.hljs-title.class_ {
+  color: var(--syn-type);
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property,
+.hljs-attr,
+.hljs-attribute {
+  color: var(--syn-variable);
+}
+
+.hljs-bullet,
+.hljs-link {
+  color: var(--syn-constant);
+}
+
+.hljs-name,
+.hljs-tag {
+  color: var(--syn-tag);
+}
+
+.hljs-regexp {
+  color: var(--syn-regexp);
+}
+
+/* Fenced diffs, matching the standalone diff views elsewhere in the app. */
+.hljs-addition {
+  color: var(--green);
+}
+
+.hljs-deletion {
+  color: var(--red);
+}
+
+.hljs-section {
+  color: var(--syn-keyword);
+  font-weight: 600;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
 /* ---------- tool permission prompt ---------- */
 
 /* Deliberately loud: this is the one card that blocks the turn until answered. */
@@ -2774,6 +3075,7 @@ select {
 }
 
 .debug-row[data-kind="send"] .debug-kind,
+.debug-row[data-kind="control"] .debug-kind,
 .debug-row[data-kind="permission"] .debug-kind {
   color: var(--green);
 }
@@ -3354,4 +3656,296 @@ select {
    server name nowhere to go. */
 .dash-columns .dash-row .cell-num {
   flex: 0 0 54px;
+}
+
+/* ---------- composer autocomplete ---------- */
+
+/* The popup is anchored to the textarea rather than the composer bar, so it
+   rises from the caret's box and not from under the mode switches. */
+.composer-input {
+  position: relative;
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 20;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  box-shadow: 0 8px 28px var(--shadow);
+}
+
+.composer-menu-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.composer-menu-row[data-cursor="true"] {
+  background: var(--bg-active);
+}
+
+.composer-menu-row .cm-name {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.composer-menu-row .cm-hint {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--orange);
+}
+
+/* One line only: a skill description runs to a paragraph, and a menu that
+   reflows its rows as you arrow through it is unusable. */
+.composer-menu-row .cm-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.composer-menu-row .cm-badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ---------- control panels ---------- */
+
+/* Commands mangouste answers itself. Framed like a tool block rather than a
+   message: it is the app talking, not the model. */
+.control-panel {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.control-panel .cp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.control-panel .cp-head .spacer {
+  flex: 1;
+}
+
+.control-panel .cp-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.control-panel .cp-body {
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.control-panel .cp-note {
+  font-size: 11px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+
+.control-panel .cp-error {
+  font-size: 11px;
+  color: var(--red);
+  font-family: var(--font-mono);
+}
+
+.control-panel .cp-headline {
+  font-size: 12px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+
+.control-panel .cp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.control-panel .cp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-family: inherit;
+}
+
+.control-panel .cp-row-action {
+  cursor: pointer;
+}
+
+.control-panel .cp-row-action:hover {
+  background: var(--bg-hover);
+}
+
+.control-panel .cp-row-action[data-active="true"] {
+  background: var(--bg-active);
+}
+
+.control-panel .cp-row-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Fixed column so every label lines up whatever the row is showing. */
+.control-panel .cp-key {
+  flex: 0 0 180px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-panel .cp-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.control-panel .cp-clamp {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-panel .cp-code {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.control-panel .cp-hint {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--orange);
+}
+
+.control-panel .cp-tag {
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--bg-hover);
+  color: var(--fg-dim);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.control-panel .cp-bar {
+  flex: 1 1 120px;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.control-panel .cp-bar-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.control-panel .cp-bar-fill[data-tone="hot"] {
+  background: var(--red);
+}
+
+.control-panel .cp-pre {
+  margin: 0;
+  max-height: 340px;
+  overflow: auto;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- slash command echoes ---------- */
+
+/* What a ran command looks like in a resumed transcript, in place of the
+   `<command-name>` XML the CLI actually writes there. */
+.command-echo {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.command-chip {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.command-args {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.command-output {
+  margin: 4px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 5px 7px;
+  background: var(--bg);
+  border-left: 2px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-dim);
+}
+
+.command-output[data-error="true"] {
+  border-left-color: var(--red);
+  color: var(--red);
 }

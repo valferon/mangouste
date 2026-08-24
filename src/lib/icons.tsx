@@ -57,6 +57,92 @@ export function BranchIcon(props: IconProps) {
   );
 }
 
+/** Stage: a plus, matching the VSCode SCM row action. */
+export function PlusIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8 3.5v9" />
+      <path d="M3.5 8h9" />
+    </Icon>
+  );
+}
+
+/** Unstage: a minus. */
+export function MinusIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 8h9" />
+    </Icon>
+  );
+}
+
+/** Discard: an anticlockwise arrow back to the last committed state. */
+export function DiscardIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3 8a5 5 0 1 0 1.6-3.7" />
+      <path d="M3 3v3h3" />
+    </Icon>
+  );
+}
+
+/** Commit: a tick, for the commit button. */
+export function CheckIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 8.5 6.5 11.5 12.5 4.5" />
+    </Icon>
+  );
+}
+
+/** Pull: an arrow down into a line. */
+export function PullIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8 2.5v8" />
+      <path d="M4.8 7.3 8 10.5l3.2-3.2" />
+      <path d="M3 13.5h10" />
+    </Icon>
+  );
+}
+
+/** Push: an arrow up out of a line. */
+export function PushIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8 13.5v-8" />
+      <path d="M4.8 8.7 8 5.5l3.2 3.2" />
+      <path d="M3 2.5h10" />
+    </Icon>
+  );
+}
+
+/** Fetch: two arrows chasing each other round a circle. Distinct from
+    `RefreshIcon`, which re-reads local state rather than talking to a remote. */
+export function FetchIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M13.2 7.2A5.3 5.3 0 0 0 3.8 4.6" />
+      <path d="M2.8 8.8a5.3 5.3 0 0 0 9.4 2.6" />
+      <path d="M3.6 2v2.7h2.7" />
+      <path d="M12.4 14v-2.7H9.7" />
+    </Icon>
+  );
+}
+
+/** Merge: a side branch joining the trunk from above. */
+export function MergeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="4.5" cy="3.5" r="1.9" />
+      <circle cx="11.5" cy="3.5" r="1.9" />
+      <circle cx="4.5" cy="12.5" r="1.9" />
+      <path d="M4.5 5.4v5.2" />
+      <path d="M11.5 5.4v1.1a3 3 0 0 1-3 3H6.4" />
+    </Icon>
+  );
+}
+
 /** A commit: one node on the history line. */
 export function CommitIcon(props: IconProps) {
   return (
