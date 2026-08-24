@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { fetchUsage, gitStatus } from "../lib/ipc";
 import type { ClaudeUsage, ProjectGroup } from "../lib/types";
+import { copyText } from "../lib/editing";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import { useFlags } from "../lib/sessionFlagsContext";
 
 export interface ChatStats {
@@ -73,6 +75,7 @@ function UsageBar({
  * the app; only the windows require a network call.
  */
 export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: StatusPanelProps) {
+  const menu = useMenu();
   const [usageEnabled, setUsageEnabled] = useState(
     () => localStorage.getItem(USAGE_ENABLED_KEY) === "true",
   );
@@ -133,8 +136,37 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
     return tally;
   }, [groups, flags]);
 
+  /** Right-click: every fact on the panel, as something you can paste. */
+  const panelMenu = useCallback(
+    (): MenuEntry[] => [
+      stats.title && { label: "Copy Session Title", run: () => void copyText(stats.title ?? "") },
+      stats.sessionId && {
+        label: "Copy Session Id",
+        run: () => void copyText(stats.sessionId ?? ""),
+      },
+      stats.model && { label: "Copy Model", run: () => void copyText(stats.model ?? "") },
+      branch && { label: "Copy Branch", run: () => void copyText(branch) },
+      cwd && { label: "Copy Repository Path", run: () => void copyText(cwd) },
+      "separator",
+      {
+        label: "Usage Windows",
+        checked: usageEnabled,
+        run: () => setUsageEnabled((enabled) => !enabled),
+      },
+      {
+        label: "Refresh Usage",
+        disabled: !usageEnabled,
+        run: () => void refreshUsage(),
+      },
+    ],
+    [stats, branch, cwd, usageEnabled, refreshUsage],
+  );
+
   return (
-    <div className="status-panel">
+    <div
+      className="status-panel"
+      onContextMenu={(event) => menu.openContextMenu(event, [...panelMenu(), "separator", "app"])}
+    >
       <div className="pane-header">
         <span>Usage</span>
         <div className="actions">

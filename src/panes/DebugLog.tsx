@@ -8,6 +8,8 @@ import {
   subscribeDebug,
   type DebugEntry,
 } from "../lib/debugLog";
+import { copyText } from "../lib/editing";
+import { useMenu, type MenuEntry } from "../lib/menu";
 
 /** Rows actually rendered; the buffer behind them is larger. */
 const RENDER_LIMIT = 500;
@@ -37,20 +39,35 @@ function gap(deltaMs: number): string {
   return deltaMs < 1000 ? `+${deltaMs}ms` : `+${(deltaMs / 1000).toFixed(1)}s`;
 }
 
+/** One event as text: the head line, then its payload if it has one. */
+function entryLines(entry: DebugEntry): string {
+  const head = `${clock(entry.at)} ${entry.kind} ${entry.label}`;
+  if (entry.payload === undefined) return head;
+  const payload =
+    typeof entry.payload === "string" ? entry.payload : JSON.stringify(entry.payload, null, 2);
+  return `${head}\n${payload}`;
+}
+
 const Row = memo(function Row({
   entry,
   deltaMs,
   expanded,
   onToggle,
+  onMenu,
 }: {
   entry: DebugEntry;
   deltaMs: number;
   expanded: boolean;
   onToggle: (seq: number) => void;
+  onMenu: (event: React.MouseEvent, entry: DebugEntry) => void;
 }) {
   const expandable = entry.payload !== undefined;
   return (
-    <div className="debug-row" data-kind={entry.kind}>
+    <div
+      className="debug-row"
+      data-kind={entry.kind}
+      onContextMenu={(event) => onMenu(event, entry)}
+    >
       <div
         className="debug-row-head"
         data-expandable={expandable}
@@ -81,6 +98,7 @@ const Row = memo(function Row({
  * timing. Opened from the status bar's phase chip.
  */
 export function DebugLog({ chatId, onClose }: { chatId: string; onClose: () => void }) {
+  const menu = useMenu();
   // The store mutates its buffers in place; the version is the change signal.
   const version = useSyncExternalStore(subscribeDebug, debugVersion);
   const entries = debugEntries(chatId);
@@ -106,6 +124,62 @@ export function DebugLog({ chatId, onClose }: { chatId: string; onClose: () => v
       return next;
     });
   }, []);
+
+  /** The drawer's own actions, shared by a row's menu and the list's. */
+  const drawerEntries = useCallback(
+    (): MenuEntry[] => [
+      {
+        label: "Copy Visible Log",
+        disabled: visible.length === 0,
+        run: () => void copyText(visible.map(entryLines).join("\n\n")),
+      },
+      {
+        label: "Show All Kinds",
+        disabled: hidden.size === 0,
+        run: () => setHidden(new Set()),
+      },
+      {
+        label: "Expand All Payloads",
+        run: () =>
+          setExpanded(
+            new Set(visible.filter((entry) => entry.payload !== undefined).map((e) => e.seq)),
+          ),
+      },
+      {
+        label: "Collapse All Payloads",
+        disabled: expanded.size === 0,
+        run: () => setExpanded(new Set()),
+      },
+      "separator",
+      { label: "Clear Log", danger: true, run: () => clearDebug(chatId) },
+      { label: "Close Drawer", run: onClose },
+    ],
+    [visible, hidden.size, expanded.size, chatId, onClose],
+  );
+
+  const rowMenu = useCallback(
+    (event: React.MouseEvent, entry: DebugEntry) =>
+      menu.openContextMenu(event, [
+        { header: `${entry.kind} · ${entry.label}` },
+        { label: "Copy Event", run: () => void copyText(entryLines(entry)) },
+        entry.payload !== undefined && {
+          label: "Copy Payload",
+          run: () =>
+            void copyText(
+              typeof entry.payload === "string"
+                ? entry.payload
+                : JSON.stringify(entry.payload, null, 2),
+            ),
+        },
+        {
+          label: `Hide "${entry.kind}" Events`,
+          run: () => setHidden((current) => new Set(current).add(entry.kind)),
+        },
+        "separator",
+        ...drawerEntries(),
+      ]),
+    [menu, drawerEntries],
+  );
 
   const onScroll = useCallback(() => {
     const el = listRef.current;
@@ -162,7 +236,14 @@ export function DebugLog({ chatId, onClose }: { chatId: string; onClose: () => v
           ×
         </button>
       </div>
-      <div className="debug-list selectable" ref={listRef} onScroll={onScroll}>
+      <div
+        className="debug-list selectable"
+        ref={listRef}
+        onScroll={onScroll}
+        onContextMenu={(event) =>
+          menu.openContextMenu(event, ["editing", "separator", ...drawerEntries()])
+        }
+      >
         {visible.map((entry, index) => (
           <Row
             key={entry.seq}
@@ -170,6 +251,7 @@ export function DebugLog({ chatId, onClose }: { chatId: string; onClose: () => v
             deltaMs={index > 0 ? entry.at - visible[index - 1].at : 0}
             expanded={expanded.has(entry.seq)}
             onToggle={toggleExpanded}
+            onMenu={rowMenu}
           />
         ))}
         {visible.length === 0 && <div className="debug-empty">no events yet</div>}

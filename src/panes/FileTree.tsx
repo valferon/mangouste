@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useState } from "react";
-import { listDir } from "../lib/ipc";
+import { copyText } from "../lib/editing";
+import { listDir, revealPath } from "../lib/ipc";
+import { useMenu, type MenuEntry } from "../lib/menu";
+import { baseName, relativePath } from "../lib/paths";
 import type { DirEntryInfo } from "../lib/types";
 
 interface FileTreeProps {
@@ -19,6 +22,7 @@ type ChildrenCache = Record<string, DirEntryInfo[]>;
  * walked unless the user actually opens it.
  */
 export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath }: FileTreeProps) {
+  const menu = useMenu();
   const [children, setChildren] = useState<ChildrenCache>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +64,48 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
     [children, load],
   );
 
+  /** The block every tree menu ends with: what the pane itself can do. */
+  const paneEntries = useCallback(
+    (): MenuEntry[] => [
+      { label: "Refresh", run: () => void load(root) },
+      { label: "Show Dotfiles", checked: showHidden, run: () => setShowHidden((v) => !v) },
+      {
+        label: "Collapse All",
+        disabled: expanded.size === 0,
+        run: () => setExpanded(new Set()),
+      },
+      "separator",
+      { label: "Copy Repository Path", run: () => void copyText(root) },
+      { label: "Reveal Repository", run: () => void revealPath(root) },
+    ],
+    [load, root, showHidden, expanded.size],
+  );
+
+  /** Right-click on a row. Nothing here mutates the tree — only reads it. */
+  const entryMenu = useCallback(
+    (entry: DirEntryInfo): MenuEntry[] => [
+      { header: baseName(entry.path) },
+      entry.isDir
+        ? {
+            label: expanded.has(entry.path) ? "Collapse" : "Expand",
+            run: () => toggle(entry.path),
+          }
+        : { label: "Open", run: () => onOpenFile(entry.path) },
+      entry.isDir && { label: "Refresh", run: () => void load(entry.path) },
+      "separator",
+      { label: "Copy Path", run: () => void copyText(entry.path) },
+      {
+        label: "Copy Relative Path",
+        run: () => void copyText(relativePath(root, entry.path)),
+      },
+      { label: "Copy Name", run: () => void copyText(baseName(entry.path)) },
+      { label: "Reveal in File Manager", run: () => void revealPath(entry.path) },
+      "separator",
+      ...paneEntries(),
+    ],
+    [expanded, toggle, onOpenFile, load, root, paneEntries],
+  );
+
   const renderLevel = (path: string, depth: number): React.ReactNode => {
     const entries = children[path];
     if (!entries) return null;
@@ -72,6 +118,7 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
             style={{ paddingLeft: 8 + depth * 12 }}
             data-selected={selectedPath === entry.path}
             onClick={() => (entry.isDir ? toggle(entry.path) : onOpenFile(entry.path))}
+            onContextMenu={(event) => menu.openContextMenu(event, entryMenu(entry))}
             title={entry.path}
           >
             <span className="twisty">{entry.isDir ? (isOpen ? "▾" : "▸") : ""}</span>
@@ -85,7 +132,10 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
 
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
-      <div className="pane-header">
+      <div
+        className="pane-header"
+        onContextMenu={(event) => menu.openContextMenu(event, paneEntries())}
+      >
         <span>Explorer</span>
         <div className="actions">
           <button
@@ -101,7 +151,10 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
           </button>
         </div>
       </div>
-      <div className="pane-body">
+      <div
+        className="pane-body"
+        onContextMenu={(event) => menu.openContextMenu(event, [...paneEntries(), "separator", "app"])}
+      >
         {error && <div className="empty-note">{error}</div>}
         {!error && !children[root] && <div className="empty-note">Loading…</div>}
         {renderLevel(root, 0)}

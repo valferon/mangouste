@@ -11,6 +11,7 @@
  * gets the behaviour without opting in.
  */
 
+import { insertAtCaret, isEditable, type Editable } from "./editing";
 import { primaryGet, primarySet } from "./ipc";
 
 /** Selections settle in bursts while dragging; only the settled value is published. */
@@ -25,34 +26,6 @@ const PUBLISH_DELAY_MS = 120;
  * single deadline; the repair is a no-op when the highlight is still there.
  */
 const RESTORE_DELAYS_MS = [60, 250];
-
-type Editable = HTMLInputElement | HTMLTextAreaElement;
-
-function isEditable(target: EventTarget | null): target is Editable {
-  return (
-    target instanceof HTMLTextAreaElement ||
-    (target instanceof HTMLInputElement && !target.readOnly && target.type !== "checkbox")
-  );
-}
-
-/**
- * Insert `text` at the caret and fire an `input` event.
- *
- * `execCommand("insertText")` is deprecated but is the only path that keeps the
- * native undo stack intact, which is the whole point of VSCode-like editing.
- * The manual splice is the fallback when it is unavailable.
- */
-function insertAtCaret(element: Editable, text: string) {
-  element.focus();
-  if (document.execCommand?.("insertText", false, text)) return;
-
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? start;
-  element.value = element.value.slice(0, start) + text + element.value.slice(end);
-  const caret = start + text.length;
-  element.setSelectionRange(caret, caret);
-  element.dispatchEvent(new Event("input", { bubbles: true }));
-}
 
 /**
  * Enough of the current selection to put it back if something clears it.

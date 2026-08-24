@@ -42,6 +42,9 @@ import { ControlPanel } from "./ControlPanels";
 import { Markdown } from "./Markdown";
 import { ToolDiff, toolDiffLines } from "./Viewer";
 import { cliDebugEnabled, logDebug } from "../lib/debugLog";
+import { copyText } from "../lib/editing";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import type {
   ClaudeFrame,
   InitializeResult,
@@ -655,6 +658,30 @@ type TimelineEntry = { key: string; state?: string } & (
     }
 );
 
+/**
+ * A row's text, for "Copy Message".
+ *
+ * Only the rows that are prose or a payload have one; a permission card and a
+ * turn summary are UI, not content, so they return null and the item is dropped
+ * from the menu rather than copying a rendering of itself.
+ */
+function entryText(entry: TimelineEntry): string | null {
+  switch (entry.kind) {
+    case "user":
+    case "text":
+    case "thinking":
+      return entry.text;
+    case "tool":
+      return JSON.stringify(entry.block.input, null, 2);
+    case "unknown":
+      return JSON.stringify(entry.block, null, 2);
+    case "result":
+      return entry.text || null;
+    default:
+      return null;
+  }
+}
+
 /** Flatten chat items into rail entries, one per visible action. */
 function toTimeline(
   items: ChatItem[],
@@ -770,6 +797,7 @@ const Timeline = memo(function Timeline({
   onOpenFile,
   onDecide,
   panelContext,
+  logMenu,
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
@@ -780,11 +808,28 @@ const Timeline = memo(function Timeline({
     always?: boolean,
   ) => Promise<void>;
   panelContext: PanelContext;
+  /** The chat-wide entries a row's menu ends with. */
+  logMenu: () => MenuEntry[];
 }) {
+  const menu = useMenu();
   return (
     <>
       {entries.map((entry) => (
-        <div key={entry.key} className="timeline-row" data-kind={entry.kind}>
+        <div
+          key={entry.key}
+          className="timeline-row"
+          data-kind={entry.kind}
+          onContextMenu={(event) => {
+            const text = entryText(entry);
+            menu.openContextMenu(event, [
+              text && { label: "Copy Message", run: () => void copyText(text) },
+              "separator",
+              "editing",
+              "separator",
+              ...logMenu(),
+            ]);
+          }}
+        >
           <span className="timeline-dot" data-state={entry.state ?? ""} />
           <div className="timeline-body">
             {entry.kind === "user" && <UserMessage text={entry.text} />}
@@ -901,6 +946,7 @@ export const ChatPane = memo(function ChatPane({
   model: defaultModelAlias,
   onModel,
 }: ChatPaneProps) {
+  const menu = useMenu();
   const [items, setItems] = useState<ChatItem[]>([]);
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
     {},
@@ -1882,15 +1928,93 @@ export const ChatPane = memo(function ChatPane({
     return running ? "working…" : "ready";
   }, [alive, running]);
 
+  /**
+   * The whole transcript as text, for "Copy Conversation".
+   *
+   * Rendered from the timeline rather than from the raw frames, so what lands on
+   * the clipboard is what is on screen — tool payloads included, permission
+   * cards not.
+   */
+  const transcriptText = useCallback(
+    () =>
+      timeline
+        .map((entry) => {
+          const text = entryText(entry);
+          return text === null ? null : `[${entry.kind}] ${text}`;
+        })
+        .filter((line): line is string => line !== null)
+        .join("\n\n"),
+    [timeline],
+  );
+
+  /** Chat-wide entries, shared by the log's rows and its background. */
+  const logMenu = useCallback(
+    (): MenuEntry[] => [
+      {
+        label: "Copy Conversation",
+        disabled: timeline.length === 0,
+        run: () => void copyText(transcriptText()),
+      },
+      {
+        label: "Scroll to Latest",
+        run: () => {
+          const log = logRef.current;
+          if (log) log.scrollTop = log.scrollHeight;
+        },
+      },
+      "separator",
+      running
+        ? { label: "Interrupt Turn", accelerator: CHORD.dismiss, danger: true, run: () => void interrupt() }
+        : { label: "Restart Session", run: () => void restart() },
+    ],
+    [timeline.length, transcriptText, running, interrupt, restart],
+  );
+
+  /** Right-click in the composer: what to do with the draft, then the field. */
+  const composerMenu = useCallback(
+    (): MenuEntry[] => [
+      {
+        label: "Send",
+        accelerator: CHORD.send,
+        disabled: !alive || (!draft.trim() && attachments.length === 0),
+        run: () => void send(),
+      },
+      running && {
+        label: "Interrupt Turn",
+        accelerator: CHORD.dismiss,
+        danger: true,
+        run: () => void interrupt(),
+      },
+      draft !== "" && { label: "Clear Draft", run: () => setDraft("") },
+      attachments.length > 0 && {
+        label: `Remove ${attachments.length} Attachment${attachments.length === 1 ? "" : "s"}`,
+        run: () => setAttachments([]),
+      },
+      "separator",
+      "editing",
+      "separator",
+      { label: "Restart Session", run: () => void restart() },
+    ],
+    [alive, draft, attachments.length, running, send, interrupt, restart],
+  );
+
   return (
     <div className="chat">
-      <div className="chat-log selectable" ref={logRef} onScroll={onScroll}>
+      <div
+        className="chat-log selectable"
+        ref={logRef}
+        onScroll={onScroll}
+        onContextMenu={(event) =>
+          menu.openContextMenu(event, ["editing", "separator", ...logMenu()])
+        }
+      >
         <Timeline
           entries={timeline}
           toolResults={toolResults}
           onOpenFile={onOpenFile}
           onDecide={decide}
           panelContext={panelContext}
+          logMenu={logMenu}
         />
 
         {running && !awaitingPermission && (
@@ -1906,7 +2030,10 @@ export const ChatPane = memo(function ChatPane({
         )}
       </div>
 
-      <div className="chat-composer">
+      <div
+        className="chat-composer"
+        onContextMenu={(event) => menu.openContextMenu(event, composerMenu())}
+      >
         {attachments.length > 0 && (
           <div className="attachment-strip">
             {attachments.map((image) => (

@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
+import { copyText } from "../lib/editing";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
+import { clipboardGet, onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
 
 interface TerminalPaneProps {
   id: string;
@@ -17,6 +20,8 @@ interface TerminalPaneProps {
    * forward — must not pull focus out of whatever the user was typing in.
    */
   focusRequest?: number;
+  /** Panel-level entries appended to this pane's own right-click menu. */
+  paneActions?: MenuEntry[];
 }
 
 /**
@@ -87,7 +92,9 @@ export function TerminalPane({
   refitToken,
   themeKey,
   focusRequest = 0,
+  paneActions,
 }: TerminalPaneProps) {
+  const menu = useMenu();
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -111,6 +118,14 @@ export function TerminalPane({
    */
   const [generation, setGeneration] = useState(0);
   const respawn = () => setGeneration((current) => current + 1);
+  /**
+   * The live PTY writer, published out of the effect that owns it.
+   *
+   * The right-click Paste has to reach the same dead-shell handling every
+   * keystroke goes through, so it borrows `writePty` rather than calling
+   * `ptyWrite` behind its back.
+   */
+  const writeRef = useRef<((text: string) => void) | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -169,6 +184,7 @@ export function TerminalPane({
         sayDead();
       });
     };
+    writeRef.current = writePty;
     /** Geometry is not worth a message; a dead PTY just has no geometry. */
     const resizePty = (cols: number, rows: number) => {
       if (deadRef.current) return;
@@ -343,8 +359,50 @@ export function TerminalPane({
       });
       term.dispose();
       termRef.current = null;
+      writeRef.current = null;
     };
   }, [id, cwd, generation]);
+
+  /**
+   * Right-click inside the grid.
+   *
+   * xterm owns the canvas and its own mouse handling, so the selection is read
+   * from the terminal rather than from the document — `window.getSelection()`
+   * knows nothing about it.
+   */
+  const onContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const term = termRef.current;
+      const selection = term?.getSelection() ?? "";
+      menu.openContextMenu(event, [
+        {
+          label: "Copy",
+          accelerator: CHORD.terminalCopy,
+          disabled: !selection,
+          run: () => void copyText(selection),
+        },
+        {
+          label: "Paste",
+          accelerator: CHORD.terminalPaste,
+          run: () =>
+            void clipboardGet()
+              .then((text) => {
+                if (text) writeRef.current?.(text);
+              })
+              .catch(() => {}),
+        },
+        { label: "Select All", run: () => term?.selectAll() },
+        "separator",
+        {
+          label: "Clear Scrollback",
+          disabled: !term,
+          run: () => term?.clear(),
+        },
+        ...(paneActions ?? []),
+      ]);
+    },
+    [menu, paneActions],
+  );
 
   // Repaint the canvas palette when the theme changes. `system` resolves through
   // a media query, so the token read has to happen after the swap has landed —
@@ -400,5 +458,8 @@ export function TerminalPane({
     return () => cancelAnimationFrame(frame);
   }, [refitToken, id]);
 
-  return <div className="terminal-host" ref={hostRef} />;
+  // Capture, not bubble: xterm owns every element inside the host and handles
+  // its own mouse events, so a bubbling handler is at the mercy of whether the
+  // addon chain let the event through.
+  return <div className="terminal-host" ref={hostRef} onContextMenuCapture={onContextMenu} />;
 }

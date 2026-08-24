@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { highlightCode } from "../lib/highlight";
 import { clipboardSet, openExternal } from "../lib/ipc";
+import { useMenu } from "../lib/menu";
 
 interface MarkdownProps {
   children: string;
@@ -14,6 +15,7 @@ interface MarkdownProps {
 const PATH_LIKE = /^(?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+(?::\d+)?$/;
 
 function CodeBlock({ language, code }: { language: string | null; code: string }) {
+  const menu = useMenu();
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef(0);
 
@@ -36,7 +38,16 @@ function CodeBlock({ language, code }: { language: string | null; code: string }
   const tokens = useMemo(() => highlightCode(code, language), [code, language]);
 
   return (
-    <div className="code-block">
+    <div
+      className="code-block"
+      onContextMenu={(event) =>
+        menu.openContextMenu(event, [
+          { label: "Copy Code Block", run: () => void copy() },
+          "separator",
+          "editing",
+        ])
+      }
+    >
       <div className="code-head">
         <span className="code-lang">{language ?? "text"}</span>
         <button onClick={() => void copy()} title="Copy">
@@ -58,6 +69,7 @@ function CodeBlock({ language, code }: { language: string | null; code: string }
  * `rehype-raw` would let it inject markup into the app's own DOM.
  */
 export const Markdown = memo(function Markdown({ children, onOpenFile }: MarkdownProps) {
+  const menu = useMenu();
   return (
     <div className="markdown">
       <ReactMarkdown
@@ -78,6 +90,18 @@ export const Markdown = memo(function Markdown({ children, onOpenFile }: Markdow
                     isPath && onOpenFile
                       ? () => onOpenFile(text.replace(/:\d+$/, ""))
                       : undefined
+                  }
+                  onContextMenu={(event) =>
+                    menu.openContextMenu(event, [
+                      isPath &&
+                        Boolean(onOpenFile) && {
+                          label: "Open File",
+                          run: () => onOpenFile?.(text.replace(/:\d+$/, "")),
+                        },
+                      { label: "Copy", run: () => void clipboardSet(text) },
+                      "separator",
+                      "editing",
+                    ])
                   }
                 >
                   {text}

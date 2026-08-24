@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onSessionsChanged, statsSummary } from "../lib/ipc";
 import { ArchiveIcon, RefreshIcon, RepoIcon, StatusGlyph } from "../lib/icons";
+import { copyText } from "../lib/editing";
+import { revealPath } from "../lib/ipc";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import { useFlags } from "../lib/sessionFlagsContext";
 import type {
   DayStat,
@@ -264,6 +267,7 @@ export const Dashboard = memo(function Dashboard({
   onResume,
   onSelectRepo,
 }: DashboardProps) {
+  const menu = useMenu();
   const [stats, setStats] = useState<StatsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -376,6 +380,23 @@ export const Dashboard = memo(function Dashboard({
     [sessionRows],
   );
 
+  const projectMenu = useCallback(
+    (label: string, cwd: string | null, dirName: string): MenuEntry[] => [
+      { header: label },
+      cwd && { label: "Switch to this Repo", run: () => onSelectRepo(cwd) },
+      {
+        label: repoFilter === dirName ? "Clear Repo Filter" : "Filter to this Repo",
+        run: () => setRepoFilter(repoFilter === dirName ? null : dirName),
+      },
+      "separator",
+      cwd && { label: "Copy Path", run: () => void copyText(cwd) },
+      cwd && { label: "Reveal in File Manager", run: () => void revealPath(cwd) },
+      "separator",
+      { label: "Refresh", run: () => void refresh() },
+    ],
+    [onSelectRepo, repoFilter, refresh],
+  );
+
   const openSession = useCallback(
     (row: SessionStats) => {
       const meta = metaById.get(row.id);
@@ -405,6 +426,28 @@ export const Dashboard = memo(function Dashboard({
       });
     },
     [metaById, onResume],
+  );
+
+  const sessionMenu = useCallback(
+    (row: SessionStats, title: string): MenuEntry[] => {
+      const archived = flags.isArchived(row.id);
+      return [
+        { header: title },
+        { label: "Open Session", run: () => openSession(row) },
+        row.cwd && { label: "Switch to this Repo", run: () => onSelectRepo(row.cwd ?? "") },
+        {
+          label: archived ? "Unarchive" : "Archive",
+          run: () => flags.setArchived(row.id, !archived),
+        },
+        "separator",
+        { label: "Copy Session Id", run: () => void copyText(row.id) },
+        row.cwd && { label: "Copy Working Directory", run: () => void copyText(row.cwd ?? "") },
+        row.file && { label: "Reveal Transcript", run: () => void revealPath(row.file) },
+        "separator",
+        { label: "Refresh", run: () => void refresh() },
+      ];
+    },
+    [flags, openSession, onSelectRepo, refresh],
   );
 
   if (error && !stats) {
@@ -564,6 +607,12 @@ export const Dashboard = memo(function Dashboard({
                   setRepoFilter(project.dirName);
                   onSelectRepo(project.cwd);
                 }}
+                onContextMenu={(event) =>
+                  menu.openContextMenu(
+                    event,
+                    projectMenu(project.label, project.cwd, project.dirName),
+                  )
+                }
               >
                 <span className="cell-name">
                   <RepoIcon /> {project.label}
@@ -717,6 +766,12 @@ export const Dashboard = memo(function Dashboard({
                     row.tokens.cacheRead,
                   )} cache read · ${compact(row.tokens.cacheWrite)} written`}
                   onClick={() => openSession(row)}
+                  onContextMenu={(event) =>
+                    menu.openContextMenu(
+                      event,
+                      sessionMenu(row, meta?.title ?? `session ${row.id.slice(0, 8)}`),
+                    )
+                  }
                 >
                   <span className="cell-glyph">
                     <StatusGlyph status={status} />

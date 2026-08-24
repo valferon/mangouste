@@ -109,7 +109,12 @@ export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
   };
 
   return (
-    <div className="quickopen-scrim" onMouseDown={onClose}>
+    <div
+      className="quickopen-scrim"
+      // Primary button only: a right-click here opens a menu instead of
+      // dismissing the palette out from under it.
+      onMouseDown={(event) => event.button === 0 && onClose()}
+    >
       <div className="quickopen" onMouseDown={(event) => event.stopPropagation()}>
         <input
           ref={inputRef}

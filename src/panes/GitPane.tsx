@@ -16,6 +16,7 @@ import {
   gitStage,
   gitStatus,
   gitUnstage,
+  revealPath,
 } from "../lib/ipc";
 import {
   BranchIcon,
@@ -31,11 +32,16 @@ import {
   RefreshIcon,
   SourceControlIcon,
 } from "../lib/icons";
+import { copyText } from "../lib/editing";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import type { BranchList, Commit, FileStatus, RepoStatus } from "../lib/types";
 
 interface GitPaneProps {
   cwd: string;
   onShowDiff: (title: string, patch: string) => void;
+  /** Open the working-tree copy of a path in an editor tab. */
+  onOpenFile: (path: string) => void;
 }
 
 const COMMIT_PAGE = 150;
@@ -76,7 +82,8 @@ function isUntracked(file: FileStatus): boolean {
  * History is a flat list rather than a rendered lane graph; the `parents` and
  * `refs` fields are already carried through from Rust for when that lands.
  */
-export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) {
+export const GitPane = memo(function GitPane({ cwd, onShowDiff, onOpenFile }: GitPaneProps) {
+  const menu = useMenu();
   const [status, setStatus] = useState<RepoStatus | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -247,6 +254,114 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
     branchFilter.trim().length > 0 &&
     !branchRows.some((b) => b.name === branchFilter.trim());
 
+  /** The repo-wide block, shared by the header, the body and the rows. */
+  const repoEntries = useCallback(
+    (): MenuEntry[] => [
+      { label: "Refresh", run: () => void refresh() },
+      "separator",
+      { label: "Pull", disabled: busy !== null, run: () => void run("pull", () => gitPull(cwd)) },
+      {
+        label: status !== null && status.upstream === null ? "Push and Set Upstream" : "Push",
+        disabled: busy !== null,
+        run: () => void run("push", () => gitPush(cwd, status !== null && status.upstream === null)),
+      },
+      {
+        label: "Fetch",
+        disabled: busy !== null,
+        run: () => void run("fetch", () => gitFetch(cwd)),
+      },
+      "separator",
+      { label: "Switch Branch…", disabled: busy !== null, run: () => openBranchMenu("checkout") },
+      { label: "Merge Branch…", disabled: busy !== null, run: () => openBranchMenu("merge") },
+      "separator",
+      status?.branch && {
+        label: "Copy Branch Name",
+        run: () => void copyText(status.branch ?? ""),
+      },
+      { label: "Copy Repository Path", run: () => void copyText(cwd) },
+    ],
+    [refresh, busy, cwd, status, run, openBranchMenu],
+  );
+
+  const fileMenu = useCallback(
+    (file: FileStatus, staged: boolean): MenuEntry[] => {
+      const absolute = `${cwd}/${file.path}`;
+      return [
+        { header: file.path },
+        {
+          label: staged ? "Open Staged Diff" : "Open Diff",
+          run: () => void openFileDiff(file, staged),
+        },
+        { label: "Open File", run: () => onOpenFile(absolute) },
+        "separator",
+        staged
+          ? { label: "Unstage", disabled: busy !== null, run: () => unstage([file.path]) }
+          : { label: "Stage", disabled: busy !== null, run: () => stage([file.path]) },
+        !staged && {
+          label: isUntracked(file) ? "Delete Untracked File" : "Discard Changes",
+          danger: true,
+          disabled: busy !== null,
+          run: () => discard([file]),
+        },
+        "separator",
+        { label: "Copy Path", run: () => void copyText(absolute) },
+        { label: "Copy Relative Path", run: () => void copyText(file.path) },
+        { label: "Reveal in File Manager", run: () => void revealPath(absolute) },
+        "separator",
+        ...repoEntries(),
+      ];
+    },
+    [cwd, openFileDiff, onOpenFile, busy, stage, unstage, discard, repoEntries],
+  );
+
+  const commitMenu = useCallback(
+    (commit: Commit): MenuEntry[] => [
+      { header: `${commit.shortSha} ${commit.subject}` },
+      { label: "View Changes", run: () => void openCommit(commit) },
+      "separator",
+      { label: "Copy Commit Hash", run: () => void copyText(commit.sha) },
+      { label: "Copy Short Hash", run: () => void copyText(commit.shortSha) },
+      { label: "Copy Subject", run: () => void copyText(commit.subject) },
+      {
+        label: "Copy Author",
+        run: () => void copyText(`${commit.author} <${commit.authorEmail}>`),
+      },
+      "separator",
+      ...repoEntries(),
+    ],
+    [openCommit, repoEntries],
+  );
+
+  /** Right-click on a group header: the bulk operations for that group. */
+  const sectionMenu = useCallback(
+    (key: SectionKey): MenuEntry[] => [
+      key === "staged" && {
+        label: "Unstage All",
+        disabled: busy !== null || stagedFiles.length === 0,
+        run: () => unstage(stagedFiles.map((file) => file.path)),
+      },
+      key === "changes" && {
+        label: "Stage All Changes",
+        disabled: busy !== null || changedFiles.length === 0,
+        run: () => stage(changedFiles.map((file) => file.path)),
+      },
+      key === "changes" && {
+        label: "Discard All Changes",
+        danger: true,
+        disabled: busy !== null || changedFiles.length === 0,
+        run: () => discard(changedFiles),
+      },
+      key !== "history" && "separator",
+      {
+        label: collapsed[key] ? "Expand" : "Collapse",
+        run: () => setCollapsed((current) => ({ ...current, [key]: !current[key] })),
+      },
+      "separator",
+      ...repoEntries(),
+    ],
+    [busy, stagedFiles, changedFiles, stage, unstage, discard, collapsed, repoEntries],
+  );
+
   const pickBranch = (name: string) => {
     const mode = branchMode;
     setBranchMode(null);
@@ -279,6 +394,7 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
       className="pane-header scm-group"
       style={{ height: 22 }}
       onClick={() => setCollapsed((c) => ({ ...c, [key]: !c[key] }))}
+      onContextMenu={(event) => menu.openContextMenu(event, sectionMenu(key))}
     >
       <span className="twisty">{collapsed[key] ? "▸" : "▾"}</span>
       <span className="count">
@@ -301,6 +417,7 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
       className="row scm-row"
       title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
       onClick={() => void openFileDiff(file, staged)}
+      onContextMenu={(event) => menu.openContextMenu(event, fileMenu(file, staged))}
     >
       <span className="label">{file.path}</span>
       <div className="row-actions" onClick={(e) => e.stopPropagation()}>
@@ -331,7 +448,10 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
 
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
-      <div className="pane-header">
+      <div
+        className="pane-header"
+        onContextMenu={(event) => menu.openContextMenu(event, repoEntries())}
+      >
         <SourceControlIcon />
         <span className="scm-title">Source Control</span>
         {status?.branch && (
@@ -436,7 +556,25 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
         </div>
       )}
 
-      <div className="commit-box">
+      <div
+        className="commit-box"
+        onContextMenu={(event) =>
+          menu.openContextMenu(event, [
+            {
+              label: `Commit${stagedFiles.length > 0 ? ` (${stagedFiles.length})` : ""}`,
+              accelerator: CHORD.commit,
+              disabled: busy !== null || !message.trim() || stagedFiles.length === 0,
+              run: commit,
+            },
+            message.trim() !== "" && {
+              label: "Clear Message",
+              run: () => setMessage(""),
+            },
+            "separator",
+            "editing",
+          ])
+        }
+      >
         <textarea
           className="commit-message"
           rows={2}
@@ -473,7 +611,12 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
       {error && <div className="git-note" data-error="true">{error}</div>}
       {note && !busy && !error && <div className="git-note">{note}</div>}
 
-      <div className="pane-body">
+      <div
+        className="pane-body"
+        onContextMenu={(event) =>
+          menu.openContextMenu(event, [...repoEntries(), "separator", "app"])
+        }
+      >
         {stagedFiles.length > 0 && (
           <>
             {sectionHeader(
@@ -534,6 +677,7 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff }: GitPaneProps) 
               className="commit-row"
               data-selected={selected === commit.sha}
               onClick={() => void openCommit(commit)}
+              onContextMenu={(event) => menu.openContextMenu(event, commitMenu(commit))}
               title={`${commit.sha}\n${commit.author} <${commit.authorEmail}>`}
             >
               <CommitIcon className="commit-node" />

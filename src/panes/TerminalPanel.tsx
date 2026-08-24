@@ -1,6 +1,21 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Resizer } from "../layout/Split";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import { TerminalPane } from "./TerminalPane";
+
+/**
+ * What the Terminal menu can ask this panel to do.
+ *
+ * The tab and split bookkeeping stays here — lifting it into `App` would put
+ * three more pieces of state next to the ones that drive the whole workbench —
+ * so the panel publishes the handles instead.
+ */
+export interface TerminalActions {
+  newTab: () => void;
+  split: () => void;
+  closePane: () => void;
+}
 
 /** One shell. `id` is the key the Rust side stores the pty under. */
 interface TerminalSlot {
@@ -63,6 +78,8 @@ interface TerminalPanelProps {
   onClose: () => void;
   /** Show the panel, for a chord pressed while it is hidden. */
   onRequestShow: () => void;
+  /** Publishes new/split/close upward, for the menu bar. */
+  onRegisterActions?: (actions: TerminalActions | null) => void;
 }
 
 /**
@@ -83,7 +100,9 @@ export function TerminalPanel({
   themeKey,
   onClose,
   onRequestShow,
+  onRegisterActions,
 }: TerminalPanelProps) {
+  const menu = useMenu();
   const [groups, setGroups] = useState<Record<string, RepoTerminals>>({});
   /**
    * Bumped only by a user action that should move the caret into a terminal.
@@ -271,6 +290,38 @@ export function TerminalPanel({
     [repo],
   );
 
+  // Publish the actions the Terminal menu drives, and take them back down on
+  // unmount so a stale closure cannot outlive the panel.
+  useEffect(() => {
+    onRegisterActions?.({ newTab: addTab, split: splitTab, closePane: closeActiveSlot });
+    return () => onRegisterActions?.(null);
+  }, [onRegisterActions, addTab, splitTab, closeActiveSlot]);
+
+  /** Right-click on the bar, a tab, or the empty strip beside them. */
+  const barMenu = useCallback(
+    (tabId: string | null): MenuEntry[] => [
+      { label: "New Terminal Tab", accelerator: CHORD.newTerminal, run: addTab },
+      {
+        label: "Split Terminal",
+        accelerator: CHORD.splitTerminal,
+        disabled: !group,
+        run: splitTab,
+      },
+      "separator",
+      tabId && {
+        label: "Close Terminal Tab",
+        danger: true,
+        run: () => closeTab(tabId),
+      },
+      {
+        label: "Hide Terminal Panel",
+        accelerator: CHORD.toggleTerminal,
+        run: onClose,
+      },
+    ],
+    [addTab, splitTab, closeTab, group, onClose],
+  );
+
   // Panel chords, captured at the window so they never reach a shell.
   //
   // xterm listens on its own textarea, so stopping propagation here — in the
@@ -305,7 +356,10 @@ export function TerminalPanel({
       // the panel is the item that yields rather than overflowing the bottom.
       style={{ height, flex: `0 1 ${height}px`, display: visible ? "flex" : "none" }}
     >
-      <div className="terminal-bar">
+      <div
+        className="terminal-bar"
+        onContextMenu={(event) => menu.openContextMenu(event, barMenu(null))}
+      >
         <span className="terminal-repo-label" title={repo}>
           {repo.split("/").pop() ?? ""}
         </span>
@@ -316,6 +370,7 @@ export function TerminalPanel({
               className="terminal-tab"
               data-active={tab.id === group.activeTab}
               onClick={() => selectTab(tab.id)}
+              onContextMenu={(event) => menu.openContextMenu(event, barMenu(tab.id))}
               title={tab.slots.length > 1 ? `${tab.slots.length} panes` : undefined}
             >
               <span>
@@ -410,6 +465,16 @@ export function TerminalPanel({
                               refitToken={refitToken + showToken}
                               themeKey={themeKey}
                               focusRequest={slotActive ? focusSeq : 0}
+                              paneActions={[
+                                "separator",
+                                ...barMenu(tab.id),
+                                tab.slots.length > 1 && {
+                                  label: "Close Pane",
+                                  accelerator: CHORD.closeTerminal,
+                                  danger: true,
+                                  run: () => closeSlot(tab.id, slot.id),
+                                },
+                              ]}
                             />
                           </div>
                         </Fragment>

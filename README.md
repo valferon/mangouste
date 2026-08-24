@@ -274,20 +274,61 @@ the X11 convention are reimplemented:
 Insertion goes through `execCommand("insertText")` so the native undo stack
 survives, with a manual splice as fallback.
 
+## Menus
+
+A menu bar sits in the titlebar — File, Edit, View, Terminal, Help — and every
+surface in the window answers right-click. Both are the same implementation
+(`src/lib/menu.tsx`); the webview's own context menu is suppressed app-wide,
+since it offers "Reload" over a page with nowhere to reload to and paints over
+anything the app draws.
+
+Panes describe their own menus as arrays of entries, with two sentinels that
+expand at open time against whatever was under the pointer:
+
+- `"editing"` — Undo/Cut/Copy/Paste/Select All for the clicked target, plus
+  link actions when the click landed on an anchor
+- `"app"` — the workbench-wide block, so an unwired corner still offers
+  something useful
+
+Clipboard work goes through the Rust commands rather than
+`navigator.clipboard`, which under WebKitGTK is gated on a user gesture a menu
+item does not count as. Nothing in a context menu mutates the filesystem: the
+tree offers open, copy and reveal, and the only destructive entry anywhere is
+the SCM pane's Discard, which keeps its confirmation.
+
+Help ▸ About reads its version from Tauri (which reads `tauri.conf.json`) and
+its commit and build stamp from Vite `define`, so a release updates it without
+anyone editing a string. Help ▸ Keyboard Shortcuts renders straight off the
+`CHORD` table in `src/lib/keybindings.ts`, which is also what fills the menus'
+accelerator column.
+
 ## Keybindings
+
+Single source of truth: `src/lib/keybindings.ts`.
 
 | Key | Action |
 | --- | --- |
 | `Enter` | Send message |
 | `Shift+Enter` | Newline in composer |
 | `Ctrl+P` | Open recent — type-to-filter repo switcher |
+| `Ctrl+N` | New session in the active repo |
+| `Ctrl+W` | Close the tab in front |
+| `Ctrl+S` | Save the file in front |
+| `Ctrl+,` | Settings |
 | `Ctrl+\`` | Toggle terminal |
 | `Ctrl+Shift+T` | New terminal tab |
 | `Ctrl+Shift+5` | Split terminal vertically |
 | `Ctrl+Shift+W` | Close terminal pane |
 | `Ctrl+B` | Toggle left sidebar |
+| `Ctrl+Shift+E/G` | Explorer / Source Control |
+| `Ctrl+Shift+D` | Dashboard |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in, out, reset |
+| `F11` | Full screen |
 | `Middle click` | Paste PRIMARY |
 | `Ctrl+Shift+C/V` | Copy/paste in terminal |
+
+`Ctrl+N` and `Ctrl+W` are readline chords too, so both stand down when the
+keystroke landed inside a terminal.
 
 ## Switching repos
 

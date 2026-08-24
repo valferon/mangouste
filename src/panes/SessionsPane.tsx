@@ -1,5 +1,12 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { expandSearchTerms, listSessions, onSessionsChanged, searchSessions } from "../lib/ipc";
+import {
+  expandSearchTerms,
+  listSessions,
+  onSessionsChanged,
+  revealPath,
+  searchSessions,
+} from "../lib/ipc";
+
 import {
   ArchiveIcon,
   ChevronRightIcon,
@@ -16,6 +23,9 @@ import {
   UnreadToggleIcon,
   WorkflowGlyph,
 } from "../lib/icons";
+import { copyText } from "../lib/editing";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
 import { useFlags } from "../lib/sessionFlagsContext";
 import type {
   ProjectGroup,
@@ -205,6 +215,7 @@ export const SessionsPane = memo(function SessionsPane({
   activeCwd,
   onGroups,
 }: SessionsPaneProps) {
+  const menu = useMenu();
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
   /** Only holds groups the user collapsed by hand; everything starts open. */
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -475,6 +486,87 @@ export const SessionsPane = memo(function SessionsPane({
     [flags, onResume],
   );
 
+  /** The pane's own toggles, ending every menu in here. */
+  const paneEntries = useCallback(
+    (): MenuEntry[] => [
+      { label: "Refresh", run: () => void refresh() },
+      "separator",
+      { label: "Only Live Sessions", checked: onlyLive, run: () => setOnlyLive((v) => !v) },
+      { label: "Include Idle", checked: showIdle, run: () => setShowIdle((v) => !v) },
+      {
+        label: `Include Archived (${flags.archivedCount})`,
+        checked: showArchived,
+        run: () => setShowArchived((v) => !v),
+      },
+      "separator",
+      {
+        label: "Mark All as Read",
+        run: () => flags.markAllSeen(groups.flatMap((group) => group.sessions)),
+      },
+    ],
+    [refresh, onlyLive, showIdle, showArchived, flags, groups],
+  );
+
+  const sessionMenu = useCallback(
+    (session: SessionMeta): MenuEntry[] => {
+      const archived = flags.isArchived(session.id);
+      const unread = flags.isMarkedUnread(session.id);
+      const cwd = session.cwd ?? "";
+      return [
+        { header: session.title ?? session.id },
+        { label: "Open Session", run: () => openSession(session) },
+        cwd && { label: "Switch to this Repo", run: () => onSelectRepo(cwd) },
+        cwd && {
+          label: "New Session in this Repo",
+          accelerator: CHORD.newSession,
+          run: () => onNewSession(cwd),
+        },
+        "separator",
+        {
+          label: unread ? "Mark as Read" : "Mark as Unread",
+          run: () => (unread ? flags.markSeen(session) : flags.markUnread(session.id)),
+        },
+        {
+          label: archived ? "Unarchive" : "Archive",
+          run: () => flags.setArchived(session.id, !archived),
+        },
+        "separator",
+        { label: "Copy Session Id", run: () => void copyText(session.id) },
+        session.title && { label: "Copy Title", run: () => void copyText(session.title ?? "") },
+        cwd && { label: "Copy Working Directory", run: () => void copyText(cwd) },
+        session.file && {
+          label: "Reveal Transcript",
+          run: () => void revealPath(session.file),
+        },
+        "separator",
+        ...paneEntries(),
+      ];
+    },
+    [flags, openSession, onSelectRepo, onNewSession, paneEntries],
+  );
+
+  const repoMenu = useCallback(
+    (group: ProjectGroup): MenuEntry[] => [
+      { header: group.cwd },
+      { label: "Switch to this Repo", run: () => onSelectRepo(group.cwd) },
+      {
+        label: "New Session in this Repo",
+        accelerator: CHORD.newSession,
+        run: () => onNewSession(group.cwd),
+      },
+      {
+        label: collapsed.has(group.dirName) ? "Expand" : "Collapse",
+        run: () => toggleGroup(group.dirName),
+      },
+      "separator",
+      { label: "Copy Path", run: () => void copyText(group.cwd) },
+      { label: "Reveal in File Manager", run: () => void revealPath(group.cwd) },
+      "separator",
+      ...paneEntries(),
+    ],
+    [onSelectRepo, onNewSession, collapsed, paneEntries],
+  );
+
   const agentRow = (agent: RunningAgent, session: SessionMeta, nested: boolean) => (
     <div
       key={agent.id}
@@ -496,7 +588,10 @@ export const SessionsPane = memo(function SessionsPane({
 
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
-      <div className="pane-header">
+      <div
+        className="pane-header"
+        onContextMenu={(event) => menu.openContextMenu(event, paneEntries())}
+      >
         <span>Sessions</span>
         <span
           className="count"
@@ -651,6 +746,7 @@ export const SessionsPane = memo(function SessionsPane({
                 className="repo-row"
                 data-selected={isActiveRepo}
                 onClick={() => onSelectRepo(group.cwd)}
+                onContextMenu={(event) => menu.openContextMenu(event, repoMenu(group))}
                 title={group.cwd}
               >
                 <span
@@ -701,6 +797,9 @@ export const SessionsPane = memo(function SessionsPane({
                         data-unread={markedUnread || status === "pendingReview"}
                         data-archived={archived}
                         onClick={() => openSession(session)}
+                        onContextMenu={(event) =>
+                          menu.openContextMenu(event, sessionMenu(session))
+                        }
                         title={[
                           session.title ?? session.id,
                           session.lastPrompt,

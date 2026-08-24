@@ -373,3 +373,30 @@ export function WorkflowGlyph(props: IconProps) {
     </Icon>
   );
 }
+
+/**
+ * Brand mark: a mongoose in profile, tail curled over its back. Filled rather
+ * than stroked like everything above — at the ~22px the titlebar gives it, a
+ * line drawing of an animal turns to mush while a silhouette still reads. The
+ * eye is punched out with `evenodd` so it picks up whatever sits behind it.
+ */
+export function MongooseLogo({ className, ...rest }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="1.7em"
+      height="1.7em"
+      fill="currentColor"
+      role="img"
+      aria-label="mangouste"
+      focusable="false"
+      className={className ? `icon ${className}` : "icon"}
+      {...rest}
+    >
+      <path
+        fillRule="evenodd"
+        d="M1.8 11.6C2.6 10.6 3.4 9.7 4.6 9.2C4.9 7.9 5.7 7.3 6.5 7.7C7 8 7.2 8.6 7.3 9.1C9.5 9.3 11.6 9.7 13.4 10.5C14.2 10.8 14.9 11 15.6 11C18.3 11 19.7 9.9 19.7 7.6C19.7 6.3 19.3 5.4 18.6 4.9C19.6 4.1 20.9 4.9 21.2 6.3C21.6 8.2 21.6 10.9 20 12.7C18.6 14.3 17.1 14.7 15.7 14.5C15.6 15.6 15.7 16.9 16 17.9C16.1 18.5 15 18.6 14.6 18.1C14.2 17 14.1 15.6 14.2 14.6C12.4 15 10.4 15 8.9 14.6C8.9 15.7 9.1 17 9.5 17.9C9.6 18.5 8.3 18.6 7.7 18.1C7.4 17 7.4 15.5 7.5 14.2C6.1 13.7 4.8 12.9 3.9 12C3.2 11.9 2.5 11.7 1.8 11.6ZM6.52 10.6a.72.72 0 1 1-1.44 0 .72.72 0 0 1 1.44 0Z"
+      />
+    </svg>
+  );
+}

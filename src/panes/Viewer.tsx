@@ -8,8 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { copyText } from "../lib/editing";
 import { highlightCode, languageForPath } from "../lib/highlight";
-import { readTextFileMeta, writeTextFile } from "../lib/ipc";
+import { readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
+import { CHORD } from "../lib/keybindings";
+import { useMenu, type MenuEntry } from "../lib/menu";
+import { baseName, parentDir } from "../lib/paths";
 
 /** Colourise a unified diff. Line class is decided by the first character. */
 function diffLineClass(line: string): string {
@@ -122,6 +126,16 @@ const DiffLines = memo(function DiffLines({ lines }: { lines: string[] }) {
 });
 
 export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
+  const menu = useMenu();
+  /** Right-click anywhere in a patch: take the whole thing, or the selection. */
+  const patchMenu = useCallback(
+    (): MenuEntry[] => [
+      { label: "Copy Whole Patch", run: () => void copyText(patch) },
+      "separator",
+      "editing",
+    ],
+    [patch],
+  );
   // Split and cap once per patch, not once per parent render — patches reach
   // thousands of lines, each with its own class computation.
   const { preamble, files, flat, hidden, cutNote } = useMemo(() => {
@@ -167,7 +181,10 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
 
   if (flat !== null) {
     return (
-      <pre className="diff-view selectable">
+      <pre
+        className="diff-view selectable"
+        onContextMenu={(event) => menu.openContextMenu(event, patchMenu())}
+      >
         <DiffLines lines={flat} />
         {footer}
       </pre>
@@ -175,7 +192,10 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
   }
 
   return (
-    <div className="diff-view-sections">
+    <div
+      className="diff-view-sections"
+      onContextMenu={(event) => menu.openContextMenu(event, patchMenu())}
+    >
       {preamble.length > 0 && (
         <pre className="diff-view selectable diff-preamble">
           <DiffLines lines={preamble} />
@@ -396,6 +416,7 @@ export const FileView = memo(function FileView({
   onDirtyChange,
   onRegisterSave,
 }: FileViewProps) {
+  const menu = useMenu();
   /** What is on disk, as far as this pane knows. */
   const [saved, setSaved] = useState<{ text: string; modifiedMs: number } | null>(null);
   const [draft, setDraft] = useState("");
@@ -550,6 +571,41 @@ export const FileView = memo(function FileView({
     }
   }, []);
 
+  /**
+   * Right-click in the editor.
+   *
+   * The editing block comes from the sentinel rather than being rebuilt here, so
+   * cut/copy/paste behave the same in this textarea as in every other field.
+   */
+  const editorMenu = useCallback(
+    (): MenuEntry[] => [
+      {
+        label: "Save",
+        accelerator: CHORD.save,
+        disabled: !dirty || state.kind === "saving",
+        run: () => void save(false),
+      },
+      {
+        label: dirty ? "Revert to Disk" : "Reload from Disk",
+        danger: dirty,
+        disabled: state.kind === "saving",
+        run: () => void load(),
+      },
+      "separator",
+      "editing",
+      "separator",
+      { label: "Copy Path", run: () => void copyText(path) },
+      { label: "Copy File Name", run: () => void copyText(baseName(path)) },
+      { label: "Reveal in File Manager", run: () => void revealPath(path) },
+      {
+        label: "Reveal Containing Folder",
+        disabled: parentDir(path) === "",
+        run: () => void revealPath(parentDir(path)),
+      },
+    ],
+    [dirty, state.kind, save, load, path],
+  );
+
   const language = useMemo(() => languageForPath(path), [path]);
   // Typing must not wait on the tokeniser: the deferred copy lags behind during
   // a burst of keystrokes and catches up once it stops, so the caret never does.
@@ -575,7 +631,7 @@ export const FileView = memo(function FileView({
   else if (dirty) status = <span className="count">Unsaved</span>;
 
   return (
-    <div className="editor">
+    <div className="editor" onContextMenu={(event) => menu.openContextMenu(event, editorMenu())}>
       <div className="editor-bar">
         <span className="editor-path" title={path}>
           {dirty && <span className="editor-dirty">●</span>}

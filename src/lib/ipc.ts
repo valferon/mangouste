@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   BranchList,
   ChatStatus,
@@ -39,6 +39,21 @@ export async function openExternal(url: string): Promise<boolean> {
   if (!OPENABLE.test(url)) return false;
   try {
     await openUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Show a path in the desktop's file manager.
+ *
+ * Resolves to `false` when the platform has no handler or the path is gone, so
+ * a menu item can stay quiet rather than raising a dialog nobody asked for.
+ */
+export async function revealPath(path: string): Promise<boolean> {
+  try {
+    await revealItemInDir(path);
     return true;
   } catch {
     return false;

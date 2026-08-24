@@ -23,7 +23,10 @@ export function Settings({
   onClose,
 }: SettingsProps) {
   return (
-    <div className="quickopen-scrim" onMouseDown={onClose}>
+    <div
+      className="quickopen-scrim"
+      onMouseDown={(event) => event.button === 0 && onClose()}
+    >
       <div className="settings" onMouseDown={(event) => event.stopPropagation()}>
         <div className="pane-header">
           <span>Settings</span>
