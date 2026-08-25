@@ -55,7 +55,8 @@ unattended at any moment:
 - **Steering is one keystroke from watching.** Same window, so answering an
   `awaiting` session, reading its diff, and running the command it suggests do not
   cost three context switches. `Ctrl+P` to the repo, `Ctrl+N` for a new session,
-  `Ctrl+\`` for its terminal.
+  `Ctrl+\`` for its terminal — or Settings ▸ Sessions run in ▸ `terminal`, and the
+  session tab holds `claude` itself instead of this app's pane.
 
 Coordinating here means reading and steering, not automating. No rule engine
 answers a prompt for you and no scheduler decides what runs next — the watcher
@@ -515,6 +516,77 @@ from a different engine than the one that will do the write would eventually lie
 
 Clicking a result opens the file and lands the caret on the match, selecting the
 line — coming from a list of matches, seeing *which* text matched is the point.
+
+## Where sessions run
+
+Settings ▸ **Sessions run in** picks what a session tab holds: `app chat` (the
+default) or `terminal`. Same strip, same tabs, same rail — the choice is which
+program you are talking to.
+
+The chat pane is a stream-json client. It drives `claude` over a pipe and renders
+the frames itself, which is what makes the transcript view, the token and cost
+counts, the phase chip and the status dots possible at all. What it is not is
+`claude`: the TUI's own permission prompts, its `/` commands, its statusline and
+whatever the user has built around it belong to the real terminal program. So
+`terminal` puts the CLI in the tab, in a pty, where the pane would have been.
+
+Not in the terminal panel at the bottom. That panel is for shells — a build, a
+git command, a REPL — and its tabs are numbered because that is what a shell
+needs. A session is not one of those, and putting it there would mean the strip
+no longer shows you your sessions.
+
+**The session is named before it starts.** `claude` in a pty reports nothing
+back: there is no stream to read a uuid out of. A tab that never learns which
+session it is holding can never be labelled, renamed, resumed, or matched against
+a row in the rail — so the id is minted here and handed over as
+`--session-id <uuid>`, and the CLI writes its transcript under it. Resuming
+instead passes `--resume <uuid>`, and which of the two a tab gets is decided by
+whether it has a transcript yet.
+
+The command is typed into a login shell rather than handed to the spawn as
+`$SHELL -l -c claude`, deliberately: the point of running the CLI here is that it
+is running in a real terminal, so it gets the rc files, the PATH and — when it
+exits — the prompt back. Only the pane's first shell is sent it, so the
+`[process exited — press Enter for a new shell]` message keeps its promise.
+
+Nothing about the CLI is second-guessed. No `--model` and no `--permission-mode`:
+those two preferences exist because the pane spawns the CLI and has to hand it
+flags. A terminal session is the user's own `claude`, configured the way they
+configured it, which is the reason to want one.
+
+Session ids reach a command line, so they are checked rather than trusted. They
+arrive two ways — minted here, and read out of filenames under
+`~/.claude/projects` — and a filename is not a shape this app gets to assume.
+Anything not shaped like an id starts a fresh session in the right repo instead;
+a `;` never reaches the shell.
+
+The rest follows from the tab holding a program instead of a pane:
+
+- **The surface is a property of the tab, not of the setting.** Every session tab
+  records what it was opened with. Switching the preference decides where the
+  *next* session goes; re-pointing a tab that is already holding a live process
+  at a different renderer would orphan it.
+- **It mounts on first activation.** A restored strip of eight terminal tabs would
+  otherwise be eight ptys and eight `claude` processes at boot — the same bargain
+  `cold` already strikes for panes, differing only in that a pty has nothing to do
+  while it waits, so there is nothing to keep mounted until then. Once up it stays
+  up, and the session keeps running while you read another tab.
+- **A terminal tab is only persisted once its transcript exists.** Unlike a pane,
+  its id is set from the moment it is minted, so the id is not evidence of a
+  session. Restoring one without a transcript would relaunch it as `--resume`
+  against something `claude` never wrote — an error message where a conversation
+  should be.
+- **It gets a mark, not a dot.** The status dot is read off the stream, so only a
+  pane has one; a dot stuck on `idle` forever would read as a status rather than
+  as the absence of one. A `❯` in its place says which program the tab holds.
+- **The label still comes from the session.** Its own title once the rail has
+  scanned it, and `New session` until then — an id is not a name.
+- **The rail does not care.** It reads the transcripts on disk, so a session run
+  in a tab's terminal sits in the same list, with the same status column, as one
+  run in a pane — or one run in a terminal outside this app entirely. Renaming
+  works the same way, and says so when there is no transcript to write to yet.
+- **Entries written before this existed still restore.** A stored tab with no
+  surface is a chat tab, which is the only surface there used to be.
 
 ## Terminal
 

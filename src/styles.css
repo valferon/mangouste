@@ -1949,6 +1949,19 @@ select {
   font-size: 9px;
 }
 
+/* A session running as `claude` in a pty rather than in the chat pane.
+   Where a pane's status dot would be, and in the dim foreground: it says which
+   program the tab holds, which is a fact about the tab and not a state to
+   watch. Sized off the dot so the two line up down the strip. */
+.tab-terminal {
+  flex: 0 0 7px;
+  width: 7px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+}
+
 .editor-bar .actions {
   display: flex;
   gap: 6px;

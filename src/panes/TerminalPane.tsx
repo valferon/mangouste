@@ -24,6 +24,19 @@ interface TerminalPaneProps {
   focusRequest?: number;
   /** Panel-level entries appended to this pane's own right-click menu. */
   paneActions?: MenuEntry[];
+  /**
+   * A command line typed into the shell once it is up, for a pane opened to run
+   * something — `claude` for a session that runs in the terminal.
+   *
+   * Typed, deliberately, rather than handed to the spawn: `$SHELL -l -c claude`
+   * would be a shell that exits with the program, and the point of running
+   * `claude` here rather than in a pane is that it is running in a real
+   * terminal — with the rc files, the PATH and the prompt you get back when it
+   * exits. The bytes are safe to send before the shell has read anything: the
+   * pty buffers them, exactly as it does for anything typed while a command is
+   * still running.
+   */
+  launch?: string;
 }
 
 /**
@@ -95,6 +108,7 @@ export function TerminalPane({
   themeKey,
   focusRequest = 0,
   paneActions,
+  launch,
 }: TerminalPaneProps) {
   const menu = useMenu();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -128,6 +142,28 @@ export function TerminalPane({
    * `ptyWrite` behind its back.
    */
   const writeRef = useRef<((text: string) => void) | null>(null);
+  /**
+   * The launch command, read when the shell comes up rather than depended on.
+   *
+   * Out of the effect's deps on purpose: the effect below owns the pty, so a
+   * changing dep is a killed shell. What a pane was opened to run is fixed at
+   * the moment it was opened, and a ref says so.
+   */
+  const launchRef = useRef(launch);
+  useEffect(() => {
+    launchRef.current = launch;
+  }, [launch]);
+  /**
+   * Whether the launch command has actually reached a pty.
+   *
+   * Not `generation === 0`: a generation of nought says this is the pane's
+   * first shell, which is not the same as saying the program ran in it. A write
+   * that loses the race with its own `pty_open` leaves the pane holding a bare
+   * shell, and gating on the generation would then refuse to try again for the
+   * life of the tab. What must not happen twice is the *run*, so that is what
+   * is tracked.
+   */
+  const launchedRef = useRef(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -188,6 +224,13 @@ export function TerminalPane({
         return;
       }
       void ptyWrite(id, encodeBase64(encoder.encode(text))).catch(() => {
+        // Only once the open has landed does a rejection mean a dead shell. The
+        // Rust side answers a write for an unknown id exactly as it answers one
+        // for a shell that exited, and a keystroke into a pane whose `pty_open`
+        // is still in flight is the former: type-ahead, not a corpse. Believing
+        // it would poison the pane before its shell ever spoke, and swallow the
+        // launch command with it.
+        if (instance === null) return;
         deadRef.current = true;
         sayDead();
       });
@@ -197,6 +240,9 @@ export function TerminalPane({
     const resizePty = (cols: number, rows: number) => {
       if (deadRef.current) return;
       void ptyResize(id, cols, rows).catch(() => {
+        // Same race as `writePty`: before the open lands, "no such terminal" is
+        // the truth about the reply, not about the shell.
+        if (instance === null) return;
         deadRef.current = true;
       });
     };
@@ -327,9 +373,24 @@ export function TerminalPane({
           }
         }
         pendingData = [];
+        // Once per pane, and only while this effect still owns it. Enter into a
+        // dead pane promises a shell, not another run of the program, so the
+        // latch is set here and never cleared. What it is not is `generation
+        // === 0`, which would also swallow the run when the write itself was
+        // lost. `disposed` is what keeps StrictMode's discarded first mount
+        // from typing into the pty its replacement has already taken over.
+        const command = launchRef.current;
+        if (!disposed && command && !launchedRef.current) {
+          launchedRef.current = true;
+          writePty(`${command}\r`);
+        }
         return info.instance;
       })
       .catch((e) => {
+        // A discarded mount's failure is not this pane's: StrictMode tears the
+        // first one down mid-open, and its rejection would otherwise mark the
+        // live successor dead and print over it.
+        if (disposed) return null;
         pendingData = [];
         // No PTY was ever opened, so treat the pane as dead — and count the
         // failure line as the one message, rather than adding a second.

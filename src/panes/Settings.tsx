@@ -1,8 +1,11 @@
+import type { SessionSurface } from "../lib/sessionSurface";
 import { SYSTEM, themesOfKind, type Theme } from "../lib/theme";
 
 interface SettingsProps {
   theme: Theme;
   onTheme: (theme: Theme) => void;
+  sessionSurface: SessionSurface;
+  onSessionSurface: (surface: SessionSurface) => void;
   permissionMode: string;
   onPermissionMode: (mode: string) => void;
   restoreTabs: boolean;
@@ -17,6 +20,8 @@ const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"]
 export function Settings({
   theme,
   onTheme,
+  sessionSurface,
+  onSessionSurface,
   permissionMode,
   onPermissionMode,
   restoreTabs,
@@ -70,6 +75,33 @@ export function Settings({
         </p>
 
         <div className="setting-row">
+          <label>Sessions run in</label>
+          <div className="segmented">
+            <button
+              data-active={sessionSurface === "chat"}
+              onClick={() => onSessionSurface("chat")}
+            >
+              app chat
+            </button>
+            <button
+              data-active={sessionSurface === "terminal"}
+              onClick={() => onSessionSurface("terminal")}
+            >
+              terminal
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          <code>terminal</code> puts <code>claude</code> itself in the session tab,
+          in place of the chat pane — its own prompts, <code>/</code> commands,
+          statusline and config, in a real shell. Same strip, same tabs; the
+          terminal panel at the bottom is untouched and stays for shells. Applies
+          to the next session opened, not to tabs already up. The Sessions rail
+          watches both: it reads the transcripts on disk and does not care which
+          one wrote them.
+        </p>
+
+        <div className="setting-row">
           <label>Default permission mode</label>
           <select value={permissionMode} onChange={(e) => onPermissionMode(e.target.value)}>
             {PERMISSION_MODES.map((mode) => (
@@ -80,8 +112,9 @@ export function Settings({
           </select>
         </div>
         <p className="setting-hint">
-          Applied to newly started sessions. <code>default</code> stalls in this app:
-          permission prompts are not answered yet.
+          Applied to newly started sessions in the chat pane. <code>default</code> stalls
+          in this app: permission prompts are not answered yet. Sessions run in the
+          terminal are left alone — nothing here is passed to <code>claude</code> there.
         </p>
 
         <div className="setting-row">

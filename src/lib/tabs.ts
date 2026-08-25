@@ -5,6 +5,8 @@
  * without importing the component that owns the tab list.
  */
 
+import type { SessionSurface } from "./sessionSurface";
+
 /**
  * A chat tab is one `claude` process.
  *
@@ -16,10 +18,25 @@ export interface ChatTab {
   /** Unique tab id, and the chat id the backend routes events by. */
   id: string;
   cwd: string;
-  /** Resume target. `null` until the CLI reports the uuid for a fresh session. */
+  /**
+   * Resume target.
+   *
+   * `null` until the CLI reports the uuid, for a chat-surface tab. A terminal
+   * one is minted with its id already set: `claude` in a pty tells this app
+   * nothing, so the session is named up front with `--session-id` or the tab
+   * could never be labelled, renamed or resumed.
+   */
   sessionId: string | null;
   /** Transcript path backing `sessionId`, for rendering history on open. */
   resumeFile: string | null;
+  /**
+   * Which program the tab holds: this app's chat pane, or `claude` in a pty.
+   *
+   * Fixed when the tab is opened, not read live off the preference. Switching
+   * the setting decides where the *next* session goes; re-pointing a tab that
+   * is already holding a live process at a different renderer would orphan it.
+   */
+  surface: SessionSurface;
 }
 
 /**
@@ -71,7 +88,14 @@ export function tabInRepo(tab: Tab, repo: string): boolean {
  * leave stale labels frozen in the store.
  */
 export type StoredTab =
-  | { kind: "chat"; cwd: string; sessionId: string; resumeFile: string | null }
+  | {
+      kind: "chat";
+      cwd: string;
+      sessionId: string;
+      resumeFile: string | null;
+      /** Absent in entries written before sessions could run in a terminal. */
+      surface?: SessionSurface;
+    }
   | { kind: "file"; cwd: string; path: string }
   | { kind: "dashboard" };
 
@@ -80,11 +104,17 @@ export function toStoredTab(tab: Tab): StoredTab | null {
   switch (tab.kind) {
     case "chat":
       if (tab.sessionId === null) return null;
+      // A terminal tab knows its id from the moment it is minted, so the id
+      // alone does not mean there is a session: the transcript does. Restoring
+      // one without it would relaunch as `--resume` against something `claude`
+      // never wrote, which is an error message where a conversation should be.
+      if (tab.surface === "terminal" && tab.resumeFile === null) return null;
       return {
         kind: "chat",
         cwd: tab.cwd,
         sessionId: tab.sessionId,
         resumeFile: tab.resumeFile,
+        surface: tab.surface,
       };
     case "file":
       return { kind: "file", cwd: tab.cwd, path: tab.path };
@@ -114,7 +144,13 @@ export function isStoredTab(value: unknown): value is StoredTab {
       return (
         typeof value.cwd === "string" &&
         typeof value.sessionId === "string" &&
-        (value.resumeFile === null || typeof value.resumeFile === "string")
+        (value.resumeFile === null || typeof value.resumeFile === "string") &&
+        // Absent is the old shape, which was always a chat pane. A value that
+        // is present and is not a surface is corrupt, and drops the entry
+        // rather than restoring a tab with no renderer.
+        (value.surface === undefined ||
+          value.surface === "chat" ||
+          value.surface === "terminal")
       );
     case "file":
       // A file entry written before tabs were repo-owned has no cwd, so it
@@ -169,6 +205,7 @@ export function restoreTab(stored: StoredTab): Tab {
         cwd: stored.cwd,
         sessionId: stored.sessionId,
         resumeFile: stored.resumeFile,
+        surface: stored.surface ?? "chat",
       };
     case "file":
       return {

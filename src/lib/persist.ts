@@ -50,6 +50,7 @@ export const KEYS = {
     usageEnabled: "mangouste.usageEnabled",
     cliDebug: "mangouste.cliDebug",
     restoreTabs: "mangouste.restoreTabs",
+    sessionSurface: "mangouste.sessionSurface",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",

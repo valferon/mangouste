@@ -17,6 +17,7 @@ const chatTab: Tab = {
   cwd: "/repos/mangouste",
   sessionId: "abc-123",
   resumeFile: "/home/v/.claude/projects/x/abc-123.jsonl",
+  surface: "chat",
 };
 
 const fileTab: Tab = {
@@ -52,8 +53,32 @@ describe("toStoredTab", () => {
       cwd: "/repos/mangouste",
       sessionId: null,
       resumeFile: null,
+      surface: "chat",
     };
     expect(toStoredTab(fresh)).toBeNull();
+  });
+
+  it("drops a terminal tab claude has not written a transcript for", () => {
+    // A terminal tab has its id from the moment it is minted, so unlike a pane
+    // the id is not evidence of a session. Restoring one without a transcript
+    // would relaunch as `--resume` against something that does not exist.
+    const untouched: Tab = {
+      ...chatTab,
+      id: "chat|/repos/mangouste|new-2",
+      resumeFile: null,
+      surface: "terminal",
+    };
+    expect(toStoredTab(untouched)).toBeNull();
+  });
+
+  it("keeps a terminal tab that has one, and remembers the surface", () => {
+    expect(toStoredTab({ ...chatTab, surface: "terminal" })).toEqual({
+      kind: "chat",
+      cwd: chatTab.cwd,
+      sessionId: "abc-123",
+      resumeFile: chatTab.resumeFile,
+      surface: "terminal",
+    });
   });
 
   it("keeps a chat tab with a null resumeFile, which is a real state", () => {
@@ -65,6 +90,7 @@ describe("toStoredTab", () => {
       cwd: chatTab.cwd,
       sessionId: "abc-123",
       resumeFile: null,
+      surface: "chat",
     });
   });
 });
@@ -124,6 +150,21 @@ describe("isStoredTab", () => {
     expect(isStoredTab({ ...goodChat, resumeFile: "/tmp/t.jsonl" })).toBe(true);
     expect(isStoredTab({ kind: "file", cwd: "/a", path: "/a/b.ts" })).toBe(true);
     expect(isStoredTab({ kind: "dashboard" })).toBe(true);
+  });
+
+  it("takes an entry with no surface, which is the shape before terminals", () => {
+    // Absent means the only surface there used to be. Dropping those entries
+    // would empty the strip of everyone who upgrades.
+    expect(isStoredTab(goodChat)).toBe(true);
+    expect(restoreTab(goodChat as StoredTab)).toMatchObject({ surface: "chat" });
+  });
+
+  it("accepts either surface, and rejects a value that is neither", () => {
+    expect(isStoredTab({ ...goodChat, surface: "chat" })).toBe(true);
+    expect(isStoredTab({ ...goodChat, surface: "terminal" })).toBe(true);
+    // A tab with no renderer is worse than a missing tab.
+    expect(isStoredTab({ ...goodChat, surface: "pane" })).toBe(false);
+    expect(isStoredTab({ ...goodChat, surface: null })).toBe(false);
   });
 
   it("rejects a kind this build does not know", () => {

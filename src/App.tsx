@@ -14,6 +14,7 @@ import {
   type TerminalActions,
   type TerminalDock,
 } from "./panes/TerminalPanel";
+import { TerminalPane } from "./panes/TerminalPane";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
@@ -82,6 +83,12 @@ import {
   toggleFullScreen,
 } from "./lib/viewport";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  claudeLaunch,
+  mintSessionId,
+  SESSION_SURFACES,
+  type SessionSurface,
+} from "./lib/sessionSurface";
 
 /* Persisted keys all come from the catalogue in `lib/persist.ts`, so a reset or
    a migration can enumerate them without grepping for string literals. */
@@ -91,6 +98,7 @@ const MODEL_KEY = KEYS.prefs.model;
 const ACTIVE_REPO_KEY = KEYS.state.activeRepo;
 const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
 const TERMINAL_DOCK_KEY = KEYS.state.terminalDock;
+const SESSION_SURFACE_KEY = KEYS.prefs.sessionSurface;
 
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "search" | "git";
@@ -234,6 +242,31 @@ function Workbench() {
   /** `--model` alias new panes spawn with; "default" leaves the flag off. */
   const [modelAlias, setModelAlias] = useState(() => readString(MODEL_KEY, "default"));
   /**
+   * What a session tab holds: this app's chat pane, or `claude` in a pty.
+   *
+   * A preference rather than a per-repo flag — it is a statement about which
+   * program you want to be talking to, and that does not change between trees.
+   * It decides the surface of the *next* session only: every tab records the one
+   * it was opened with, because re-pointing a tab already holding a live process
+   * at a different renderer would orphan it.
+   */
+  const [sessionSurface, setSessionSurface] = useState<SessionSurface>(() =>
+    readEnum<SessionSurface>(SESSION_SURFACE_KEY, SESSION_SURFACES, "chat"),
+  );
+  useEffect(() => {
+    writeString(SESSION_SURFACE_KEY, sessionSurface);
+  }, [sessionSurface]);
+  /**
+   * Mirror of the preference, for the callbacks that must keep a stable identity.
+   *
+   * `openSessionTab` is one: the memoised sidebar panes take it as a prop, and
+   * rebuilding it whenever a setting changes would re-render them for nothing.
+   */
+  const surfaceRef = useRef(sessionSurface);
+  useEffect(() => {
+    surfaceRef.current = sessionSurface;
+  }, [sessionSurface]);
+  /**
    * Whether the last run's tabs come back on launch.
    *
    * Gates only the read in the tab initialisers below — the strip is recorded
@@ -293,10 +326,21 @@ function Workbench() {
   const [coldTabs, setColdTabs] = useState<Set<string>>(
     () => new Set(tabs.filter((tab) => tab.kind === "chat").map((tab) => tab.id)),
   );
+  /**
+   * Bumped when the tab in front changes, for the terminal panes in the strip.
+   *
+   * Two things happen on exactly that event and nothing else: a pane that was
+   * `display: none` has a measurable box again and its last `fit()` was a no-op
+   * against a zero one, and the pane the user just picked should hold the caret
+   * so what they type reaches `claude` rather than nothing. One counter, because
+   * one event.
+   */
+  const [tabActivation, setTabActivation] = useState(0);
   // Warming is one-way: the first activation pays the spawn and the transcript
   // read, and nothing puts a pane back to sleep — ChatPane's own latch is
   // monotonic for the same reason.
   useEffect(() => {
+    setTabActivation((token) => token + 1);
     setColdTabs((current) => {
       if (!current.has(activeTab)) return current;
       const next = new Set(current);
@@ -820,10 +864,44 @@ function Workbench() {
         const match = group.sessions.find((session) => session.id === tab.sessionId);
         if (match?.title) return match.title;
       }
+      // A terminal tab has its id from the moment it is minted, so an id is not
+      // evidence of a session: until `claude` has written the transcript there
+      // is nothing to name the tab after, and a uuid is not a name.
+      if (tab.surface === "terminal" && !tab.resumeFile) return "New session";
       return tab.sessionId.slice(0, 8);
     },
     [sessionGroups, titleOverrides],
   );
+
+  /**
+   * A fresh session tab, on whichever surface the setting names.
+   *
+   * One place, because there are three: the new-session action, the per-repo
+   * seed, and the replacement made when a repo's last session is closed. All
+   * three used to inline the same literal, and a fourth field is exactly the
+   * kind of thing that gets added to two of them.
+   *
+   * A terminal tab is minted with its id already set. `claude` in a pty reports
+   * nothing back, so the alternative is a tab that never learns which session it
+   * is holding — no label, no rename, no resume, no row in the rail to match. The
+   * id is handed to `--session-id` and the CLI writes its transcript under it.
+   */
+  const newSessionTab = useCallback((cwd: string): ChatTab => {
+    // The ref, not the state: this callback is a dep of the per-repo seed and of
+    // `forceCloseTab`, and both of those effects read as \"a repo changed\". Closing
+    // over the state would make a flick of the setting a repo change too — the
+    // seed would re-run, pull focus out of whatever file tab was in front, warm a
+    // cold pane, and in a repo with no session left mint one nobody asked for.
+    const surface = surfaceRef.current;
+    return {
+      kind: "chat",
+      id: `chat|${cwd}|new-${(newSessionCounter.current += 1)}`,
+      cwd,
+      sessionId: surface === "terminal" ? mintSessionId() : null,
+      resumeFile: null,
+      surface,
+    };
+  }, []);
 
   /** Focus the tab for this session, opening one if it is not already up. */
   const openSessionTab = useCallback((cwd: string, sessionId: string, file: string | null) => {
@@ -841,23 +919,24 @@ function Workbench() {
         cwd,
         sessionId,
         resumeFile: file,
+        // The surface is this app's choice, not the session's: a transcript is a
+        // transcript, and `claude --resume` reads the ones the pane wrote as
+        // readily as the pane reads the ones `claude` did.
+        surface: surfaceRef.current,
       };
       setActiveTab(tab.id);
       return [...current, tab];
     });
   }, []);
 
-  const openNewChatTab = useCallback((cwd: string) => {
-    const tab: ChatTab = {
-      kind: "chat",
-      id: `chat|${cwd}|new-${(newSessionCounter.current += 1)}`,
-      cwd,
-      sessionId: null,
-      resumeFile: null,
-    };
-    setTabs((current) => [...current, tab]);
-    setActiveTab(tab.id);
-  }, []);
+  const openNewChatTab = useCallback(
+    (cwd: string) => {
+      const tab = newSessionTab(cwd);
+      setTabs((current) => [...current, tab]);
+      setActiveTab(tab.id);
+    },
+    [newSessionTab],
+  );
 
   // Every repo needs at least one chat tab, or switching to it shows nothing.
   useEffect(() => {
@@ -878,17 +957,11 @@ function Workbench() {
         );
         return current;
       }
-      const tab: ChatTab = {
-        kind: "chat",
-        id: `chat|${activeRepo}|new-${(newSessionCounter.current += 1)}`,
-        cwd: activeRepo,
-        sessionId: null,
-        resumeFile: null,
-      };
+      const tab = newSessionTab(activeRepo);
       setActiveTab((active) => (repoIndependent(active) ? active : tab.id));
       return [...current, tab];
     });
-  }, [activeRepo]);
+  }, [activeRepo, newSessionTab]);
 
   /**
    * Open a file under `cwd`, which is the repo whose strip will show the tab.
@@ -1101,18 +1174,12 @@ function Workbench() {
         }
         // Last chat of this repo: the seed effect only runs on a repo change,
         // so the replacement has to be made here or the centre stays blank.
-        const fresh: ChatTab = {
-          kind: "chat",
-          id: `chat|${activeRepo}|new-${(newSessionCounter.current += 1)}`,
-          cwd: activeRepo,
-          sessionId: null,
-          resumeFile: null,
-        };
+        const fresh = newSessionTab(activeRepo);
         setActiveTab(fresh.id);
         return [...next, fresh];
       });
     },
-    [activeRepo],
+    [activeRepo, newSessionTab],
   );
 
   /**
@@ -1251,11 +1318,42 @@ function Workbench() {
 
   /** The chat tab in front, if the front tab is a chat at all. */
   const activeChat = currentTab?.kind === "chat" ? currentTab : null;
+  /**
+   * Whether a chat pane of ours is what is in front.
+   *
+   * The distinction the transport state depends on: `phase` and `chatStats` are
+   * pushed by a ChatPane and by nothing else, so a front tab that is not one —
+   * a session running in a pty, a file, the dashboard — has nobody to describe
+   * it and nobody to correct what the last pane said.
+   */
+  const paneChat = activeChat?.surface === "chat" ? activeChat : null;
 
   // Follow the front tab, so the status panel describes what you are looking at.
   useEffect(() => {
     setLiveSessionId(activeChat?.sessionId ?? null);
   }, [activeChat?.sessionId]);
+
+  /**
+   * Clear the transport state when nothing in front is going to push it.
+   *
+   * Switching between chat panes corrects itself: each pane re-pushes when its
+   * `onPhase`/`onStats` prop flips to the live handler. Switching to anything
+   * else pushes nothing, so the panel would go on reporting the previous
+   * conversation — its model, its context, its spend, its phase frozen mid
+   * `streaming` — under the session id of the tab you are actually looking at.
+   * The title-sync effect above refills what the scan does know about that one.
+   */
+  useEffect(() => {
+    if (paneChat) return;
+    setPhase("idle");
+    setChatStats({
+      sessionId: activeChat?.sessionId ?? null,
+      model: null,
+      contextTokens: 0,
+      costUsd: null,
+      title: null,
+    });
+  }, [paneChat, activeChat?.sessionId]);
 
   /* ---------- menus ---------- */
 
@@ -1470,7 +1568,7 @@ function Workbench() {
         id: ID.debugLog,
         label: "Session Debug Log",
         checked: debugOpen,
-        disabled: !activeChat,
+        disabled: !paneChat,
         run: () => setDebugOpen((open) => !open),
       },
       // One command per theme, so the menu can tick the active one. Generated
@@ -1808,12 +1906,21 @@ function Workbench() {
                   onDragEnd={endDrag}
                   title={tab.kind === "file" ? tab.path : label}
                 >
-                  {tab.kind === "chat" && (
+                  {/* The dot is read off the stream, so only a pane has one.
+                      A terminal session gets a mark of its own rather than a
+                      dot stuck on "idle" forever, which would read as a status
+                      rather than as the absence of one. */}
+                  {tab.kind === "chat" && tab.surface === "chat" && (
                     <span
                       className="status-dot"
                       data-status={tabStatus[tab.id] ?? "idle"}
                       title={tabStatus[tab.id] ?? "idle"}
                     />
+                  )}
+                  {tab.kind === "chat" && tab.surface === "terminal" && (
+                    <span className="tab-terminal" title="claude, in a terminal">
+                      ❯
+                    </span>
                   )}
                   {tab.kind === "file" && dirtyFiles[tab.path] && (
                     <span className="tab-dirty" title="Unsaved changes">
@@ -1902,26 +2009,58 @@ function Workbench() {
                     display: tab.id === activeTab ? "flex" : "none",
                     flex: 1,
                     minHeight: 0,
+                    // Nothing may paint past a terminal's box: an xterm grid
+                    // measured against a stale size would otherwise spill over
+                    // whatever is below it, which is the same reason the panel
+                    // at the bottom clips.
+                    ...(tab.surface === "terminal" ? { overflow: "hidden" } : {}),
                   }}
                 >
                   <PaneBoundary label={chatLabel(tab)}>
-                  <ChatPane
-                    chatId={tab.id}
-                    cwd={tab.cwd}
-                    visible={tab.id === activeTab}
-                    cold={coldTabs.has(tab.id)}
-                    resume={tab.sessionId}
-                    resumeFile={tab.resumeFile}
-                    onSessionId={sessionIdHandlerFor(tab.id)}
-                    onOpenFile={openFileHere}
-                    onSystemMessage={setSystemMessage}
-                    onPhase={tab.id === activeTab ? setPhase : noop}
-                    onStatus={statusHandlerFor(tab.id)}
-                    onStats={tab.id === activeTab ? handleChatStats : noop}
-                    permissionMode={permissionMode}
-                    model={modelAlias}
-                    onModel={setModelAlias}
-                  />
+                  {tab.surface === "terminal" ? (
+                    /* `claude` itself, in the place the pane would have been.
+                       Not in the panel at the bottom: that one is for shells,
+                       and its tabs are numbered because that is what a shell
+                       needs. A session belongs in the strip with the rest of
+                       the work.
+
+                       Mounted on first activation rather than with the tab, so
+                       a restored strip is not eight ptys and eight `claude`
+                       processes at boot — the same bargain `cold` strikes for a
+                       pane, differing only in that a pty has nothing to do
+                       while it waits, so there is nothing to keep mounted.
+                       Once up it stays up: the session keeps running while you
+                       read another tab, as everything here does. */
+                    !coldTabs.has(tab.id) &&
+                    tab.sessionId && (
+                      <TerminalPane
+                        id={tab.id}
+                        cwd={tab.cwd}
+                        launch={claudeLaunch(tab.sessionId, tab.resumeFile)}
+                        refitToken={refitToken + tabActivation}
+                        themeKey={theme}
+                        focusRequest={tab.id === activeTab ? tabActivation : 0}
+                      />
+                    )
+                  ) : (
+                    <ChatPane
+                      chatId={tab.id}
+                      cwd={tab.cwd}
+                      visible={tab.id === activeTab}
+                      cold={coldTabs.has(tab.id)}
+                      resume={tab.sessionId}
+                      resumeFile={tab.resumeFile}
+                      onSessionId={sessionIdHandlerFor(tab.id)}
+                      onOpenFile={openFileHere}
+                      onSystemMessage={setSystemMessage}
+                      onPhase={tab.id === activeTab ? setPhase : noop}
+                      onStatus={statusHandlerFor(tab.id)}
+                      onStats={tab.id === activeTab ? handleChatStats : noop}
+                      permissionMode={permissionMode}
+                      model={modelAlias}
+                      onModel={setModelAlias}
+                    />
+                  )}
                   </PaneBoundary>
                 </div>
               ))}
@@ -2019,6 +2158,8 @@ function Workbench() {
         <Settings
           theme={theme}
           onTheme={setTheme}
+          sessionSurface={sessionSurface}
+          onSessionSurface={setSessionSurface}
           permissionMode={permissionMode}
           onPermissionMode={setPermissionMode}
           restoreTabs={restoreTabs}
@@ -2081,8 +2222,10 @@ function Workbench() {
         />
       )}
 
-      {debugOpen && activeChat && (
-        <DebugLog chatId={activeChat.id} onClose={() => setDebugOpen(false)} />
+      {/* Only a chat pane has a backend chat to log: a session in a pty talks
+          to a terminal, not through the frames this drawer reads. */}
+      {debugOpen && paneChat && (
+        <DebugLog chatId={paneChat.id} onClose={() => setDebugOpen(false)} />
       )}
 
       <div
@@ -2101,7 +2244,7 @@ function Workbench() {
               label: "Copy Session Id",
               run: () => void copyText(liveSessionId),
             },
-            activeChat && {
+            paneChat && {
               label: "Session Debug Log",
               checked: debugOpen,
               run: () => setDebugOpen((open) => !open),
@@ -2122,9 +2265,9 @@ function Workbench() {
         <span
           className="status-phase"
           data-phase={phase}
-          data-clickable={Boolean(activeChat)}
-          title={activeChat ? "Session debug log" : undefined}
-          onClick={() => activeChat && setDebugOpen((open) => !open)}
+          data-clickable={Boolean(paneChat)}
+          title={paneChat ? "Session debug log" : undefined}
+          onClick={() => paneChat && setDebugOpen((open) => !open)}
         >
           {phase}
         </span>
