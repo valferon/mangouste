@@ -414,29 +414,47 @@ fn run(bin: &Path, args: &[String], cwd: &Path, text: &str) -> Result<String, St
         .wait_with_output()
         .map_err(|e| format!("{} failed: {e}", bin.display()))?;
     // A formatter that rejected its input closes the pipe early, so a write
-    // error here is usually the parse error below saying it differently. It is
-    // only worth reporting when the run otherwise looked like a success.
+    // error here is usually one of the failures below saying it differently. It
+    // is only worth reporting once nothing else has explained the run.
     let write_failed = !matches!(writer.join(), Ok(Ok(())));
+
+    // The resolved path, not the name the candidate was written as: `run` is
+    // handed `/usr/bin/rustfmt` as often as `rustfmt`, and a message that leads
+    // with an absolute path buries what it is trying to say.
+    let name = bin
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| bin.display().to_string());
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
-            format!("{} exited {}", bin.display(), output.status)
+            format!("{name} exited {}", output.status)
         } else {
-            stderr
+            // Attributed, because a bare `error: expected one of ...` in the
+            // editor names neither the formatter nor the fact that one ran.
+            format!("{name}: {stderr}")
         });
-    }
-    if write_failed {
-        return Err(format!("{} did not read the whole buffer", bin.display()));
     }
 
     let formatted = String::from_utf8(output.stdout)
-        .map_err(|_| format!("{} returned text that is not UTF-8", bin.display()))?;
+        .map_err(|_| format!("{name} returned text that is not UTF-8"))?;
     // An empty answer to a non-empty buffer is not a format, and applying it
     // would empty the editor. Some formatters do this when handed a file type
     // they only half recognise.
+    //
+    // Checked before the write, and not after it as it once was: a formatter
+    // that exits 0 without reading stdin fails the write with EPIPE *and*
+    // returns nothing, and which of the two is observed comes down to whether
+    // the buffer fitted in the pipe before the child exited. It read as a race
+    // — passing on a developer machine, failing in CI — and the empty output is
+    // the more useful half of it anyway, since that is what would empty the
+    // editor.
     if formatted.is_empty() && !text.is_empty() {
-        return Err(format!("{} produced no output", bin.display()));
+        return Err(format!("{name} produced no output"));
+    }
+    if write_failed {
+        return Err(format!("{name} did not read the whole buffer"));
     }
     Ok(formatted)
 }
@@ -770,10 +788,15 @@ mod tests {
         assert!(formatted.text.contains("\"a\": 1"), "{:?}", formatted.text);
         assert!(formatted.changed);
 
-        let refused = format_text(dir.join("a.rs").to_string_lossy().into_owned(), "x".into());
-        if let Err(message) = refused {
-            assert!(message.contains("rustfmt"), "{message}");
-        }
+        // `x` is not Rust, so this refuses either way — with rustfmt's own parse
+        // error where rustfmt is installed, and with the advice to install it
+        // where it is not. Both have to name rustfmt: the machine running the
+        // tests decides which branch is taken, and an unattributed `error:
+        // expected one of ...` in the editor names neither the formatter nor the
+        // fact that one ran.
+        let message = format_text(dir.join("a.rs").to_string_lossy().into_owned(), "x".into())
+            .expect_err("x is not Rust");
+        assert!(message.contains("rustfmt"), "{message}");
     }
 
     /// The whole path, through a formatter that is really installed. Ignored by
