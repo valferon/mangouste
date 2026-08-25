@@ -114,12 +114,23 @@ export function TerminalPanel({
   const menu = useMenu();
   const [groups, setGroups] = useState<Record<string, RepoTerminals>>({});
   /**
-   * Bumped only by a user action that should move the caret into a terminal.
+   * The pane a user action asked for the caret in, and how many asks ago.
    *
-   * A pane's focus effect keys on this, so switching repos or first paint does
-   * not pull focus out of the chat, while opening a tab or a split does.
+   * The slot is half the state, not decoration. A bare counter has to be handed
+   * to the panes through "the active one gets it", and "which pane is active"
+   * changes when nobody asked for anything — a repo switch, the panel being
+   * shown — so every pane that gained or lost that status saw its prop move and
+   * took the caret out of the chat. Naming the target means only the pane that
+   * was actually asked for ever sees a change.
    */
-  const [focusSeq, setFocusSeq] = useState(0);
+  const [focusTarget, setFocusTarget] = useState<{ seq: number; slot: string | null }>({
+    seq: 0,
+    slot: null,
+  });
+  /** Ask for the caret in one pane. `null` is an ask that lost its target. */
+  const focusSlot = useCallback((slot: string | null) => {
+    setFocusTarget((current) => ({ seq: current.seq + 1, slot }));
+  }, []);
   /**
    * Bumped whenever a pane goes from hidden to shown, since a `display: none`
    * box has no measurable size and its last fit() was therefore a no-op.
@@ -143,25 +154,30 @@ export function TerminalPanel({
   const addTab = useCallback(() => {
     if (!repo) return;
     if (!visible) onRequestShow();
-    setFocusSeq((seq) => seq + 1);
+    // Minted out here so the focus ask can name it. The updater may still
+    // decline to add it, and an ask for a pane that never appears focuses
+    // nothing, which is the same as not asking.
+    const tab = makeTab();
+    focusSlot(tab.activeSlot);
     setGroups((current) => {
       const existing = current[repo];
-      // No group yet means the effect above is about to make one; a second tab
-      // on top of that would be a shell the click did not ask for.
-      if (!existing) return current;
-      const tab = makeTab();
+      // No group yet: this tab is the group. Bailing out instead would leave the
+      // seed effect to make one out of a tab this click never named, and the
+      // caret would stay in the chat — while adding a tab on top of that one
+      // would be a shell the click did not ask for either.
+      if (!existing) return { ...current, [repo]: { tabs: [tab], activeTab: tab.id } };
       return { ...current, [repo]: { tabs: [...existing.tabs, tab], activeTab: tab.id } };
     });
-  }, [repo, visible, onRequestShow]);
+  }, [repo, visible, onRequestShow, focusSlot]);
 
   const splitTab = useCallback(() => {
     if (!repo) return;
     if (!visible) onRequestShow();
-    setFocusSeq((seq) => seq + 1);
+    const slot = makeSlot();
+    focusSlot(slot.id);
     setGroups((current) => {
       const existing = current[repo];
       if (!existing) return current;
-      const slot = makeSlot();
       const tabs = existing.tabs.map((tab) => {
         if (tab.id !== existing.activeTab) return tab;
         // Inserted after the pane being split, as a split of that pane rather
@@ -173,17 +189,18 @@ export function TerminalPanel({
       });
       return { ...current, [repo]: { ...existing, tabs } };
     });
-  }, [repo, visible, onRequestShow]);
+  }, [repo, visible, onRequestShow, focusSlot]);
 
   const selectTab = useCallback((tabId: string) => {
     if (!repo) return;
-    setFocusSeq((seq) => seq + 1);
+    const picked = groups[repo]?.tabs.find((tab) => tab.id === tabId);
+    focusSlot(picked?.activeSlot ?? null);
     setGroups((current) => {
       const existing = current[repo];
       if (!existing || existing.activeTab === tabId) return current;
       return { ...current, [repo]: { ...existing, activeTab: tabId } };
     });
-  }, [repo]);
+  }, [repo, groups, focusSlot]);
 
   const selectSlot = useCallback((tabId: string, slotId: string) => {
     if (!repo) return;
@@ -224,7 +241,6 @@ export function TerminalPanel({
           : slots[0].id;
         tabs.push({ ...tab, slots, activeSlot });
       }
-      setFocusSeq((seq) => seq + 1);
       if (tabs.length === 0) {
         // Dropping the group and hiding the panel together: the effect above
         // only re-creates a group when `visible` or `repo` changes, so a group
@@ -240,9 +256,12 @@ export function TerminalPanel({
       const activeTab = tabs.some((tab) => tab.id === existing.activeTab)
         ? existing.activeTab
         : tabs[0].id;
+      // The caret was in the pane that just closed, so it goes to whichever
+      // pane is now in front rather than back to the chat.
+      focusSlot(tabs.find((tab) => tab.id === activeTab)?.activeSlot ?? null);
       setGroups((current) => ({ ...current, [repo]: { tabs, activeTab } }));
     },
-    [repo, groups, onClose],
+    [repo, groups, onClose, focusSlot],
   );
 
   const closeSlot = useCallback(
@@ -458,7 +477,9 @@ export function TerminalPanel({
                               cwd={groupRepo}
                               refitToken={refitToken + showToken}
                               themeKey={themeKey}
-                              focusRequest={slotActive ? focusSeq : 0}
+                              focusRequest={
+                                focusTarget.slot === slot.id ? focusTarget.seq : 0
+                              }
                               paneActions={[
                                 "separator",
                                 ...barMenu(tab.id),
