@@ -208,8 +208,11 @@ pub struct FileText {
     pub modified_ms: u64,
 }
 
-/// Shared body of `read_text_file` and `read_text_file_meta`.
-fn read_text(path: &Path, max_bytes: Option<u64>) -> Result<FileText, String> {
+/// Shared body of `read_text_file` and `read_text_file_meta`, and the one reader
+/// the find-and-replace sweep opens files through: what the editor refuses to
+/// show — oversized, binary, not a regular file — is exactly what a repo-wide
+/// search has no business reading either.
+pub(crate) fn read_text(path: &Path, max_bytes: Option<u64>) -> Result<FileText, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let max_bytes = max_bytes.unwrap_or(READ_BUDGET_BYTES);
     // `len()` is not a size guard on its own, because only regular files have a
@@ -279,13 +282,28 @@ pub fn write_text_file(
     content: String,
     expected_modified_ms: Option<u64>,
 ) -> Result<u64, String> {
+    save_text(&path, &content, expected_modified_ms)
+}
+
+/// Body of `write_text_file`, shared with the find-and-replace writer.
+///
+/// Every guarantee a save makes lives here and nowhere else: the mtime check,
+/// the link resolution, the carried mode, the temp-file-and-rename. A second
+/// writer with its own copy of this would be a second chance to get one of them
+/// wrong, and the one that matters most — refusing a stale write — is invisible
+/// when it is missing.
+pub(crate) fn save_text(
+    path: &str,
+    content: &str,
+    expected_modified_ms: Option<u64>,
+) -> Result<u64, String> {
     if content.len() as u64 > READ_BUDGET_BYTES {
         return Err(format!("too large to save: {} bytes", content.len()));
     }
     // Resolve links before touching anything: `metadata` follows a symlink, so
     // without this the rename below would replace the *link* with a regular
     // file and lose it. Also rejects a path whose parent no longer exists.
-    let target = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
     let metadata = std::fs::metadata(&target).map_err(|e| e.to_string())?;
     // Same reasoning as the read guard: a device or FIFO would be written
     // *through*, and a directory cannot be replaced by a rename.

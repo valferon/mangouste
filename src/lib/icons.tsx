@@ -55,6 +55,21 @@ export function SourceControlIcon(props: IconProps) {
   );
 }
 
+/**
+ * Find-and-replace glyph for the rail: a magnifier over the arrow that puts
+ * something back. Distinct from `SearchIcon`, which filters a list in place and
+ * changes nothing.
+ */
+export function FindReplaceIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="6.2" cy="6.2" r="3.9" />
+      <path d="M9.1 9.1l2.4 2.4" />
+      <path d="M9.4 14h4.2M13.6 14l-1.5-1.5M13.6 14l-1.5 1.5" />
+    </Icon>
+  );
+}
+
 /** Branch glyph for the current-HEAD chip. */
 export function BranchIcon(props: IconProps) {
   return (

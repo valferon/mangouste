@@ -15,6 +15,7 @@ import { CHORD } from "../lib/keybindings";
 import type { MenuEntry } from "../lib/menuModel";
 import { relativePath } from "../lib/paths";
 import type { Tab } from "../lib/tabs";
+import { themesOfKind } from "../lib/theme";
 import type { BarMenu } from "./MenuBar";
 
 /**
@@ -33,18 +34,18 @@ export const ID = {
   settings: "file.settings",
   exit: "file.exit",
 
+  formatDocument: "edit.formatDocument",
   copyActivePath: "edit.copyActivePath",
   copySessionId: "edit.copySessionId",
 
   explorer: "view.explorer",
+  findReplace: "view.findReplace",
   sourceControl: "view.sourceControl",
   dashboard: "view.dashboard",
   toggleSidebar: "view.toggleSidebar",
   toggleTerminal: "view.toggleTerminal",
   debugLog: "view.debugLog",
   themeSystem: "view.theme.system",
-  themeLight: "view.theme.light",
-  themeDark: "view.theme.dark",
   zoomIn: "view.zoomIn",
   zoomOut: "view.zoomOut",
   zoomReset: "view.zoomReset",
@@ -60,6 +61,9 @@ export const ID = {
   about: "help.about",
 } as const;
 
+/** The command id that selects one theme. Shared with the registry in App. */
+export const themeCommandId = (id: string): string => `view.theme.${id}`;
+
 /** A row for one command. Overrides are for the rare label tweak in context. */
 type Rows = readonly Command[];
 
@@ -68,13 +72,15 @@ const entry = (commands: Rows, id: string): MenuEntry => commandEntry(byId(comma
 /**
  * View, shared by the menu bar and a right-click on the activity rail.
  *
- * The two theme and three zoom rows are commands like everything else, which is
- * what keeps "Reset Zoom (125%)" — whose label carries live state — out of this
- * file entirely.
+ * The theme and zoom rows are commands like everything else, which is what
+ * keeps "Reset Zoom (125%)" — whose label carries live state — out of this file
+ * entirely. The theme rows are generated from the same list the settings pane
+ * reads, so adding a theme is a regeneration and not an edit here.
  */
 export function viewEntries(commands: Rows): MenuEntry[] {
   return [
     entry(commands, ID.explorer),
+    entry(commands, ID.findReplace),
     entry(commands, ID.sourceControl),
     entry(commands, ID.dashboard),
     "separator",
@@ -83,11 +89,13 @@ export function viewEntries(commands: Rows): MenuEntry[] {
     entry(commands, ID.debugLog),
     "separator",
     {
-      label: "Appearance",
+      label: "Color Theme",
       items: [
         entry(commands, ID.themeSystem),
-        entry(commands, ID.themeLight),
-        entry(commands, ID.themeDark),
+        "separator",
+        ...themesOfKind("dark").map((theme) => entry(commands, themeCommandId(theme.id))),
+        "separator",
+        ...themesOfKind("light").map((theme) => entry(commands, themeCommandId(theme.id))),
       ],
     },
     {
@@ -164,6 +172,8 @@ export function buildBarMenus(commands: Rows): BarMenu[] {
       label: "Edit",
       items: () => [
         "editing",
+        "separator",
+        entry(commands, ID.formatDocument),
         "separator",
         entry(commands, ID.copyActivePath),
         entry(commands, ID.copySessionId),
@@ -242,8 +252,11 @@ export function tabMenu(tab: Tab, ctx: TabMenuContext): MenuEntry[] {
     },
     file && { label: "Copy Path", run: () => void copyText(file.path) },
     file && {
+      // Relative to the tab's own repo, not the one in front: the two are the
+      // same for a visible tab, and `file.cwd` cannot drift out of step with
+      // whichever repo the strip is showing.
       label: "Copy Relative Path",
-      run: () => void copyText(relativePath(ctx.activeRepo, file.path)),
+      run: () => void copyText(relativePath(file.cwd, file.path)),
     },
     file && { label: "Reveal in File Manager", run: () => void revealPath(file.path) },
     "separator",

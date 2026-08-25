@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onSessionsChanged, statsSummary } from "../lib/ipc";
+import { daysInRange, rangeLabel, RANGES, type Range } from "../lib/dayRange";
 import { ArchiveIcon, RefreshIcon, RepoIcon, StatusGlyph } from "../lib/icons";
 import { copyText } from "../lib/editing";
 import { revealPath } from "../lib/ipc";
@@ -27,9 +28,6 @@ interface DashboardProps {
 /** Refreshes coalesce: a streaming turn fires the watcher every 1.5s. */
 const REFRESH_THROTTLE_MS = 20_000;
 
-/** Day windows for the activity chart. `0` means every day on record. */
-const RANGES = [30, 90, 0] as const;
-type Range = (typeof RANGES)[number];
 type Metric = "cost" | "tokens";
 type SortKey = "recent" | "cost" | "tokens" | "turns";
 
@@ -127,7 +125,7 @@ function ShareBar({ value, max, title }: { value: number; max: number; title: st
  * them compresses a quiet fortnight into nothing and lies about the cadence.
  * Only the peak is labelled — a number on every bar goes unread.
  */
-function DayChart({ days, metric }: { days: DayStat[]; metric: Metric }) {
+function DayChart({ days, metric, range }: { days: DayStat[]; metric: Metric; range: Range }) {
   const value = useCallback(
     (day: DayStat) => (metric === "cost" ? day.tokens.costUsd : day.tokens.total),
     [metric],
@@ -151,7 +149,15 @@ function DayChart({ days, metric }: { days: DayStat[]; metric: Metric }) {
   );
   const peakDay = filled.find((slot) => slot.stat && value(slot.stat) === peak);
 
-  if (filled.length === 0) return <div className="empty-note">No dated turns yet.</div>;
+  if (filled.length === 0) {
+    return (
+      <div className="empty-note">
+        {range === 0
+          ? "No dated turns yet."
+          : `Nothing in the last ${range === 1 ? "day" : `${range} days`}.`}
+      </div>
+    );
+  }
 
   const label = (n: number) => (metric === "cost" ? usd(n) : compact(n));
 
@@ -162,7 +168,11 @@ function DayChart({ days, metric }: { days: DayStat[]; metric: Metric }) {
         <span>{label(peak / 2)}</span>
         <span>0</span>
       </div>
-      <div className="chart-plot" data-dense={filled.length > 120 || undefined}>
+      <div
+        className="chart-plot"
+        data-dense={filled.length > 120 || undefined}
+        data-sparse={filled.length <= 10 || undefined}
+      >
         {filled.map((slot) => {
           const amount = slot.stat ? value(slot.stat) : 0;
           const height = peak > 0 ? (amount / peak) * 100 : 0;
@@ -321,12 +331,7 @@ export const Dashboard = memo(function Dashboard({
     return map;
   }, [groups]);
 
-  const days = useMemo(() => {
-    if (!stats) return [];
-    if (range === 0) return stats.days;
-    const cutoff = new Date(Date.now() - range * 86_400_000).toISOString().slice(0, 10);
-    return stats.days.filter((day) => day.day >= cutoff);
-  }, [stats, range]);
+  const days = useMemo(() => (stats ? daysInRange(stats.days, range) : []), [stats, range]);
 
   /** Totals over the charted window, so the chart and its caption agree. */
   const windowTotals = useMemo(() => {
@@ -564,7 +569,7 @@ export const Dashboard = memo(function Dashboard({
                   data-active={range === option}
                   onClick={() => setRange(option)}
                 >
-                  {option === 0 ? "all" : `${option}d`}
+                  {rangeLabel(option)}
                 </button>
               ))}
             </div>
@@ -573,7 +578,7 @@ export const Dashboard = memo(function Dashboard({
               {compact(windowTotals.turns)} turns
             </span>
           </div>
-          <DayChart days={days} metric={metric} />
+          <DayChart days={days} metric={metric} range={range} />
         </div>
 
         <div className="dash-section">

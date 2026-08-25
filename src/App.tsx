@@ -5,6 +5,7 @@ import { Dashboard } from "./panes/Dashboard";
 import { FileTree } from "./panes/FileTree";
 import { GitPane } from "./panes/GitPane";
 import { QuickOpen } from "./panes/QuickOpen";
+import { SearchPane } from "./panes/SearchPane";
 import { Settings } from "./panes/Settings";
 import { StatusPanel, type ChatStats } from "./panes/StatusPanel";
 import { SessionsPane } from "./panes/SessionsPane";
@@ -22,6 +23,7 @@ import {
   buildBarMenus,
   ID,
   tabMenu,
+  themeCommandId,
   viewEntries,
   type TabMenuContext,
 } from "./panes/menus";
@@ -37,7 +39,13 @@ import {
 } from "./lib/ipc";
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
-import { FilesIcon, MongooseLogo, PencilIcon, SourceControlIcon } from "./lib/icons";
+import {
+  FilesIcon,
+  FindReplaceIcon,
+  MongooseLogo,
+  PencilIcon,
+  SourceControlIcon,
+} from "./lib/icons";
 import { claimedByShell, runChord, type Command } from "./lib/commands";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
@@ -54,11 +62,12 @@ import {
 } from "./lib/persist";
 import { installPrimarySelectionBridge } from "./lib/primary";
 import { SessionFlagsProvider } from "./lib/sessionFlagsContext";
-import { applyTheme, loadTheme, type Theme } from "./lib/theme";
+import { SYSTEM, THEME_LIST, applyTheme, loadTheme, type Theme } from "./lib/theme";
 import {
   cleanStoredTabs,
   restoreTab,
   storedTabId,
+  tabInRepo,
   toStoredTab,
   type ChatTab,
   type Tab,
@@ -84,17 +93,45 @@ const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
 const TERMINAL_DOCK_KEY = KEYS.state.terminalDock;
 
 /** The left sidebar shows one of these at a time. */
-type SidebarView = "explorer" | "git";
+type SidebarView = "explorer" | "search" | "git";
 
-/** The activity rail, in order. `hint` is the chord shown in the tooltip. */
+/** Every view the rail can show, for the stored-value guard. */
+const SIDEBAR_VIEWS: SidebarView[] = ["explorer", "search", "git"];
+
+/**
+ * The activity rail, in order. `hint` is the chord shown in the tooltip, and
+ * `id` is the command the View menu reaches the same view through — carried
+ * here rather than mapped from `view` at the call site, where a third entry
+ * silently fell into whichever branch the ternary had.
+ */
 const ACTIVITY_ITEMS: {
   view: SidebarView;
+  id: string;
   label: string;
   hint: string;
   Glyph: (props: { className?: string }) => React.ReactElement;
 }[] = [
-  { view: "explorer", label: "Explorer", hint: CHORD.explorer, Glyph: FilesIcon },
-  { view: "git", label: "Source Control", hint: CHORD.sourceControl, Glyph: SourceControlIcon },
+  {
+    view: "explorer",
+    id: ID.explorer,
+    label: "Explorer",
+    hint: CHORD.explorer,
+    Glyph: FilesIcon,
+  },
+  {
+    view: "search",
+    id: ID.findReplace,
+    label: "Find & Replace",
+    hint: CHORD.findReplace,
+    Glyph: FindReplaceIcon,
+  },
+  {
+    view: "git",
+    id: ID.sourceControl,
+    label: "Source Control",
+    hint: CHORD.sourceControl,
+    Glyph: SourceControlIcon,
+  },
 ];
 
 /**
@@ -227,15 +264,19 @@ function Workbench() {
     // fallback branch, so a dangling id — the diff tab dropped at save time, a
     // corrupt row dropped at load, the "New session" tab toStoredTab refuses —
     // would leave the centre pane blank. The fallback must never settle on a
-    // chat from a non-active repo: such a tab would be visible for the first
+    // tab from a non-active repo: such a tab would be visible for the first
     // commit, and ChatPane's warm latch fires on that commit — before the
     // repo-seed effect below can re-focus — spawning a background `claude` and
     // reading its transcript at boot for a tab the strip does not even show.
     const remembered = readString(KEYS.state.activeTab);
-    if (tabs.some((tab) => tab.id === remembered)) return remembered;
-    const fallback = tabs.find(
-      (tab) => tab.kind !== "chat" || tab.cwd === activeRepo,
-    );
+    // Repo-checked as well as existence-checked: the remembered tab may belong
+    // to a repo other than the one also being restored, and the seed effect
+    // only re-focuses on the first commit — one frame with a pane in front of a
+    // strip that does not list it.
+    if (tabs.some((tab) => tab.id === remembered && tabInRepo(tab, activeRepo))) {
+      return remembered;
+    }
+    const fallback = tabs.find((tab) => tabInRepo(tab, activeRepo));
     return fallback?.id ?? "";
   });
   /**
@@ -296,6 +337,22 @@ function Workbench() {
   /** The session debug drawer, toggled from the status bar's phase chip. */
   const [debugOpen, setDebugOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  /**
+   * Where an editor should put its caret, from a search result that was clicked.
+   *
+   * Carries a `nonce` because the interesting case is clicking two matches in
+   * the same file: the path and even the line can repeat, and without something
+   * that always changes the editor's effect would not re-run and the second
+   * click would do nothing. Deliberately not part of the tab — a tab is
+   * persisted, and where you last jumped to is not worth restoring.
+   */
+  const [reveal, setReveal] = useState<{
+    path: string;
+    line: number;
+    column: number;
+    nonce: number;
+  } | null>(null);
+  const revealCounter = useRef(0);
 
   /** Session id of the chat tab currently in front, for the status panel. */
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
@@ -338,11 +395,21 @@ function Workbench() {
    * neither was readable, so they are tabs and only one is visible at a time.
    */
   const [sidebarView, setSidebarView] = useState<SidebarView>(() =>
-    readEnum<SidebarView>(SIDEBAR_VIEW_KEY, ["explorer", "git"], "explorer"),
+    readEnum<SidebarView>(SIDEBAR_VIEW_KEY, SIDEBAR_VIEWS, "explorer"),
   );
   useEffect(() => {
     writeString(SIDEBAR_VIEW_KEY, sidebarView);
   }, [sidebarView]);
+  /**
+   * Bumped whenever the find view is deliberately revealed, so it takes the
+   * caret the way the chord in every editor does.
+   *
+   * A token rather than a "is this view active" flag: pressing the chord with
+   * the view already open has to focus the box again, and nothing about the
+   * layout changes on that press for a flag to notice.
+   */
+  const [searchFocus, setSearchFocus] = useState(0);
+  const focusSearch = useCallback(() => setSearchFocus((token) => token + 1), []);
   /**
    * Rail click: switch views, or collapse when the view is already showing.
    *
@@ -351,10 +418,13 @@ function Workbench() {
    */
   const toggleSidebarView = useCallback(
     (view: SidebarView) => {
-      setLeftCollapsed((collapsed) => (sidebarView === view ? !collapsed : false));
+      const collapsing = sidebarView === view && !leftCollapsed;
+      setLeftCollapsed(collapsing);
       setSidebarView(view);
+      // Revealing the find view is what asks for the caret; collapsing it is not.
+      if (view === "search" && !collapsing) focusSearch();
     },
-    [sidebarView],
+    [sidebarView, leftCollapsed, focusSearch],
   );
   const [refitToken, setRefitToken] = useState(0);
   /**
@@ -794,10 +864,12 @@ function Workbench() {
     if (!activeRepo) return;
     setTabs((current) => {
       const mine = current.filter((tab) => tab.kind === "chat" && tab.cwd === activeRepo);
-      // A file, diff or dashboard tab belongs to no repo, so switching repos —
-      // which the dashboard does when you click a row — must leave it in front.
+      // Only the dashboard belongs to no repo, so switching repos — which the
+      // dashboard does when you click a row — must leave it in front. A file or
+      // diff tab from the repo being left is not shown any more, so holding
+      // focus on one would blank the centre pane.
       const repoIndependent = (id: string) =>
-        current.some((tab) => tab.id === id && tab.kind !== "chat");
+        current.some((tab) => tab.id === id && tab.kind === "dashboard");
       if (mine.length > 0) {
         setActiveTab((active) =>
           repoIndependent(active) || mine.some((tab) => tab.id === active)
@@ -818,14 +890,31 @@ function Workbench() {
     });
   }, [activeRepo]);
 
-  const openFile = useCallback((path: string) => {
+  /**
+   * Open a file under `cwd`, which is the repo whose strip will show the tab.
+   *
+   * The id stays keyed by path alone, so one file is one editor however many
+   * repos reach it — two buffers over one path would mean two undo stacks and
+   * two savers racing the same mtime guard. The consequence is that reopening a
+   * file from a second repo *moves* the tab rather than cloning it: the cwd is
+   * rewritten so the tab is visible where it was just asked for, which beats
+   * focusing a tab the strip in front does not show.
+   */
+  const openFile = useCallback((path: string, cwd: string) => {
     setSelectedFile(path);
     const id = `file:${path}`;
-    setTabs((current) =>
-      current.some((tab) => tab.id === id)
-        ? current
-        : [...current, { id, kind: "file", label: path.split("/").pop() ?? path, path }],
-    );
+    setTabs((current) => {
+      const existing = current.find((tab) => tab.id === id);
+      if (existing) {
+        return existing.kind === "file" && existing.cwd !== cwd
+          ? current.map((tab) => (tab.id === id ? { ...tab, cwd } : tab))
+          : current;
+      }
+      return [
+        ...current,
+        { id, kind: "file", label: path.split("/").pop() ?? path, path, cwd },
+      ];
+    });
     setActiveTab(id);
   }, []);
 
@@ -858,6 +947,19 @@ function Workbench() {
     [],
   );
 
+  /**
+   * The same, for Format Document: the buffer lives in the editor pane, so the
+   * menu row and the chord both have to reach in rather than hold the text.
+   */
+  const fileFormattersRef = useRef(new Map<string, () => Promise<boolean>>());
+  const registerFileFormat = useCallback(
+    (path: string, format: (() => Promise<boolean>) | null) => {
+      if (format) fileFormattersRef.current.set(path, format);
+      else fileFormattersRef.current.delete(path);
+    },
+    [],
+  );
+
   /** Focus the dashboard, opening it if this window has not yet. */
   const openDashboard = useCallback(() => {
     setTabs((current) =>
@@ -868,11 +970,16 @@ function Workbench() {
     setActiveTab(DASHBOARD_TAB);
   }, []);
 
-  const showDiff = useCallback((title: string, patch: string) => {
-    const id = `diff:${title}`;
+  /**
+   * A diff for `cwd`. The repo is in the id, not just the tab: a diff is titled
+   * by a repo-relative path or a short sha, so `src/App.tsx` in two repos would
+   * otherwise be one tab whose patch is whichever repo asked last.
+   */
+  const showDiff = useCallback((title: string, patch: string, cwd: string) => {
+    const id = `diff|${cwd}|${title}`;
     setTabs((current) => {
       const existing = current.findIndex((tab) => tab.id === id);
-      const tab: Tab = { id, kind: "diff", label: title.slice(0, 40), patch };
+      const tab: Tab = { id, kind: "diff", label: title.slice(0, 40), patch, cwd };
       if (existing === -1) return [...current, tab];
       const next = [...current];
       next[existing] = tab;
@@ -880,6 +987,33 @@ function Workbench() {
     });
     setActiveTab(id);
   }, []);
+
+  /**
+   * `openFile` and `showDiff` bound to the repo in front.
+   *
+   * Every caller — the tree, the git pane, a path clicked in the chat — belongs
+   * to the active repo already: the strip only shows that repo's chats, so the
+   * only clickable pane is one of its own. Binding here rather than widening
+   * three prop signatures keeps the panes ignorant of which repo owns a tab, and
+   * memoising on `activeRepo` means a repo switch is the only thing that
+   * re-renders the memoised ones.
+   */
+  const openFileHere = useCallback(
+    (path: string) => openFile(path, activeRepo),
+    [openFile, activeRepo],
+  );
+  /** Open a file and land on the match the search pane was showing. */
+  const openMatch = useCallback(
+    (path: string, line: number, column: number) => {
+      openFileHere(path);
+      setReveal({ path, line, column, nonce: (revealCounter.current += 1) });
+    },
+    [openFileHere],
+  );
+  const showDiffHere = useCallback(
+    (title: string, patch: string) => showDiff(title, patch, activeRepo),
+    [showDiff, activeRepo],
+  );
 
   /* ---------- tab reordering ---------- */
 
@@ -954,11 +1088,9 @@ function Workbench() {
       setTabs((current) => {
         const next = current.filter((tab) => tab.id !== id);
         if (activeTabRef.current !== id) return next;
-        // Only a tab the strip shows is selectable: a chat from another repo is
+        // Only a tab the strip shows is selectable: a tab from another repo is
         // filtered out of it, so focusing one leaves the centre pane blank.
-        const selectable = next.filter(
-          (tab) => tab.kind !== "chat" || tab.cwd === activeRepo,
-        );
+        const selectable = next.filter((tab) => tabInRepo(tab, activeRepo));
         // A file or dashboard tab is selectable but is not a chat: leaving the
         // repo with none of its own means no live session, so the seed below
         // has to run even when something else could hold focus.
@@ -1135,6 +1267,11 @@ function Workbench() {
     void fileSaversRef.current.get(activeFile.path)?.();
   }, [activeFile]);
 
+  const formatActiveFile = useCallback(() => {
+    if (!activeFile) return;
+    void fileFormattersRef.current.get(activeFile.path)?.();
+  }, [activeFile]);
+
   /** Ask for a directory. Cancelling resolves to null, which is not an error. */
   const pickDirectory = useCallback(
     async (title: string): Promise<string | null> => {
@@ -1161,7 +1298,7 @@ function Workbench() {
 
   /** Only the tabs the strip is showing: "others" and "all" mean those. */
   const visibleTabs = useMemo(
-    () => tabs.filter((tab) => tab.kind !== "chat" || tab.cwd === activeRepo),
+    () => tabs.filter((tab) => tabInRepo(tab, activeRepo)),
     [tabs, activeRepo],
   );
 
@@ -1278,6 +1415,13 @@ function Workbench() {
       { id: ID.exit, label: "Exit", run: () => void closeWindow() },
 
       {
+        id: ID.formatDocument,
+        label: "Format Document",
+        chord: CHORD.format,
+        disabled: !activeFile,
+        run: formatActiveFile,
+      },
+      {
         id: ID.copyActivePath,
         label: "Copy Path of Active File",
         disabled: !activeFile,
@@ -1291,13 +1435,14 @@ function Workbench() {
       },
 
       ...ACTIVITY_ITEMS.map((item) => ({
-        id: item.view === "explorer" ? ID.explorer : ID.sourceControl,
+        id: item.id,
         label: item.label,
         chord: item.hint,
         checked: sidebarView === item.view && !leftCollapsed,
         run: () => {
           setSidebarView(item.view);
           setLeftCollapsed(false);
+          if (item.view === "search") focusSearch();
         },
       })),
       {
@@ -1328,16 +1473,20 @@ function Workbench() {
         disabled: !activeChat,
         run: () => setDebugOpen((open) => !open),
       },
-      // One command per theme rather than a cycling toggle: the menu shows which
-      // is active, and a radio group needs three addressable rows to do that.
-      ...(["system", "light", "dark"] as Theme[]).map((option) => ({
-        id: `view.theme.${option}`,
-        label: option,
-        checked: theme === option,
-        run: () => {
-          applyTheme(option);
-          setTheme(option);
-        },
+      // One command per theme, so the menu can tick the active one. Generated
+      // from the same list the settings pane reads: adding a theme is a
+      // regeneration of themes.css, not an edit in three places.
+      {
+        id: ID.themeSystem,
+        label: "Follow Desktop",
+        checked: theme === SYSTEM,
+        run: () => setTheme(SYSTEM),
+      },
+      ...THEME_LIST.map((option) => ({
+        id: themeCommandId(option.id),
+        label: option.label,
+        checked: theme === option.id,
+        run: () => setTheme(option.id),
       })),
       {
         id: ID.zoomIn,
@@ -1409,6 +1558,7 @@ function Workbench() {
       activeFile,
       dirtyFiles,
       saveActiveFile,
+      formatActiveFile,
       activeTab,
       closeTab,
       liveSessionId,
@@ -1547,9 +1697,24 @@ function Workbench() {
           >
             {activeRepo && (
               <PaneBoundary label="explorer">
-                <FileTree root={activeRepo} onOpenFile={openFile} selectedPath={selectedFile} />
+                <FileTree root={activeRepo} onOpenFile={openFileHere} selectedPath={selectedFile} />
               </PaneBoundary>
             )}
+          </div>
+          {/* Mounted like the other two, and for a sharper reason: a sweep of a
+              large repo is seconds of IO, and unmounting would throw the results
+              away every time you clicked into the tree to read one of them. */}
+          <div
+            className="sidebar-view"
+            style={{ display: sidebarView === "search" ? "flex" : "none" }}
+          >
+            <PaneBoundary label="find and replace">
+              <SearchPane
+                root={activeRepo}
+                focusToken={searchFocus}
+                onOpenMatch={openMatch}
+              />
+            </PaneBoundary>
           </div>
           <div
             className="sidebar-view"
@@ -1557,7 +1722,7 @@ function Workbench() {
           >
             {activeRepo && (
               <PaneBoundary label="source control">
-                <GitPane cwd={activeRepo} onShowDiff={showDiff} onOpenFile={openFile} />
+                <GitPane cwd={activeRepo} onShowDiff={showDiffHere} onOpenFile={openFileHere} />
               </PaneBoundary>
             )}
           </div>
@@ -1585,132 +1750,130 @@ function Workbench() {
               ])
             }
           >
-            {tabs
-              .filter((tab) => tab.kind !== "chat" || tab.cwd === activeRepo)
-              .map((tab) => {
-                const label = tab.kind === "chat" ? chatLabel(tab) : tab.label;
-                return (
-                  <div
-                    key={tab.id}
-                    className="tab"
-                    data-kind={tab.kind}
-                    data-active={tab.id === activeTab}
-                    data-dragging={dragTab === tab.id}
-                    data-drop={dropHint?.id === tab.id ? dropHint.side : undefined}
-                    // Dragging owns mousedown, which would make selecting
-                    // text inside the rename input impossible.
-                    draggable={renaming?.id !== tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                    onContextMenu={(event) => {
-                      setActiveTab(tab.id);
-                      menu.openContextMenu(event, tabMenu(tab, tabMenuContext));
-                    }}
-                    onAuxClick={(event) => {
-                      // Middle-click closes, as in VSCode.
-                      if (event.button === 1) {
-                        event.preventDefault();
-                        closeTab(tab.id);
-                      }
-                    }}
-                    onDragStart={(event) => {
-                      dragTabRef.current = tab.id;
-                      setDragTab(tab.id);
-                      event.dataTransfer.effectAllowed = "move";
-                      // WebKitGTK will not begin a drag with an empty payload.
-                      event.dataTransfer.setData("text/plain", tab.id);
-                    }}
-                    onDragOver={(event) => {
-                      const dragging = dragTabRef.current;
-                      if (!dragging || dragging === tab.id) return;
-                      // Without preventDefault this is not a drop target and
-                      // onDrop never fires at all.
+            {visibleTabs.map((tab) => {
+              const label = tab.kind === "chat" ? chatLabel(tab) : tab.label;
+              return (
+                <div
+                  key={tab.id}
+                  className="tab"
+                  data-kind={tab.kind}
+                  data-active={tab.id === activeTab}
+                  data-dragging={dragTab === tab.id}
+                  data-drop={dropHint?.id === tab.id ? dropHint.side : undefined}
+                  // Dragging owns mousedown, which would make selecting
+                  // text inside the rename input impossible.
+                  draggable={renaming?.id !== tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  onContextMenu={(event) => {
+                    setActiveTab(tab.id);
+                    menu.openContextMenu(event, tabMenu(tab, tabMenuContext));
+                  }}
+                  onAuxClick={(event) => {
+                    // Middle-click closes, as in VSCode.
+                    if (event.button === 1) {
                       event.preventDefault();
-                      event.dataTransfer.dropEffect = "move";
-                      const side = dropSide(event);
-                      setDropHint((current) =>
-                        current?.id === tab.id && current.side === side
-                          ? current
-                          : { id: tab.id, side },
-                      );
-                    }}
-                    onDragLeave={() =>
-                      setDropHint((current) => (current?.id === tab.id ? null : current))
+                      closeTab(tab.id);
                     }
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const dragging = dragTabRef.current;
-                      if (dragging) moveTab(dragging, tab.id, dropSide(event));
-                      endDrag();
-                    }}
-                    onDragEnd={endDrag}
-                    title={tab.kind === "file" ? tab.path : label}
-                  >
-                    {tab.kind === "chat" && (
-                      <span
-                        className="status-dot"
-                        data-status={tabStatus[tab.id] ?? "idle"}
-                        title={tabStatus[tab.id] ?? "idle"}
-                      />
-                    )}
-                    {tab.kind === "file" && dirtyFiles[tab.path] && (
-                      <span className="tab-dirty" title="Unsaved changes">
-                        ●
-                      </span>
-                    )}
-                    {renaming?.id === tab.id ? (
-                      <input
-                        className="tab-rename-input"
-                        value={renaming.value}
-                        autoFocus
-                        onFocus={(event) => event.target.select()}
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={(event) =>
-                          setRenaming({ ...renaming, value: event.target.value })
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            renameDoneRef.current = true;
-                            commitRename(renaming.sessionId, renaming.value);
-                          } else if (event.key === "Escape") {
-                            renameDoneRef.current = true;
-                            setRenaming(null);
-                          }
-                        }}
-                        onBlur={() => {
-                          if (renameDoneRef.current) return;
-                          commitRename(renaming.sessionId, renaming.value);
-                        }}
-                      />
-                    ) : (
-                      <span className="tab-label">{label}</span>
-                    )}
-                    {/* Renaming needs a transcript to write to, so a session
-                        that has not announced its uuid yet has no pencil. */}
-                    {tab.kind === "chat" && tab.sessionId && renaming?.id !== tab.id && (
-                      <span
-                        className="rename"
-                        title="Rename session"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          renameDoneRef.current = false;
-                          setRenaming({ id: tab.id, sessionId: tab.sessionId!, value: label });
-                        }}
-                      >
-                        <PencilIcon />
-                      </span>
-                    )}
+                  }}
+                  onDragStart={(event) => {
+                    dragTabRef.current = tab.id;
+                    setDragTab(tab.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    // WebKitGTK will not begin a drag with an empty payload.
+                    event.dataTransfer.setData("text/plain", tab.id);
+                  }}
+                  onDragOver={(event) => {
+                    const dragging = dragTabRef.current;
+                    if (!dragging || dragging === tab.id) return;
+                    // Without preventDefault this is not a drop target and
+                    // onDrop never fires at all.
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    const side = dropSide(event);
+                    setDropHint((current) =>
+                      current?.id === tab.id && current.side === side
+                        ? current
+                        : { id: tab.id, side },
+                    );
+                  }}
+                  onDragLeave={() =>
+                    setDropHint((current) => (current?.id === tab.id ? null : current))
+                  }
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const dragging = dragTabRef.current;
+                    if (dragging) moveTab(dragging, tab.id, dropSide(event));
+                    endDrag();
+                  }}
+                  onDragEnd={endDrag}
+                  title={tab.kind === "file" ? tab.path : label}
+                >
+                  {tab.kind === "chat" && (
                     <span
-                      className="close"
+                      className="status-dot"
+                      data-status={tabStatus[tab.id] ?? "idle"}
+                      title={tabStatus[tab.id] ?? "idle"}
+                    />
+                  )}
+                  {tab.kind === "file" && dirtyFiles[tab.path] && (
+                    <span className="tab-dirty" title="Unsaved changes">
+                      ●
+                    </span>
+                  )}
+                  {renaming?.id === tab.id ? (
+                    <input
+                      className="tab-rename-input"
+                      value={renaming.value}
+                      autoFocus
+                      onFocus={(event) => event.target.select()}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) =>
+                        setRenaming({ ...renaming, value: event.target.value })
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          renameDoneRef.current = true;
+                          commitRename(renaming.sessionId, renaming.value);
+                        } else if (event.key === "Escape") {
+                          renameDoneRef.current = true;
+                          setRenaming(null);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (renameDoneRef.current) return;
+                        commitRename(renaming.sessionId, renaming.value);
+                      }}
+                    />
+                  ) : (
+                    <span className="tab-label">{label}</span>
+                  )}
+                  {/* Renaming needs a transcript to write to, so a session
+                      that has not announced its uuid yet has no pencil. */}
+                  {tab.kind === "chat" && tab.sessionId && renaming?.id !== tab.id && (
+                    <span
+                      className="rename"
+                      title="Rename session"
                       onClick={(event) => {
                         event.stopPropagation();
-                        closeTab(tab.id);
+                        renameDoneRef.current = false;
+                        setRenaming({ id: tab.id, sessionId: tab.sessionId!, value: label });
                       }}
                     >
-                      ×
+                      <PencilIcon />
                     </span>
-                  </div>
-                );
-              })}
+                  )}
+                  <span
+                    className="close"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeTab(tab.id);
+                    }}
+                  >
+                    ×
+                  </span>
+                </div>
+              );
+            })}
             <button
               className="tab-new"
               onClick={() => activeRepo && openNewChatTab(activeRepo)}
@@ -1750,7 +1913,7 @@ function Workbench() {
                     resume={tab.sessionId}
                     resumeFile={tab.resumeFile}
                     onSessionId={sessionIdHandlerFor(tab.id)}
-                    onOpenFile={openFile}
+                    onOpenFile={openFileHere}
                     onSystemMessage={setSystemMessage}
                     onPhase={tab.id === activeTab ? setPhase : noop}
                     onStatus={statusHandlerFor(tab.id)}
@@ -1779,8 +1942,10 @@ function Workbench() {
                     <FileView
                       path={tab.path}
                       visible={tab.id === activeTab}
+                      reveal={reveal?.path === tab.path ? reveal : undefined}
                       onDirtyChange={handleFileDirty}
                       onRegisterSave={registerFileSave}
+                      onRegisterFormat={registerFileFormat}
                     />
                   </PaneBoundary>
                 </div>

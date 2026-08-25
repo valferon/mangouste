@@ -22,11 +22,41 @@ export interface ChatTab {
   resumeFile: string | null;
 }
 
+/**
+ * Every tab but the dashboard belongs to exactly one repo.
+ *
+ * A file tab carries the repo it was opened from rather than deriving one from
+ * its path: the path alone cannot say which repo is showing it — a file opened
+ * from a chat can sit outside the worktree entirely — and deriving would need
+ * an async `gitRoot` call on a code path (the strip's filter, the restore
+ * initialiser) that has to be synchronous. The dashboard is the one exception,
+ * and deliberately: it is a cross-repo watch surface, and clicking a row on it
+ * *switches repo*, so a dashboard owned by a repo would hide itself the moment
+ * it was used.
+ */
 export type Tab =
   | ChatTab
-  | { id: string; kind: "file"; label: string; path: string }
-  | { id: string; kind: "diff"; label: string; patch: string }
+  | { id: string; kind: "file"; label: string; path: string; cwd: string }
+  | { id: string; kind: "diff"; label: string; patch: string; cwd: string }
   | { id: string; kind: "dashboard"; label: string };
+
+/** The repo a tab belongs to, or null for the window-level dashboard. */
+export function tabRepo(tab: Tab): string | null {
+  return tab.kind === "dashboard" ? null : tab.cwd;
+}
+
+/**
+ * Whether the strip for `repo` shows this tab.
+ *
+ * The single answer to that question: App filters the same way in five places —
+ * the strip, `visibleTabs`, the restore fallback, the close-and-refocus path
+ * and the repo seed — and any two of them disagreeing means a tab that can be
+ * focused but not seen, or seen but not closable.
+ */
+export function tabInRepo(tab: Tab, repo: string): boolean {
+  const owner = tabRepo(tab);
+  return owner === null || owner === repo;
+}
 
 /**
  * What a tab looks like in `localStorage`, for restoring the strip on launch.
@@ -42,7 +72,7 @@ export type Tab =
  */
 export type StoredTab =
   | { kind: "chat"; cwd: string; sessionId: string; resumeFile: string | null }
-  | { kind: "file"; path: string }
+  | { kind: "file"; cwd: string; path: string }
   | { kind: "dashboard" };
 
 /** The storable projection of a live tab, or null for what must not come back. */
@@ -57,7 +87,7 @@ export function toStoredTab(tab: Tab): StoredTab | null {
         resumeFile: tab.resumeFile,
       };
     case "file":
-      return { kind: "file", path: tab.path };
+      return { kind: "file", cwd: tab.cwd, path: tab.path };
     case "dashboard":
       return { kind: "dashboard" };
     case "diff":
@@ -87,7 +117,10 @@ export function isStoredTab(value: unknown): value is StoredTab {
         (value.resumeFile === null || typeof value.resumeFile === "string")
       );
     case "file":
-      return typeof value.path === "string";
+      // A file entry written before tabs were repo-owned has no cwd, so it
+      // fails here and is dropped rather than restored into a strip that has
+      // no repo to show it under. One relaunch, one strip of file tabs.
+      return typeof value.cwd === "string" && typeof value.path === "string";
     case "dashboard":
       return true;
     default:
@@ -143,6 +176,7 @@ export function restoreTab(stored: StoredTab): Tab {
         id: storedTabId(stored),
         label: stored.path.split("/").pop() ?? stored.path,
         path: stored.path,
+        cwd: stored.cwd,
       };
     case "dashboard":
       return { kind: "dashboard", id: storedTabId(stored), label: "Dashboard" };

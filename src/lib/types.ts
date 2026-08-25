@@ -115,6 +115,83 @@ export interface FileText {
   modifiedMs: number;
 }
 
+/**
+ * What the Find & Replace view asked for. Mirrors `SearchOptions` in
+ * `src-tauri/src/search.rs`, where every field also defaults.
+ */
+export interface SearchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  /** Read the query as a regex — and `$1` in the replacement as a capture. */
+  regex: boolean;
+  /** Comma-separated gitignore-style globs. Non-empty means "only these". */
+  include: string;
+  exclude: string;
+  respectGitignore?: boolean;
+  showHidden?: boolean;
+  maxMatches?: number;
+}
+
+/**
+ * One match, with its line pre-split around it.
+ *
+ * Rust does the splitting because the offsets it matched at are UTF-8 and a JS
+ * string is UTF-16: `before`/`matched`/`after` are the only form of a highlight
+ * that cannot be off by a byte. `start`/`end` are opaque here — they are the
+ * match's identity, handed straight back to `replaceMatches`.
+ */
+export interface SearchMatch {
+  /** 1-based, as the editor's gutter counts. */
+  line: number;
+  /** 1-based character column, for placing the caret when the file opens. */
+  column: number;
+  start: number;
+  end: number;
+  before: string;
+  matched: string;
+  after: string;
+}
+
+export interface FileHit {
+  path: string;
+  /** `path` as written from inside the searched root — what the pane shows. */
+  relative: string;
+  /** The mtime the matches were read at, handed back so a replace can be refused. */
+  modifiedMs: number;
+  matches: SearchMatch[];
+  /** This file had more matches than the per-file cap. */
+  truncated: boolean;
+}
+
+export interface SearchOutcome {
+  files: FileHit[];
+  totalMatches: number;
+  /** The sweep hit its cap, so the results are a prefix of the truth. */
+  truncated: boolean;
+}
+
+/** Per-file outcome of a replace. A refused file does not stop the others. */
+export interface ReplaceResult {
+  path: string;
+  replaced: number;
+  error: string | null;
+}
+
+export interface ReplaceOutcome {
+  files: ReplaceResult[];
+  replaced: number;
+  failed: number;
+}
+
+/** What a formatter made of a buffer, and which one it was. */
+export interface Formatted {
+  text: string;
+  /** `prettier`, `rustfmt` — named in the editor's status line. */
+  formatter: string;
+  /** False when the buffer was already formatted, which is worth saying. */
+  changed: boolean;
+}
+
 export interface RepoInfo {
   name: string;
   path: string;

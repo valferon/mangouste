@@ -11,8 +11,8 @@ repository — but the reason it exists is the *n* sessions, not the one window.
 │ (m) File Edit View Terminal Help   [ payments-service Ctrl+P ]        │
 ├───┬──────────────┬─────────────────────────────────┬──────────────────┤
 │ E │ Explorer     │ Chat │ file.ts │ a1b2c3 …       │ Current session  │
-│ G │  file tree   ├─────────────────────────────────┤  model · branch  │
-│   │  src/        │                                 │  context · spend │
+│ F │  file tree   ├─────────────────────────────────┤  model · branch  │
+│ G │  src/        │                                 │  context · spend │
 │   │  README.md   │  stream-json chat with          │                  │
 │   │              │  the claude CLI                 │ Sessions  3 live │
 │   │              │                                 │  ● playground    │
@@ -24,10 +24,10 @@ repository — but the reason it exists is the *n* sessions, not the one window.
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`E` and `G` are the activity rail: one left view at a time, switched with
-`Ctrl+Shift+E` / `Ctrl+Shift+G`, and the button for the open view collapses it.
-Both views stay mounted — glancing at the tree must not throw away a half-typed
-commit message.
+`E`, `F` and `G` are the activity rail: one left view at a time, switched with
+`Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+G`, and the button for the open
+view collapses it. All three stay mounted — glancing at the tree must not throw
+away a half-typed commit message, or the results of a sweep that took seconds.
 
 ## What it is for
 
@@ -274,6 +274,7 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/sessions.rs` | Scans `~/.claude/projects`, head/tail sampled |
 | `src-tauri/src/git.rs` | `git` porcelain: status, log, show, diff |
 | `src-tauri/src/workspace.rs` | Repo discovery, lazy tree, quick-open search |
+| `src-tauri/src/format.rs` | Buffer through the repo's own formatter, stdin to stdout |
 | `src-tauri/src/primary.rs` | X11 PRIMARY + CLIPBOARD access |
 | `src-tauri/src/chats.rs` | Owns the child processes; kills them with the window |
 | `src-tauri/src/permission.rs` | The MCP server the CLI asks for tool approval |
@@ -414,8 +415,46 @@ with every save and a write that would clobber someone else's change is refused.
 That leaves three answers to a conflict, and the pane offers all three: reload and
 lose yours, overwrite anyway, or keep editing.
 
+`Shift+Alt+F` reformats the buffer with whatever formatter the repo already uses
+— prettier out of the repo's own `node_modules/.bin` before any global one, then
+biome or dprint; rustfmt at the crate's edition; gofmt, ruff or black, taplo,
+stylua, shfmt, clang-format. Nothing is configured here: each of these reads its
+rules from the repo it is run in, so the style is the one the repo already gives
+its own tooling, and a repo with none installed is told which to install rather
+than restyled by whatever happened to be on the machine.
+
+JSON is the exception and the only thing bundled — an editor that cannot
+pretty-print a `package.json` until someone installs a node toolchain has a hole
+in it. It runs only when nothing else is installed, and it is a *re-indenter*: the
+tokens are copied out byte for byte and only the whitespace between them is
+rewritten. A round trip through `serde_json::Value` would sort every object's
+keys, renormalise numbers and rewrite escapes, so `1e400`, `-0` and the order of
+`dependencies` would all come back changed. Comments and trailing commas pass
+through for jsonc and json5; anything not JSON-shaped is refused with a line and
+column rather than mangled.
+
+Text in, text out — `format_text` pipes the buffer through the formatter's stdin
+and takes stdout back, and nothing is written to disk on the way. Both halves of
+that matter: an unsaved draft can be formatted at all, and the mtime a save has
+to carry is still the one the file was read at, so the guard above is untouched.
+The result is applied through the textarea rather than by replacing its value, so
+`Ctrl+Z` takes the format back — a format that cannot be undone is one nobody
+runs on a file they care about.
+
 Tabs never unmount for the same reason: hiding is not unmounting, so switching
 tabs cannot silently drop an unsaved buffer, and closing one asks before it does.
+
+The strip belongs to the repo in front. A tab — a chat, a file, a diff — is owned
+by the repo it was opened from and only appears in that repo's strip, so switching
+to `payments-service` does not put six unrelated files from three other repos in
+front of you. Hidden is still not unmounted: the other repos' panes stay in the
+tree, keeping their streams and their unsaved buffers, exactly as they do across
+an ordinary tab switch. The dashboard is the one tab with no repo, deliberately —
+it is a cross-repo watch surface, and clicking a row on it *switches repo*, so a
+dashboard owned by one would hide itself the moment it was used. A file reopened
+from a second repo moves rather than clones, because one path is one editor: two
+buffers over one file would mean two undo stacks and two savers racing the same
+mtime guard.
 
 The strip itself survives a relaunch: the open tabs are persisted as they change
 and come back on the next start (Settings can turn this off). Chat tabs come
@@ -428,6 +467,46 @@ patch is derived output that would otherwise sit whole in `localStorage`, and
 "New session" tabs that never got a session id — with no session to resume and
 no transcript to render, restoring one would be a blank pane pretending to be
 history.
+
+### Find and replace
+
+`Ctrl+Shift+F` is the third rail view: a query, a replacement, the three matcher
+toggles (`Aa`, `ab`, `.*`) and the include/exclude glob boxes, over results
+grouped by file. It sweeps the active repo through the same `ignore` walk the
+Explorer draws and the same reader the editor opens through, so what a find can
+reach is what you could have opened by hand — gitignored paths, binaries, and
+anything over 2 MB are not in it.
+
+Matching is per line. `^` and `$` therefore mean what they look like they mean,
+and a query containing a newline finds nothing: a multi-line search is a
+different feature with a different cost profile, and faking it by matching across
+a whole file would make every minified bundle a hazard. The sweep is parallel and
+bounded — a per-file cap, a global match cap, a file-size ceiling — because the
+pane is blocked on the answer; the summary line says `capped` when the results
+are a prefix rather than the whole truth.
+
+Every match carries the byte span Rust found it at, and a replace hands those
+spans back. That is what makes dismissing a match or a whole file mean something:
+the write gets the spans that survived, and Rust re-runs the same matcher over
+the file to prove each one is still a match before rewriting anything. The
+matcher is built once from the query and the toggles that came with the request,
+so what the results describe and what the write does cannot drift apart — there
+is no remembered search state in the process to go stale.
+
+Writes go through the editor's own save path, which means the same optimistic
+lock: each file's replace carries the mtime the search read it at, and a file
+claude rewrote in between is refused rather than clobbered. One refusal does not
+cost the other files their replace — the summary names what was refused and why.
+Replacing across more than one file asks first, like discarding changes in the
+SCM pane does, because nothing in the app can put those files back.
+
+`$1` in the replacement is a capture group only with `.*` on; a literal
+find-and-replace of a price list must not have `$1` vanish. That is also why a
+row only previews the swap for a literal replacement: a preview computed here
+from a different engine than the one that will do the write would eventually lie.
+
+Clicking a result opens the file and lands the caret on the match, selecting the
+line — coming from a list of matches, seeing *which* text matched is the point.
 
 ## Terminal
 
@@ -463,8 +542,10 @@ looking at.
 ## Tests
 
 Rust owns the parsing and the process handling, and has the older suite:
-`cargo test`, 19 tests over the transcript scanner, the stats accumulator, the
-`ps` shapes, the login-shell PATH probe and the workspace writer.
+`cargo test`, over the transcript scanner, the stats accumulator, the `ps`
+shapes, the login-shell PATH probe, the workspace writer, the formatter
+resolution and the find-and-replace matcher. No count here: it went stale on the
+commit after it was written.
 
 The frontend suite is `npm test` (vitest, node environment, no jsdom) and
 deliberately covers only pure functions: the menu model's tidy/expand rules and
@@ -567,6 +648,7 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Ctrl+N` | New session in the active repo |
 | `Ctrl+W` | Close the tab in front |
 | `Ctrl+S` | Save the file in front |
+| `Shift+Alt+F` | Reformat the file with the repo's own formatter |
 | `Ctrl+,` | Settings |
 | `Ctrl+\`` | Toggle terminal |
 | `Ctrl+Shift+T` | New terminal tab |
@@ -574,7 +656,7 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Ctrl+Shift+W` | Close terminal pane |
 | `Ctrl+Shift+M` | Dock the terminal panel bottom / right |
 | `Ctrl+B` | Toggle left sidebar |
-| `Ctrl+Shift+E/G` | Explorer / Source Control |
+| `Ctrl+Shift+E/F/G` | Explorer / Find & Replace / Source Control |
 | `Ctrl+Shift+D` | Dashboard |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in, out, reset |
 | `F11` | Full screen |

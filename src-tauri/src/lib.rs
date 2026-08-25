@@ -1,10 +1,12 @@
 mod chats;
 mod claude;
 mod env;
+mod format;
 mod git;
 mod primary;
 mod permission;
 mod pty;
+mod search;
 mod sessions;
 mod stats;
 mod usage;
@@ -294,6 +296,10 @@ pub fn run() {
             workspace::read_text_file_meta,
             workspace::write_text_file,
             workspace::home_dir,
+            format::format_text,
+            // find and replace across the repo
+            search::search_text,
+            search::replace_matches,
             // git
             git::git_log,
             git::git_status,

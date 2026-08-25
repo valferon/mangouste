@@ -453,7 +453,7 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff, onOpenFile }: Gi
         onContextMenu={(event) => menu.openContextMenu(event, repoEntries())}
       >
         <SourceControlIcon />
-        <span className="scm-title">Source Control</span>
+        <span className="pane-title">Source Control</span>
         {status?.branch && (
           <button
             className="count branch-chip"

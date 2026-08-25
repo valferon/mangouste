@@ -13,9 +13,13 @@ import type {
   Commit,
   DirEntryInfo,
   FileText,
+  Formatted,
   ProjectGroup,
+  ReplaceOutcome,
   RepoInfo,
   RepoStatus,
+  SearchOptions,
+  SearchOutcome,
   StartOptions,
   SessionHit,
   StatsSummary,
@@ -240,7 +244,48 @@ export const readTextFileMeta = (path: string, maxBytes?: number) =>
  */
 export const writeTextFile = (path: string, content: string, expectedModifiedMs?: number) =>
   invoke<number>("write_text_file", { path, content, expectedModifiedMs });
+
+/**
+ * Reformat a buffer with whatever formatter the repo the file lives in uses.
+ *
+ * Text in, text out: the draft never touches disk on the way, so an unsaved
+ * buffer can be formatted and the mtime `writeTextFile` checks stays the one the
+ * file was read at. Rejects when nothing is installed for the file's type, which
+ * is a note for the status line rather than a failure.
+ */
+export const formatText = (path: string, text: string) =>
+  invoke<Formatted>("format_text", { path, text });
 export const homeDir = () => invoke<string | null>("home_dir");
+
+/* ---------- find and replace ---------- */
+
+/**
+ * Sweep every file under `root` for `query`, matching line by line.
+ *
+ * Walks the same tree the Explorer shows and reads through the same guards the
+ * editor opens through, so what a find can reach is what you could have opened
+ * by hand. Bounded in Rust — a per-file cap, a global match cap, a file-size
+ * ceiling — because the pane is blocked on the answer; `truncated` says when the
+ * results are a prefix rather than the whole truth.
+ */
+export const searchText = (root: string, query: string, options: SearchOptions) =>
+  invoke<SearchOutcome>("search_text", { root, query, options });
+
+/**
+ * Rewrite the given files, replacing the matches they still carry spans for.
+ *
+ * `query` and `options` ride along so Rust can re-run the same matcher and prove
+ * each span is still a match before touching it, and each target's `modifiedMs`
+ * is the same optimistic lock `writeTextFile` uses — a file claude rewrote since
+ * the search is refused rather than clobbered. One refusal does not stop the
+ * others: the outcome reports per file.
+ */
+export const replaceMatches = (
+  query: string,
+  options: SearchOptions,
+  replacement: string,
+  targets: { path: string; modifiedMs?: number; spans?: [number, number][] }[],
+) => invoke<ReplaceOutcome>("replace_matches", { query, options, replacement, targets });
 
 /* ---------- git ---------- */
 

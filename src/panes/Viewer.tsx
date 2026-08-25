@@ -10,7 +10,7 @@ import {
 } from "react";
 import { copyText } from "../lib/editing";
 import { highlightCode, languageForPath } from "../lib/highlight";
-import { readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
+import { formatText, readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
@@ -393,12 +393,32 @@ interface FileViewProps {
    * permission to close the tab.
    */
   onRegisterSave?: (path: string, save: (() => Promise<boolean>) | null) => void;
+  /**
+   * Same, for Format Document: the menu bar and the chord both act on the file
+   * in front, and the buffer they have to reformat lives in here.
+   */
+  onRegisterFormat?: (path: string, format: (() => Promise<boolean>) | null) => void;
+  /**
+   * Where to put the caret, from a search result that was clicked.
+   *
+   * `nonce` is the trigger, not the position: two clicks on different matches in
+   * the same file can carry the same line, and only something that always
+   * changes makes the second one move anything.
+   */
+  reveal?: { line: number; column: number; nonce: number };
 }
 
-type SaveState =
+/**
+ * What the status line has to say, which is the tail of whatever was last done
+ * to the buffer. One state rather than one per action: only the most recent of
+ * "saved", "formatted" and "refused" is ever worth showing.
+ */
+type EditorState =
   | { kind: "clean" }
   | { kind: "saving" }
   | { kind: "saved" }
+  | { kind: "formatting" }
+  | { kind: "formatted"; formatter: string; changed: boolean }
   | { kind: "error"; message: string }
   | { kind: "stale" };
 
@@ -415,13 +435,15 @@ export const FileView = memo(function FileView({
   visible = true,
   onDirtyChange,
   onRegisterSave,
+  onRegisterFormat,
+  reveal,
 }: FileViewProps) {
   const menu = useMenu();
   /** What is on disk, as far as this pane knows. */
   const [saved, setSaved] = useState<{ text: string; modifiedMs: number } | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [state, setState] = useState<SaveState>({ kind: "clean" });
+  const [state, setState] = useState<EditorState>({ kind: "clean" });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const highlightRef = useRef<HTMLPreElement | null>(null);
@@ -487,11 +509,67 @@ export const FileView = memo(function FileView({
     [draft, path, saved],
   );
 
-  /** Latest save, for listeners and for the parent's registration. */
+  /**
+   * Reformat the buffer with whatever formatter the repo uses.
+   *
+   * Applied through the textarea rather than through `setDraft`, for the reason
+   * the Tab handler below reaches for `execCommand` too: assigning `value` throws
+   * away the native undo stack, and a format that cannot be taken back with
+   * Ctrl+Z is one nobody runs on a file they care about.
+   *
+   * Nothing here writes: the backend formats text into text, so the draft stays
+   * a draft and the mtime a save has to carry is still the one the file was read
+   * at. Whether the result is saved is the same decision it was before.
+   */
+  const format = useCallback(async (): Promise<boolean> => {
+    const field = textareaRef.current;
+    // The field's own value, not `draft`: a keystroke in the same tick as this
+    // call has reached the DOM but not yet the state.
+    const before = field?.value ?? draft;
+    setState({ kind: "formatting" });
+    let result;
+    try {
+      result = await formatText(path, before);
+    } catch (e) {
+      // No formatter installed for this file type arrives here too. It is a note
+      // rather than a failure, and reads as one in the status line.
+      setState({ kind: "error", message: String(e) });
+      return false;
+    }
+    if (result.changed) {
+      if (field) {
+        // The caret keeps its offset, which after a reflow is near where it was
+        // rather than exactly on it — enough to not lose your place in a long
+        // file, and the scroll position does the rest.
+        const caret = field.selectionStart ?? 0;
+        const { scrollTop, scrollLeft } = field;
+        field.focus();
+        field.setSelectionRange(0, field.value.length);
+        if (!document.execCommand("insertText", false, result.text)) {
+          field.value = result.text;
+          setDraft(result.text);
+        }
+        const clamped = Math.min(caret, field.value.length);
+        field.setSelectionRange(clamped, clamped);
+        field.scrollTop = scrollTop;
+        field.scrollLeft = scrollLeft;
+      } else {
+        setDraft(result.text);
+      }
+    }
+    setState({ kind: "formatted", formatter: result.formatter, changed: result.changed });
+    return true;
+  }, [draft, path]);
+
+  /** Latest save and format, for listeners and for the parent's registration. */
   const saveRef = useRef(save);
   useEffect(() => {
     saveRef.current = save;
   }, [save]);
+  const formatRef = useRef(format);
+  useEffect(() => {
+    formatRef.current = format;
+  }, [format]);
 
   useEffect(() => {
     onDirtyChange?.(path, dirty);
@@ -503,13 +581,15 @@ export const FileView = memo(function FileView({
     () => () => {
       onDirtyChange?.(path, false);
       onRegisterSave?.(path, null);
+      onRegisterFormat?.(path, null);
     },
-    [onDirtyChange, onRegisterSave, path],
+    [onDirtyChange, onRegisterFormat, onRegisterSave, path],
   );
 
   useEffect(() => {
     onRegisterSave?.(path, () => saveRef.current(false));
-  }, [onRegisterSave, path]);
+    onRegisterFormat?.(path, () => formatRef.current());
+  }, [onRegisterFormat, onRegisterSave, path]);
 
   // Ctrl+S from anywhere in the window, not only from inside the textarea, so
   // the shortcut works with the cursor parked on the gutter or the toolbar.
@@ -531,6 +611,50 @@ export const FileView = memo(function FileView({
     savedRef.current = saved;
     draftRef.current = draft;
   }, [draft, saved]);
+
+  /** The `nonce` already acted on, so a save cannot re-trigger an old jump. */
+  const revealedRef = useRef(0);
+
+  /**
+   * Land the caret on the line a search result named.
+   *
+   * Waits on `saved`: a freshly opened tab mounts with an empty buffer and the
+   * read is a round trip, so the jump has to happen when the text arrives rather
+   * than when the click did. The line is selected, not just scrolled to — coming
+   * from a list of matches, seeing *which* text matched is the point — and the
+   * gutter and highlight layers are nudged directly because they are scrolled
+   * from the textarea's own handler, which a programmatic scroll may or may not
+   * reach first.
+   */
+  useEffect(() => {
+    if (!reveal || saved === null) return;
+    if (revealedRef.current === reveal.nonce) return;
+    const field = textareaRef.current;
+    if (!field) return;
+    revealedRef.current = reveal.nonce;
+
+    // The draft, not what is on disk: this is where the caret is going, and a
+    // dirty buffer is what the reader is looking at.
+    const lines = draftRef.current.split("\n");
+    const index = Math.min(Math.max(reveal.line, 1), lines.length) - 1;
+    let lineStart = 0;
+    for (let before = 0; before < index; before += 1) lineStart += lines[before].length + 1;
+    const column = Math.min(Math.max(reveal.column, 1) - 1, lines[index].length);
+
+    field.focus();
+    field.setSelectionRange(lineStart + column, lineStart + lines[index].length);
+
+    const style = getComputedStyle(field);
+    // `line-height: 1.5` on a 12px font computes to a px value; `normal` would
+    // not, and a NaN scrollTop silently leaves the view where it was.
+    const lineHeight = Number.parseFloat(style.lineHeight) || 18;
+    const padding = Number.parseFloat(style.paddingTop) || 0;
+    // A third down rather than at the top: a match reads with the lines above it.
+    const top = Math.max(0, padding + index * lineHeight - field.clientHeight / 3);
+    field.scrollTop = top;
+    if (gutterRef.current) gutterRef.current.scrollTop = top;
+    if (highlightRef.current) highlightRef.current.scrollTop = top;
+  }, [reveal, saved]);
 
   // Reload when the window regains focus and nothing local would be lost:
   // claude edits these files, and a stale buffer that only says so at save time
@@ -555,6 +679,17 @@ export const FileView = memo(function FileView({
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [dirty, path, visible]);
+
+  /**
+   * Typing invalidates the note the status line is showing.
+   *
+   * Only the format note: "Saved" is already gated on the buffer being clean,
+   * and an error is what you came back to read.
+   */
+  const onDraftChange = useCallback((event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDraft(event.target.value);
+    setState((current) => (current.kind === "formatted" ? { kind: "clean" } : current));
+  }, []);
 
   /** Tab indents instead of leaving the field. */
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -586,6 +721,12 @@ export const FileView = memo(function FileView({
         run: () => void save(false),
       },
       {
+        label: "Format Document",
+        accelerator: CHORD.format,
+        disabled: state.kind === "saving" || state.kind === "formatting",
+        run: () => void format(),
+      },
+      {
         label: dirty ? "Revert to Disk" : "Reload from Disk",
         danger: dirty,
         disabled: state.kind === "saving",
@@ -603,7 +744,7 @@ export const FileView = memo(function FileView({
         run: () => void revealPath(parentDir(path)),
       },
     ],
-    [dirty, state.kind, save, load, path],
+    [dirty, state.kind, save, format, load, path],
   );
 
   const language = useMemo(() => languageForPath(path), [path]);
@@ -628,6 +769,15 @@ export const FileView = memo(function FileView({
   if (state.kind === "saving") status = <span className="count">Saving…</span>;
   else if (state.kind === "saved" && !dirty) status = <span className="count">Saved</span>;
   else if (state.kind === "error") status = <span className="diff-del">{state.message}</span>;
+  else if (state.kind === "formatting") status = <span className="count">Formatting…</span>;
+  else if (state.kind === "formatted")
+    status = (
+      <span className="count">
+        {state.changed
+          ? `Formatted with ${state.formatter}`
+          : `Already formatted (${state.formatter})`}
+      </span>
+    );
   else if (dirty) status = <span className="count">Unsaved</span>;
 
   return (
@@ -639,6 +789,14 @@ export const FileView = memo(function FileView({
         </span>
         {status}
         <div className="actions">
+          <button
+            className="toggle-button"
+            onClick={() => void format()}
+            disabled={state.kind === "saving" || state.kind === "formatting"}
+            title={`Reformat with the repo's own formatter (${CHORD.format})`}
+          >
+            Format
+          </button>
           <button
             className="toggle-button"
             onClick={() => void save(false)}
@@ -689,7 +847,7 @@ export const FileView = memo(function FileView({
             value={draft}
             spellCheck={false}
             wrap="off"
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={onDraftChange}
             onKeyDown={onKeyDown}
             // The gutter and the highlight layer are separate scrollers driven
             // from here; neither has a scrollbar of its own and neither can

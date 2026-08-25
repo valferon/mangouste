@@ -1,4 +1,4 @@
-import { applyTheme, type Theme } from "../lib/theme";
+import { SYSTEM, themesOfKind, type Theme } from "../lib/theme";
 
 interface SettingsProps {
   theme: Theme;
@@ -12,7 +12,6 @@ interface SettingsProps {
   onClose: () => void;
 }
 
-const THEMES: Theme[] = ["system", "light", "dark"];
 const PERMISSION_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"];
 
 export function Settings({
@@ -26,6 +25,10 @@ export function Settings({
   onWorkspaceRoot,
   onClose,
 }: SettingsProps) {
+  // Stamping is the App's job: it already applies `theme` in an effect, so
+  // painting here too would write the preference twice per change.
+  const setTheme = onTheme;
+
   return (
     <div
       className="quickopen-scrim"
@@ -42,24 +45,28 @@ export function Settings({
         </div>
 
         <div className="setting-row">
-          <label>Theme</label>
-          <div className="segmented">
-            {THEMES.map((option) => (
-              <button
-                key={option}
-                data-active={theme === option}
-                onClick={() => {
-                  applyTheme(option);
-                  onTheme(option);
-                }}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
+          <label>Color theme</label>
+          <select value={theme} onChange={(event) => setTheme(event.target.value)}>
+            <option value={SYSTEM}>Follow desktop</option>
+            <optgroup label="Dark">
+              {themesOfKind("dark").map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Light">
+              {themesOfKind("light").map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+          </select>
         </div>
         <p className="setting-hint">
-          <code>system</code> follows your desktop preference live.
+          Replicas of the themes shipped with VS Code. <code>Follow desktop</code> tracks
+          your desktop's light/dark preference live, painting Dark+ or Light+.
         </p>
 
         <div className="setting-row">

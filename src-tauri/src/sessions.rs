@@ -934,7 +934,7 @@ fn apply_downgrade_grace(
     computed
 }
 
-/// Scan every project directory and return groups sorted by most recent activity.
+/// Scan every project directory and return groups sorted alphabetically by label.
 ///
 /// `async` so the scan — stat, sample, and sidechain probes across every
 /// transcript on the machine — runs off the main thread.
@@ -1065,9 +1065,14 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
     probes.retain(|path, _| live.contains(path));
 
     let mut out: Vec<ProjectGroup> = groups.into_values().collect();
-    // Groups follow their newest session, so on the same watermark as above.
-    out.sort_by_key(|g| {
-        std::cmp::Reverse(g.sessions.first().map(|s| s.last_activity_ms).unwrap_or(0))
+    // Alphabetical by label, never by activity: a row that moves while you are
+    // reading it costs more than any ordering by recency buys. `dir_name`
+    // breaks ties so two repos sharing a leaf name keep a stable order.
+    out.sort_by(|a, b| {
+        a.label
+            .to_lowercase()
+            .cmp(&b.label.to_lowercase())
+            .then_with(|| a.dir_name.cmp(&b.dir_name))
     });
     Ok(out)
 }

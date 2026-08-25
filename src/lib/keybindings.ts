@@ -23,6 +23,9 @@ const BASE_CHORD = {
   newSession: "Ctrl+N",
   quickOpen: "Ctrl+P",
   save: "Ctrl+S",
+  // What every editor this borrows its keymap from formats with, and free of
+  // Ctrl on purpose: it needs no macOS spelling of its own.
+  format: "Shift+Alt+F",
   closeTab: "Ctrl+W",
   settings: "Ctrl+,",
 
@@ -34,6 +37,7 @@ const BASE_CHORD = {
   selectAll: "Ctrl+A",
 
   explorer: "Ctrl+Shift+E",
+  findReplace: "Ctrl+Shift+F",
   sourceControl: "Ctrl+Shift+G",
   dashboard: "Ctrl+Shift+D",
   toggleSidebar: "Ctrl+B",
@@ -164,6 +168,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: CHORD.settings, what: "Settings" },
       { keys: CHORD.toggleSidebar, what: "Show or hide the left sidebar" },
       { keys: CHORD.explorer, what: "Explorer" },
+      { keys: CHORD.findReplace, what: "Find and replace across the repo" },
       { keys: CHORD.sourceControl, what: "Source Control" },
       { keys: CHORD.dashboard, what: "Dashboard" },
       { keys: CHORD.fullScreen, what: "Full screen" },
@@ -184,6 +189,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Editor",
     rows: [
       { keys: CHORD.save, what: "Save the file in front" },
+      { keys: CHORD.format, what: "Reformat the file with the repo's own formatter" },
       { keys: CHORD.indent, what: "Indent two spaces" },
       { keys: CHORD.undo, what: "Undo" },
       { keys: CHORD.redo, what: "Redo" },

@@ -4,6 +4,8 @@ import {
   isStoredTab,
   restoreTab,
   storedTabId,
+  tabInRepo,
+  tabRepo,
   toStoredTab,
   type StoredTab,
   type Tab,
@@ -22,6 +24,7 @@ const fileTab: Tab = {
   id: "file:/repos/mangouste/src/App.tsx",
   label: "App.tsx",
   path: "/repos/mangouste/src/App.tsx",
+  cwd: "/repos/mangouste",
 };
 
 const dashboardTab: Tab = { kind: "dashboard", id: "dashboard", label: "Dashboard" };
@@ -30,7 +33,13 @@ describe("toStoredTab", () => {
   it("drops a diff tab, whose patch is derived output", () => {
     // Storing the patch would put a whole diff in localStorage, and it would
     // be stale against the worktree by the next run anyway.
-    const diff: Tab = { kind: "diff", id: "diff:staged", label: "staged", patch: "--- a\n+++ b" };
+    const diff: Tab = {
+      kind: "diff",
+      id: "diff|/repos/mangouste|staged",
+      label: "staged",
+      patch: "--- a\n+++ b",
+      cwd: "/repos/mangouste",
+    };
     expect(toStoredTab(diff)).toBeNull();
   });
 
@@ -113,7 +122,7 @@ describe("isStoredTab", () => {
   it("accepts each member of the union", () => {
     expect(isStoredTab(goodChat)).toBe(true);
     expect(isStoredTab({ ...goodChat, resumeFile: "/tmp/t.jsonl" })).toBe(true);
-    expect(isStoredTab({ kind: "file", path: "/a/b.ts" })).toBe(true);
+    expect(isStoredTab({ kind: "file", cwd: "/a", path: "/a/b.ts" })).toBe(true);
     expect(isStoredTab({ kind: "dashboard" })).toBe(true);
   });
 
@@ -125,6 +134,12 @@ describe("isStoredTab", () => {
 
   it("rejects a chat entry missing cwd", () => {
     expect(isStoredTab({ kind: "chat", sessionId: "abc", resumeFile: null })).toBe(false);
+  });
+
+  it("rejects a file entry missing cwd, which older builds wrote", () => {
+    // Without a repo the strip has nowhere to show it, so it is dropped rather
+    // than restored into every repo at once — which is the bug this fixes.
+    expect(isStoredTab({ kind: "file", path: "/a/b.ts" })).toBe(false);
   });
 
   it("rejects a sessionId of the wrong type", () => {
@@ -153,16 +168,60 @@ describe("cleanStoredTabs", () => {
   it("drops one bad entry without losing the others", () => {
     // The property that matters: corruption costs one tab, not the whole strip.
     const out = cleanStoredTabs([
-      { kind: "file", path: "/a/b.ts" },
+      { kind: "file", cwd: "/a", path: "/a/b.ts" },
       { kind: "chat", cwd: "/a" },
       { kind: "dashboard" },
     ]);
-    expect(out).toEqual([{ kind: "file", path: "/a/b.ts" }, { kind: "dashboard" }]);
+    expect(out).toEqual([
+      { kind: "file", cwd: "/a", path: "/a/b.ts" },
+      { kind: "dashboard" },
+    ]);
   });
 
   it("returns [] for a non-array", () => {
     expect(cleanStoredTabs(null)).toEqual([]);
     expect(cleanStoredTabs({ 0: { kind: "dashboard" } })).toEqual([]);
     expect(cleanStoredTabs("[]")).toEqual([]);
+  });
+});
+
+describe("tabRepo / tabInRepo", () => {
+  // The rule the whole strip rests on: every tab but the dashboard is owned by
+  // one repo, and App filters with `tabInRepo` in five places that must agree.
+  it("reports the owning repo of each kind", () => {
+    expect(tabRepo(chatTab)).toBe("/repos/mangouste");
+    expect(tabRepo(fileTab)).toBe("/repos/mangouste");
+    expect(tabRepo(dashboardTab)).toBeNull();
+  });
+
+  it("hides another repo's chat, file and diff tabs", () => {
+    const diff: Tab = {
+      kind: "diff",
+      id: "diff|/repos/mangouste|src/App.tsx",
+      label: "src/App.tsx",
+      patch: "",
+      cwd: "/repos/mangouste",
+    };
+    for (const tab of [chatTab, fileTab, diff]) {
+      expect(tabInRepo(tab, "/repos/mangouste")).toBe(true);
+      expect(tabInRepo(tab, "/repos/other")).toBe(false);
+    }
+  });
+
+  it("shows the dashboard in every repo, including none", () => {
+    // It is the cross-repo watch surface, and clicking a row on it switches
+    // repo — a dashboard owned by a repo would hide itself the moment it was
+    // used.
+    expect(tabInRepo(dashboardTab, "/repos/mangouste")).toBe(true);
+    expect(tabInRepo(dashboardTab, "/repos/other")).toBe(true);
+    expect(tabInRepo(dashboardTab, "")).toBe(true);
+  });
+
+  it("shows a tab whose repo is the no-repo window's empty root", () => {
+    // A window with no repo discovered runs with activeRepo "", and the tabs
+    // it mints carry "" too; they must not be filtered out of their own strip.
+    const homeless: Tab = { ...fileTab, cwd: "" };
+    expect(tabInRepo(homeless, "")).toBe(true);
+    expect(tabInRepo(homeless, "/repos/mangouste")).toBe(false);
   });
 });
