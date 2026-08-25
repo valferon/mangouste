@@ -41,6 +41,7 @@ export const KEYS = {
     openTabs: "mangouste.openTabs",
     activeTab: "mangouste.activeTab",
     terminalOpen: "mangouste.terminalOpen",
+    chatOpen: "mangouste.chatOpen",
   },
   prefs: {
     theme: "mangouste.theme",

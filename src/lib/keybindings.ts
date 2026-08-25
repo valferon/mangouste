@@ -42,6 +42,7 @@ const BASE_CHORD = {
   dashboard: "Ctrl+Shift+D",
   toggleSidebar: "Ctrl+B",
   toggleTerminal: "Ctrl+`",
+  toggleChat: "Ctrl+Shift+`",
   zoomIn: "Ctrl+=",
   zoomOut: "Ctrl+-",
   zoomReset: "Ctrl+0",
@@ -74,6 +75,9 @@ const MAC_CHORD: Partial<Record<ChordName, string>> = {
   // Editors keep the terminal toggle on Ctrl on macOS too — Cmd+` is the
   // system's cycle-windows chord, and muscle memory here follows VS Code.
   toggleTerminal: "Ctrl+`",
+  // Same key, one modifier along, so the pair still reads as a pair — and for
+  // the same reason: Cmd+Shift+` is the system's cycle-windows-backwards.
+  toggleChat: "Ctrl+Shift+`",
   // F11 is a brightness key on Apple keyboards without holding fn.
   fullScreen: "Ctrl+Cmd+F",
   // Cmd+Shift+5 is the system's screenshot recorder, which takes the keystroke
@@ -178,6 +182,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Chat",
     rows: [
+      { keys: CHORD.toggleChat, what: "Show or hide the chat and its session panes" },
       { keys: CHORD.send, what: "Send the message" },
       { keys: CHORD.newline, what: "Newline without sending" },
       { keys: "/", what: "Slash commands" },

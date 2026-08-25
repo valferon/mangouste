@@ -55,7 +55,8 @@ unattended at any moment:
 - **Steering is one keystroke from watching.** Same window, so answering an
   `awaiting` session, reading its diff, and running the command it suggests do not
   cost three context switches. `Ctrl+P` to the repo, `Ctrl+N` for a new session,
-  `Ctrl+\`` for its terminal.
+  `Ctrl+\`` for its terminal — or `Ctrl+Shift+\`` to put the chat away entirely
+  and keep the window for the rail, the tree and the shells.
 
 Coordinating here means reading and steering, not automating. No rule engine
 answers a prompt for you and no scheduler decides what runs next — the watcher
@@ -508,6 +509,45 @@ from a different engine than the one that will do the write would eventually lie
 Clicking a result opens the file and lands the caret on the match, selecting the
 line — coming from a list of matches, seeing *which* text matched is the point.
 
+## Hiding the chat
+
+Not everyone uses the built-in chat. Plenty of people run `claude` in the shell
+and want this window for the rail, the tree and the terminals — so the chat hides
+the same way the terminal does, and by the same mechanism: `Ctrl+Shift+\`` (one
+Shift along from the terminal's `Ctrl+\``), the `chat` button in the titlebar,
+View ▸ Chat, or a right-click anywhere the app menu reaches.
+
+Hidden means hidden all the way, not a collapsed pane with its furniture left
+behind. The chat panes go, their tabs come out of the strip, the strip itself goes
+when a hidden chat leaves it empty, and the session sidebar on the right goes with
+them — a status panel describing a session you cannot see and a list of sessions
+you cannot open are chat furniture, not workbench. With nothing left on the editor
+side, the terminal panel stops honouring its stored size and takes the whole
+column: that size is what the panel is worth *beside* something, and there is
+nothing beside it. Only a hidden chat collapses that side, deliberately — a
+window with no repo picked shows an empty strip because it is waiting for one, and
+collapsing it there would make picking a repo shuffle the layout.
+
+It also means no `claude`. A hidden pane is still mounted — a turn that was
+streaming when you hid it keeps streaming, as everything else here does — but
+nothing *starts* behind a hidden chat: the per-repo seed that guarantees every
+repo a pane does not run, restored tabs stay cold so they spawn nothing and read
+no transcript, and closing the last chat of a repo does not quietly seed a
+replacement. A terminal-only repo costs zero CLI processes. Anything that asks
+for a session anyway — `Ctrl+N`, the `+` button, resuming a row from the rail or
+the dashboard — unhides the chat first, the way the terminal chords reveal a
+hidden panel rather than firing into nothing. That reveal takes the repo as an
+argument rather than reading the active one, because resuming from the rail
+switches repo and opens the tab in one go, and reading the active repo there would
+unhide the chat of the repo being left.
+
+Per repo, and persisted, for the same reason the terminal's flag is: hiding the
+chat in the repo you only ever run builds in must not hide it in the repo you
+talk to Claude in. A repo you have never touched opens with the chat shown. A
+chat tab left in front when the chat goes away is moved off — the strip does not
+list it any more, so leaving it focused would blank the centre with no row to
+click — and showing the chat again runs the seed, which puts a pane back in front.
+
 ## Terminal
 
 `Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the
@@ -651,6 +691,7 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Shift+Alt+F` | Reformat the file with the repo's own formatter |
 | `Ctrl+,` | Settings |
 | `Ctrl+\`` | Toggle terminal |
+| `Ctrl+Shift+\`` | Toggle chat — panes, tabs and the session sidebar |
 | `Ctrl+Shift+T` | New terminal tab |
 | `Ctrl+Shift+5` | Split terminal side by side |
 | `Ctrl+Shift+W` | Close terminal pane |
