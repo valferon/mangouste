@@ -1094,6 +1094,16 @@ export const ChatPane = memo(function ChatPane({
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   const [attachments, setAttachments] = useState<PendingImage[]>([]);
   const [running, setRunning] = useState(false);
+  /**
+   * The last turn stopped without closing: ESC, an API error, a dead stream.
+   *
+   * The transport says so and nothing else does. An interrupt leaves the process
+   * alive and `running` false — the same shape a clean `end_turn` leaves behind —
+   * so without this the dot on a tab you just cut off reads `done`, which is the
+   * one thing it is not. Cleared when a turn next starts, so it describes the
+   * newest turn rather than accumulating.
+   */
+  const [cutOff, setCutOff] = useState(false);
   const [alive, setAlive] = useState(false);
   /**
    * Whether this pane has earned its process.
@@ -1271,8 +1281,11 @@ export const ChatPane = memo(function ChatPane({
         ? ("idle" as const)
         : ("interrupted" as const);
     }
+    // A cut turn outranks "finished": the process being alive says the pane can
+    // still be typed into, not that the last turn ran to its end.
+    if (cutOff) return "interrupted" as const;
     return "finished" as const;
-  }, [awaitingPermission, running, alive, phase]);
+  }, [awaitingPermission, running, alive, phase, cutOff]);
 
   useEffect(() => {
     onStatus(coarseStatus);
@@ -1320,6 +1333,8 @@ export const ChatPane = memo(function ChatPane({
     async (mode: "attach" | "restart") => {
     setItems([]);
     setToolResults({});
+    // A fresh process has no turn behind it, cut off or otherwise.
+    setCutOff(false);
     setCostUsd(null);
     setModel(null);
     setContextTokens(0);
@@ -1516,6 +1531,7 @@ export const ChatPane = memo(function ChatPane({
 
         case "assistant": {
           setRunning(true);
+          setCutOff(false);
           // A tool_use block means the CLI now waits on that tool; nothing else
           // is written to the transcript until it returns, which is exactly the
           // silence that looks like a hang. Execution starts at this settled
@@ -1591,6 +1607,10 @@ export const ChatPane = memo(function ChatPane({
 
         case "result":
           setRunning(false);
+          // `success` is the only subtype that means the turn closed on its own.
+          // Everything else — an ESC, a dropped stream, an API error, the turn
+          // cap — is a turn that stopped mid-flight.
+          setCutOff(frame.subtype !== "success");
           setPhase("ready");
           setPendingTool(null);
           setToolActivity(null);
@@ -1943,6 +1963,7 @@ export const ChatPane = memo(function ChatPane({
           : text,
     });
     setRunning(true);
+    setCutOff(false);
     setPhase("sending");
     setTurnStartedAt(Date.now());
     logDebug(chatId, "send", text ? clipForSpinner(text) : "[images]");
