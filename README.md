@@ -5,6 +5,8 @@
 A lightweight watcher and coordinator for many concurrent Claude Code sessions.
 Single-window and multi-repo, so it also replaces running one VSCode window per
 repository — but the reason it exists is the *n* sessions, not the one window.
+A second window is `Ctrl+Shift+N` when one screen is not enough; it is the same
+process, watching the same sessions.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -278,7 +280,8 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/workspace.rs` | Repo discovery, lazy tree, quick-open search |
 | `src-tauri/src/format.rs` | Buffer through the repo's own formatter, stdin to stdout |
 | `src-tauri/src/primary.rs` | X11 PRIMARY + CLIPBOARD access |
-| `src-tauri/src/chats.rs` | Owns the child processes; kills them with the window |
+| `src-tauri/src/chats.rs` | Owns the child processes; kills them with their window |
+| `src-tauri/src/windows.rs` | A second window on the same process, and its label |
 | `src-tauri/src/permission.rs` | The MCP server the CLI asks for tool approval |
 | `src-tauri/src/stats.rs` | Corpus-wide tokens and cost, resumed by byte offset |
 | `src-tauri/src/usage.rs` | Anthropic usage windows, opt-in |
@@ -869,6 +872,7 @@ Single source of truth: `src/lib/keybindings.ts`.
 | `Shift+Enter` | Newline in composer |
 | `Ctrl+P` | Open recent — type-to-filter repo switcher |
 | `Ctrl+N` | New session in the active repo |
+| `Ctrl+Shift+N` | Second window on the same sessions |
 | `Ctrl+W` | Close the tab in front |
 | `Ctrl+S` | Save the file in front |
 | `Shift+Alt+F` | Reformat the file with the repo's own formatter |
@@ -918,6 +922,47 @@ there. `Ctrl+P` opens a type-to-filter palette ranked by real
 session recency, with every other git repo under `~/workspace` below that.
 Matching is a subsequence test on the repo name plus a substring test on the
 full path, so `pay` finds `payments-service` and `ws/an` finds `~/workspace/ansible`.
+
+## A second window
+
+`Ctrl+Shift+N`, or File ▸ New Window. Another window on the *same* process, not
+a second copy of the app: one session watcher, one chat manager, one permission
+bridge. Both windows list every session on the machine, because both are reading
+the same `~/.claude/projects`.
+
+What belongs to a window is its layout — the repo in front, the tab strip, the
+sidebar and terminal geometry. Those keys carry the window's label
+(`mangouste.openTabs.window-2`), so two strips cannot overwrite each other, and
+a label is reused as soon as it is free so a second window comes back where the
+last one was. What belongs to the *person* stays shared: theme, model,
+permission mode, and which sessions have been read. A preference chosen in one
+window is a preference.
+
+Chats and terminals belong to the window that started them and close with it —
+`chats::kill_owned_by` and `pty::close_owned_by`, both on `WindowEvent::Destroyed`
+rather than `CloseRequested`, since by the time a window-manager close is
+observable the webview is already gone and the `pty_close` an unmounting pane
+would have sent never went out. This is the promise the app has always made
+(children die with the window) made per window, and it has to be per window:
+nothing can answer a permission prompt raised by a chat whose pane no longer
+exists.
+
+Ids are what make the two windows separate rather than interleaved. A terminal
+id and a "New session" id are minted from counters that restart with each
+webview, and both are routing keys in Rust — `pty_open` closes whatever it holds
+under the id it is handed, and `claude_start` attaches to a live chat rather than
+spawning — so a second window's `term:1` would have killed the first window's.
+Ids minted outside `main` carry the label (`window-2:term:1`). Resumed sessions
+are deliberately not scoped: `chat|<cwd>|<uuid>` is content-derived, so opening
+one session in both windows attaches both panes to the one process.
+
+A second *instance* is a different thing and still refused. The permission
+bridge is a single socket this process owns; a second launch asks the running
+one to raise itself and exits.
+
+Two windows do run two of everything the frontend polls — the usage window, the
+upstream check, the git status sweep. Nothing is shared between them but the
+backend.
 
 ## Not implemented yet
 

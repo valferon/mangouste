@@ -25,6 +25,7 @@ import type { BarMenu } from "./MenuBar";
  */
 export const ID = {
   newSession: "file.newSession",
+  newWindow: "file.newWindow",
   newTerminal: "file.newTerminal",
   openRecent: "file.openRecent",
   openRepo: "file.openRepo",
@@ -154,6 +155,7 @@ export function buildBarMenus(commands: Rows): BarMenu[] {
       label: "File",
       items: [
         entry(commands, ID.newSession),
+        entry(commands, ID.newWindow),
         entry(commands, ID.newTerminal),
         "separator",
         entry(commands, ID.openRecent),

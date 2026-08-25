@@ -21,6 +21,7 @@ import { isMac } from "./platform";
 const BASE_CHORD = {
   menuBar: "F10",
   newSession: "Ctrl+N",
+  newWindow: "Ctrl+Shift+N",
   quickOpen: "Ctrl+P",
   save: "Ctrl+S",
   // What every editor this borrows its keymap from formats with, and free of
@@ -163,6 +164,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: CHORD.menuBar, what: "Open the menu bar, then walk it with the arrows" },
       { keys: CHORD.quickOpen, what: "Open a repo or recent session" },
       { keys: CHORD.newSession, what: "New session in the active repo" },
+      { keys: CHORD.newWindow, what: "Second window on the same sessions" },
       { keys: CHORD.closeTab, what: "Close the tab in front" },
       { keys: CHORD.closeTabAlt, what: "Close a tab, on the tab itself" },
       { keys: CHORD.settings, what: "Settings" },

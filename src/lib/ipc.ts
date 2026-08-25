@@ -343,6 +343,17 @@ export const gitCreateBranch = (cwd: string, name: string) =>
 export const gitMerge = (cwd: string, branch: string) =>
   invoke<string>("git_merge", { cwd, branch });
 
+/* ---------- windows ---------- */
+
+/**
+ * Open a second workbench window onto this same process.
+ *
+ * Resolves to the new window's label. Rust picks it, because the label decides
+ * which stored layout the window comes back with and only Rust can see which
+ * ones are already taken.
+ */
+export const openWindow = () => invoke<string>("open_window");
+
 /* ---------- dashboard statistics ---------- */
 
 /**

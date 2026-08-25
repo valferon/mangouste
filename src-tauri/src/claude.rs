@@ -2,11 +2,15 @@
 //!
 //! Children are owned by `chats.rs` inside this process, so closing the window
 //! ends them. Nothing here outlives the GUI.
+//!
+//! `start` and `restart` take the calling `Window` for that reason and no other:
+//! with a second window open, "closing the window" has to name one, and the one
+//! it names is whichever asked for the chat.
 
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{State, Window};
 
 use crate::chats::{self, ChatManager, ChatStatus, StartOptions};
 use crate::permission::{PermissionDecision, PermissionState};
@@ -15,9 +19,10 @@ use crate::permission::{PermissionDecision, PermissionState};
 #[tauri::command]
 pub fn claude_start(
     manager: State<'_, Arc<ChatManager>>,
+    window: Window,
     options: StartOptions,
 ) -> Result<ChatStatus, String> {
-    chats::start(&manager, options)
+    chats::start(&manager, window.label(), options)
 }
 
 /// Send a user turn. `text` goes through as a single text block.
@@ -74,10 +79,11 @@ pub fn claude_interrupt(
 #[tauri::command]
 pub fn claude_restart(
     manager: State<'_, Arc<ChatManager>>,
+    window: Window,
     options: StartOptions,
 ) -> Result<ChatStatus, String> {
     manager.kill(&options.chat_id, None);
-    chats::start(&manager, options)
+    chats::start(&manager, window.label(), options)
 }
 
 /// Stop watching a chat.

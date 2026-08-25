@@ -10,7 +10,17 @@
  *
  * Reads are validated at the boundary instead, and fall back rather than throw.
  * A preference is never worth a blank pane.
+ *
+ * `localStorage` is per origin, so a second window shares this store. The `state`
+ * group is therefore scoped to the window that wrote it — see `windowScope.ts` —
+ * while everything else stays deliberately shared: a theme chosen in one window
+ * is a theme.
  */
+
+import { scopeKey, windowLabel } from "./windowScope";
+
+/** This window's spelling of a `state` key. The other groups are shared. */
+const own = (key: string): string => scopeKey(key, windowLabel());
 
 /**
  * Bump when a stored shape changes in a way this build cannot read.
@@ -27,21 +37,23 @@ export const SCHEMA_VERSION = 1;
  * `prefs` is what you chose, `overlay` is your opinion of the sessions on disk,
  * and `cache` is content recovered off the wire that nothing else keeps. The
  * distinction is what lets a future "reset layout" clear one group without
- * touching the others.
+ * touching the others — and it is the same line the window scoping falls on,
+ * since `state` is the only group that describes *a* window rather than the
+ * person using it.
  */
 export const KEYS = {
   state: {
-    workspaceRoot: "mangouste.workspaceRoot",
-    activeRepo: "mangouste.activeRepo",
-    sidebarView: "mangouste.sidebarView",
-    leftWidth: "mangouste.leftWidth",
-    rightWidth: "mangouste.rightWidth",
-    terminalHeight: "mangouste.terminalHeight",
-    terminalWidth: "mangouste.terminalWidth",
-    terminalDock: "mangouste.terminalDock",
-    openTabs: "mangouste.openTabs",
-    activeTab: "mangouste.activeTab",
-    terminalOpen: "mangouste.terminalOpen",
+    workspaceRoot: own("mangouste.workspaceRoot"),
+    activeRepo: own("mangouste.activeRepo"),
+    sidebarView: own("mangouste.sidebarView"),
+    leftWidth: own("mangouste.leftWidth"),
+    rightWidth: own("mangouste.rightWidth"),
+    terminalHeight: own("mangouste.terminalHeight"),
+    terminalWidth: own("mangouste.terminalWidth"),
+    terminalDock: own("mangouste.terminalDock"),
+    openTabs: own("mangouste.openTabs"),
+    activeTab: own("mangouste.activeTab"),
+    terminalOpen: own("mangouste.terminalOpen"),
   },
   prefs: {
     theme: "mangouste.theme",
@@ -71,7 +83,12 @@ export const KEYS = {
 
 const SCHEMA_KEY = "mangouste.schema";
 
-/** Flat list of every key above, for the reset paths and for tests. */
+/**
+ * Flat list of every key above, for the reset paths and for tests.
+ *
+ * This window's keys, not every window's: a reset in one window must not throw
+ * away another's open tabs, and the shared groups are in here already.
+ */
 export function allKeys(): string[] {
   return Object.values(KEYS).flatMap((group) => Object.values(group));
 }

@@ -4,7 +4,8 @@
 //! the window. That was dropped deliberately: a chat that keeps burning tokens
 //! after you close the app is invisible spend, and the daemon's idle reaper
 //! could never fire while a chat was alive, so "temporarily detached" was in
-//! practice "forever". Children now live and die with the window.
+//! practice "forever". Children now live and die with the window that started
+//! them — see `Chat::owner`, and `kill_owned_by` below.
 //!
 //! What the daemon got right is kept: each child gets its own process group, so
 //! teardown signals the CLI's whole subtree rather than just the node process at
@@ -149,6 +150,13 @@ pub struct ChatStatus {
 
 struct Chat {
     instance: u64,
+    /// Label of the window that spawned this chat.
+    ///
+    /// Children live and die with the window, and with more than one window
+    /// open that has to mean *this* window: nothing else can answer the
+    /// permission prompts this chat raises, so leaving it running past its
+    /// window's close would park the next ask on a pane that no longer exists.
+    owner: String,
     cwd: String,
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -213,10 +221,29 @@ impl ChatManager {
         }
     }
 
-    /// Kill every chat. Called when the window goes away, which is the whole
-    /// point of this module owning them.
+    /// Kill every chat. Called on process exit, which is the whole point of
+    /// this module owning them.
     pub fn kill_all(&self) {
         let ids: Vec<String> = self.chats.lock().keys().cloned().collect();
+        for id in ids {
+            self.kill(&id, None);
+        }
+    }
+
+    /// Kill the chats one window started. Called when that window is destroyed.
+    ///
+    /// A chat another window has *attached* to still goes, because attaching
+    /// shares one process rather than transferring it: the alternative is a
+    /// chat whose owner is gone, which is exactly the orphan this module was
+    /// written to rule out.
+    pub fn kill_owned_by(&self, owner: &str) {
+        let ids: Vec<String> = self
+            .chats
+            .lock()
+            .iter()
+            .filter(|(_, chat)| chat.owner == owner)
+            .map(|(id, _)| id.clone())
+            .collect();
         for id in ids {
             self.kill(&id, None);
         }
@@ -976,6 +1003,7 @@ impl Drop for SpawnReservation<'_> {
 /// Start a chat, or attach to the one already running that id.
 pub fn start(
     manager: &Arc<ChatManager>,
+    owner: &str,
     options: StartOptions,
 ) -> Result<ChatStatus, String> {
     // Reserve the id before the liveness check: two concurrent starts would
@@ -1274,6 +1302,7 @@ pub fn start(
 
     let chat = Chat {
         instance,
+        owner: owner.to_string(),
         cwd: options.cwd.clone(),
         child,
         stdin: Arc::new(Mutex::new(stdin)),

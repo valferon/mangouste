@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Resizer } from "../layout/Split";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
+import { idScope } from "../lib/windowScope";
 import { TerminalPane } from "./TerminalPane";
 
 /**
@@ -46,10 +47,14 @@ interface RepoTerminals {
  * The Rust side keys terminals by id and `pty_open` closes whatever it already
  * has under the id it is handed, so a counter that restarted with the component
  * would hand a fresh pane the id of a live shell and kill it.
+ *
+ * That is also why the id carries the window: this counter is per webview, so
+ * without a scope a second window's first shell would open under `term:1` and
+ * close the first window's.
  */
 let sequence = 0;
 
-const mintId = (prefix: string) => `${prefix}:${(sequence += 1)}`;
+const mintId = (prefix: string) => `${idScope()}${prefix}:${(sequence += 1)}`;
 
 function makeSlot(): TerminalSlot {
   return { id: mintId("term"), weight: 1 };

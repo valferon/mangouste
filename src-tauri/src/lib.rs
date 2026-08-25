@@ -10,6 +10,7 @@ mod search;
 mod sessions;
 mod stats;
 mod usage;
+mod windows;
 mod workspace;
 
 use std::sync::Arc;
@@ -18,17 +19,17 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+// The label `tauri.conf.json` declares. Looked up by name rather than as "the
+// first window", so the one shown at the end of `setup` is that window and not
+// whichever second window `windows::open_window` has since minted.
+use windows::MAIN_WINDOW;
 
 pub use permission::run_permission_server;
 
 pub const EVENT_SESSIONS_CHANGED: &str = "sessions://changed";
-
-/// Label of the one window, matching `tauri.conf.json`. Looked up rather than
-/// taking "the first window", so a future second window cannot be shown by
-/// accident.
-const MAIN_WINDOW: &str = "main";
 
 /// Transcripts are appended to continuously during a turn, so the watcher is
 /// debounced hard — the sidebar only needs to know that *something* changed.
@@ -217,7 +218,12 @@ pub fn run() {
                 // parking them on a prompt no window will show.
                 move |chat_id| owner.statuses().iter().any(|status| status.chat_id == chat_id),
                 move || {
-                    if let Some(window) = raiser.get_webview_window(MAIN_WINDOW) {
+                    // Main by preference, but any window will do: with a second
+                    // one open, main is no longer guaranteed to be the survivor.
+                    let window = raiser.get_webview_window(MAIN_WINDOW).or_else(|| {
+                        raiser.webview_windows().into_values().next()
+                    });
+                    if let Some(window) = window {
                         let _ = window.unminimize();
                         let _ = window.show();
                         let _ = window.set_focus();
@@ -320,6 +326,8 @@ pub fn run() {
             git::git_checkout,
             git::git_create_branch,
             git::git_merge,
+            // windows
+            windows::open_window,
             // usage
             usage::fetch_usage,
             // dashboard statistics
@@ -327,6 +335,30 @@ pub fn run() {
             // tool permissions
             claude::permission_respond,
         ]);
+
+    // Every window takes its own children with it. The process-wide sweep on
+    // `RunEvent::Exit` below still catches the last one, but with more than one
+    // window open that sweep is far too late: a closed window's shells would go
+    // on running invisibly, and its chats would raise permission prompts at a
+    // pane that no longer exists.
+    //
+    // `Destroyed`, not `CloseRequested`: a close request can be vetoed, and
+    // reaping a window's children before it is actually gone would empty a
+    // window that stayed. Off the main thread, because both sweeps wait out a
+    // grace period per child and this runs while the other window is drawing.
+    let builder = builder.on_window_event(|window, event| {
+        if !matches!(event, WindowEvent::Destroyed) {
+            return;
+        }
+        let handle = window.app_handle().clone();
+        let label = window.label().to_string();
+        std::thread::spawn(move || {
+            let terminals: tauri::State<'_, pty::PtyState> = handle.state();
+            pty::close_owned_by(&terminals, &label);
+            let manager: tauri::State<'_, Arc<chats::ChatManager>> = handle.state();
+            manager.kill_owned_by(&label);
+        });
+    });
 
     // Only macOS gets a native menu; the other platforms draw the menu bar
     // inside the window, and a second one above it would be a duplicate.

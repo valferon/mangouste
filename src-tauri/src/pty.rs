@@ -62,6 +62,13 @@ struct Terminal {
     /// answer without a `try_wait` that would reap the child behind
     /// `terminate_group`'s back.
     alive: Arc<AtomicBool>,
+    /// Label of the window whose pane opened this shell.
+    ///
+    /// A window is destroyed without its webview running React cleanup, so the
+    /// `pty_close` an unmounting pane would have sent never goes out. Without an
+    /// owner recorded here, closing a window would leave every shell it held
+    /// running with nothing on screen attached to it.
+    owner: String,
     cwd: String,
 }
 
@@ -104,6 +111,7 @@ fn login_shell() -> String {
 #[tauri::command(async)]
 pub fn pty_open(
     app: AppHandle,
+    window: tauri::Window,
     state: State<'_, PtyState>,
     id: String,
     cwd: String,
@@ -159,6 +167,7 @@ pub fn pty_open(
             writer: Arc::new(Mutex::new(writer)),
             child,
             alive: Arc::clone(&alive),
+            owner: window.label().to_string(),
             cwd: cwd.clone(),
         },
     );
@@ -353,6 +362,23 @@ fn close_terminal(state: &PtyState, id: &str, instance: Option<u64>) {
     };
     if let Some(mut terminal) = removed {
         terminate_group(&mut *terminal.child);
+    }
+}
+
+/// Close every terminal one window opened. Called when that window is destroyed.
+///
+/// Not a command: nothing in the frontend knows the set, and the window whose
+/// shells these are is gone by the time it matters.
+pub fn close_owned_by(state: &PtyState, owner: &str) {
+    let ids: Vec<String> = state
+        .terminals
+        .lock()
+        .iter()
+        .filter(|(_, terminal)| terminal.owner == owner)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in ids {
+        close_terminal(state, &id, None);
     }
 }
 

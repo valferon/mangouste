@@ -37,6 +37,7 @@ import {
   gitRoot,
   homeDir,
   openExternal,
+  openWindow,
   renameSession,
   revealPath,
 } from "./lib/ipc";
@@ -96,6 +97,7 @@ import {
   FEEDBACK_LEVELS,
   type FeedbackLevel,
 } from "./lib/feedback";
+import { idScope } from "./lib/windowScope";
 
 /* Persisted keys all come from the catalogue in `lib/persist.ts`, so a reset or
    a migration can enumerate them without grepping for string literals. */
@@ -940,7 +942,10 @@ function Workbench() {
     const surface = surfaceRef.current;
     return {
       kind: "chat",
-      id: `chat|${cwd}|new-${(newSessionCounter.current += 1)}`,
+      // Window-scoped: the counter restarts with each webview, and an id a
+      // second window repeated would attach it to the first window's process
+      // instead of spawning its own.
+      id: `chat|${cwd}|${idScope()}new-${(newSessionCounter.current += 1)}`,
       cwd,
       sessionId: surface === "terminal" ? mintSessionId() : null,
       resumeFile: null,
@@ -1509,6 +1514,12 @@ function Workbench() {
         shellFirst: true,
         disabled: !activeRepo,
         run: () => activeRepo && openNewChatTab(activeRepo),
+      },
+      {
+        id: ID.newWindow,
+        label: "New Window",
+        chord: CHORD.newWindow,
+        run: () => void openWindow(),
       },
       {
         id: ID.newTerminal,
