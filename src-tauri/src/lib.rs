@@ -303,6 +303,7 @@ pub fn run() {
             // git
             git::git_log,
             git::git_status,
+            git::git_tracking,
             git::git_show,
             git::git_diff_file,
             git::git_branches,

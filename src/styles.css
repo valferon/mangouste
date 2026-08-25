@@ -2151,6 +2151,106 @@ select {
   flex: 1;
 }
 
+/* ---------- status bar: branch ---------- */
+
+/* Sits on the accent bar, so everything here is drawn in `--accent-fg` and
+   separated by translucency rather than by borders in a colour that would have
+   to be picked per theme. */
+.status-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.status-branch-name {
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Commits owed in each direction. Same weight as each other: which one matters
+   is the reader's business, and colouring one of them red would make an
+   ordinary branch look broken. */
+.status-ahead,
+.status-behind {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+/* A fetch in flight. No spin: the bar is glanced at, and a moving glyph in the
+   corner of the eye is a notification, which this is not. */
+.status-checking {
+  opacity: 0.6;
+}
+
+.status-pull {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -8px;
+  padding: 1px 7px;
+  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-fg) 35%, transparent);
+  border-radius: 9px;
+  color: var(--accent-fg);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.status-pull:hover {
+  background: color-mix(in srgb, var(--accent-fg) 30%, transparent);
+}
+
+.status-pull:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Diverged: the button opens the explanation instead of promising a pull that
+   `--ff-only` cannot deliver, so it is drawn as a warning rather than an
+   action. */
+.status-pull[data-diverged="true"] {
+  border-style: dashed;
+}
+
+/* ---------- upstream prompt ---------- */
+
+.pull-prompt {
+  width: min(440px, 90vw);
+}
+
+.pull-prompt-body {
+  padding: 12px 14px;
+}
+
+.pull-prompt-body p {
+  margin: 0 0 8px;
+}
+
+.pull-prompt-body p:last-child {
+  margin-bottom: 0;
+}
+
+.pull-prompt-error {
+  padding: 6px 8px;
+  background: var(--bg);
+  border-left: 2px solid var(--red);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.pull-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
 /* ---------- scrollbars ---------- */
 
 ::-webkit-scrollbar {

@@ -42,6 +42,14 @@ interface GitPaneProps {
   onShowDiff: (title: string, patch: string) => void;
   /** Open the working-tree copy of a path in an editor tab. */
   onOpenFile: (path: string) => void;
+  /**
+   * Bumped when something outside this pane wrote to the repo.
+   *
+   * The pane re-reads after each of its own operations, so this covers the ones
+   * it cannot see — a pull from the status bar — where the alternative is a
+   * history list describing a HEAD that has moved on.
+   */
+  refreshToken?: number;
 }
 
 const COMMIT_PAGE = 150;
@@ -82,7 +90,12 @@ function isUntracked(file: FileStatus): boolean {
  * History is a flat list rather than a rendered lane graph; the `parents` and
  * `refs` fields are already carried through from Rust for when that lands.
  */
-export const GitPane = memo(function GitPane({ cwd, onShowDiff, onOpenFile }: GitPaneProps) {
+export const GitPane = memo(function GitPane({
+  cwd,
+  onShowDiff,
+  onOpenFile,
+  refreshToken = 0,
+}: GitPaneProps) {
   const menu = useMenu();
   const [status, setStatus] = useState<RepoStatus | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
@@ -126,7 +139,9 @@ export const GitPane = memo(function GitPane({ cwd, onShowDiff, onOpenFile }: Gi
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    // `refreshToken` is a dep and nothing else reads it: a bump is the whole
+    // signal, and the value it lands on means nothing.
+  }, [refresh, refreshToken]);
 
   // A draft commit message belongs to the repo it was typed for, and so does
   // an open branch menu — both are wrong the moment the active repo changes.

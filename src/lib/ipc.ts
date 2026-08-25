@@ -292,6 +292,13 @@ export const replaceMatches = (
 export const gitLog = (cwd: string, limit?: number, skip?: number, allBranches = true) =>
   invoke<Commit[]>("git_log", { cwd, limit, skip, allBranches });
 export const gitStatus = (cwd: string) => invoke<RepoStatus>("git_status", { cwd });
+/**
+ * Branch and upstream counts without the worktree scan a status does.
+ *
+ * Same shape as `gitStatus`, minus `files`, for the callers that only want the
+ * branch header — which is the poll in the status bar, so the cost matters.
+ */
+export const gitTracking = (cwd: string) => invoke<RepoStatus>("git_tracking", { cwd });
 export const gitShow = (cwd: string, sha: string) => invoke<string>("git_show", { cwd, sha });
 export const gitDiffFile = (cwd: string, path: string, staged = false) =>
   invoke<string>("git_diff_file", { cwd, path, staged });

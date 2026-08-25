@@ -203,6 +203,85 @@ fn parse_branch_header(header: &str, status: &mut RepoStatus) {
     }
 }
 
+/// Branch and upstream tracking, without walking the worktree.
+///
+/// `git_status` answers this too, but it answers it by scanning every tracked
+/// file — which is the expensive part of a status, and the status bar polls.
+/// These three plumbing commands touch nothing but refs, so the poll costs the
+/// same on a monorepo as on a toy.
+///
+/// The vocabulary is deliberately the porcelain header's, sentences and all:
+/// `HEAD (no branch)` when detached and `No commits yet on <branch>` before the
+/// first commit. It means the frontend has one shape to understand rather than
+/// two, and `git_status` remains a drop-in for this call.
+#[tauri::command(async)]
+pub fn git_tracking(cwd: String) -> Result<RepoStatus, String> {
+    let mut status = RepoStatus {
+        branch: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        files: Vec::new(),
+    };
+
+    // `symbolic-ref` rather than `rev-parse --abbrev-ref HEAD`: it names the
+    // branch even before its first commit, and fails cleanly when there is no
+    // branch to name. `-q` keeps a detached HEAD off stderr, where it is not an
+    // error worth reporting.
+    let branch = git(&cwd, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|name| !name.is_empty());
+    let Some(branch) = branch else {
+        // Not a branch. Whether that is a detached HEAD or not a repo at all is
+        // the difference between having a HEAD and not, and only one of the two
+        // is something to show.
+        if git(&cwd, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+            status.branch = Some("HEAD (no branch)".to_string());
+        }
+        return Ok(status);
+    };
+
+    // No commit yet: there is a branch, it just points at nothing, so there is
+    // no upstream comparison to make either.
+    if git(&cwd, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        status.branch = Some(format!("No commits yet on {branch}"));
+        return Ok(status);
+    }
+    status.branch = Some(branch);
+
+    // No upstream is the ordinary state of a local branch, not a failure.
+    let upstream = git(
+        &cwd,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()
+    .map(|out| out.trim().to_string())
+    .filter(|name| !name.is_empty());
+    let Some(upstream) = upstream else {
+        return Ok(status);
+    };
+
+    // `HEAD...@{u}` counts each side of the fork point: left is what is here and
+    // not upstream, right is what is upstream and not here.
+    let counts = git(&cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"])?;
+    let (ahead, behind) = parse_counts(&counts);
+    status.upstream = Some(upstream);
+    status.ahead = ahead;
+    status.behind = behind;
+    Ok(status)
+}
+
+/// `"2\t3"` from `rev-list --left-right --count`. Unparseable means zero rather
+/// than an error: a count this app could not read is not a reason to lose the
+/// branch name it came with.
+fn parse_counts(out: &str) -> (u32, u32) {
+    let mut fields = out.split_whitespace();
+    let ahead = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    let behind = fields.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    (ahead, behind)
+}
+
 /// Byte ceiling on a returned patch. Far more than the viewer will render
 /// (`Viewer.tsx` stops at 5000 lines), but small enough that the IPC hop and the
 /// JSON encode stay imperceptible; a commit touching a generated file can
@@ -649,4 +728,133 @@ pub fn git_discard(cwd: String, tracked: Vec<String>, untracked: Vec<String>) ->
         git(&cwd, &args)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tracking_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Per-test scratch directory, removed and recreated so a rerun starts clean.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mangouste-git-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Run git, failing the test with git's own message rather than a unit error.
+    fn run(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// An empty repo on a known branch name, whatever the host's default is.
+    fn repo(name: &str) -> PathBuf {
+        let dir = scratch(name);
+        run(&dir, &["init", "--quiet", "--initial-branch=main", "."]);
+        dir
+    }
+
+    fn commit(dir: &Path, text: &str) {
+        std::fs::write(dir.join("f.txt"), text).expect("write");
+        run(dir, &["add", "f.txt"]);
+        run(dir, &["commit", "--quiet", "-m", text]);
+    }
+
+    fn tracking(dir: &Path) -> RepoStatus {
+        git_tracking(dir.to_string_lossy().into_owned()).expect("tracking")
+    }
+
+    #[test]
+    fn a_branch_with_no_commits_keeps_its_name() {
+        // `rev-parse --abbrev-ref HEAD` fails outright here, which is the reason
+        // the branch is read with `symbolic-ref`.
+        let dir = repo("unborn");
+        let status = tracking(&dir);
+        assert_eq!(status.branch.as_deref(), Some("No commits yet on main"));
+        assert_eq!(status.upstream, None);
+    }
+
+    #[test]
+    fn a_branch_with_no_upstream_is_not_a_failure() {
+        let dir = repo("no-upstream");
+        commit(&dir, "one");
+        let status = tracking(&dir);
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!(status.upstream, None);
+        assert_eq!((status.ahead, status.behind), (0, 0));
+    }
+
+    #[test]
+    fn a_detached_head_has_a_branch_of_no_branch() {
+        let dir = repo("detached");
+        commit(&dir, "one");
+        commit(&dir, "two");
+        run(&dir, &["checkout", "--quiet", "HEAD~1"]);
+        let status = tracking(&dir);
+        assert_eq!(status.branch.as_deref(), Some("HEAD (no branch)"));
+        assert_eq!(status.upstream, None);
+    }
+
+    #[test]
+    fn outside_a_repository_there_is_no_branch_at_all() {
+        // Distinct from a detached HEAD, which has one to show.
+        let dir = scratch("not-a-repo");
+        let status = tracking(&dir);
+        assert_eq!(status.branch, None);
+    }
+
+    #[test]
+    fn each_side_of_the_fork_point_is_counted() {
+        // A clone, so `@{u}` is configured the way it is in a real checkout.
+        let origin = repo("counts-origin");
+        commit(&origin, "one");
+        commit(&origin, "two");
+        let clone = scratch("counts-clone").join("work");
+        run(
+            Path::new("/tmp"),
+            &[
+                "clone",
+                "--quiet",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+
+        let level = tracking(&clone);
+        assert_eq!(level.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((level.ahead, level.behind), (0, 0));
+
+        // Two more upstream, one of our own, fetched but not merged: the
+        // diverged case the status bar must not offer a fast-forward for.
+        commit(&origin, "three");
+        commit(&origin, "four");
+        commit(&clone, "mine");
+        run(&clone, &["fetch", "--quiet", "origin"]);
+        let diverged = tracking(&clone);
+        assert_eq!((diverged.ahead, diverged.behind), (1, 2));
+    }
+
+    #[test]
+    fn an_unreadable_count_keeps_the_branch_it_came_with() {
+        assert_eq!(parse_counts("2\t3\n"), (2, 3));
+        assert_eq!(parse_counts(""), (0, 0));
+        assert_eq!(parse_counts("wat"), (0, 0));
+    }
 }

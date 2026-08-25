@@ -10,6 +10,8 @@ interface SettingsProps {
   onPermissionMode: (mode: string) => void;
   restoreTabs: boolean;
   onRestoreTabs: (on: boolean) => void;
+  upstreamWatch: boolean;
+  onUpstreamWatch: (on: boolean) => void;
   workspaceRoot: string;
   onWorkspaceRoot: (root: string) => void;
   onClose: () => void;
@@ -26,6 +28,8 @@ export function Settings({
   onPermissionMode,
   restoreTabs,
   onRestoreTabs,
+  upstreamWatch,
+  onUpstreamWatch,
   workspaceRoot,
   onWorkspaceRoot,
   onClose,
@@ -131,6 +135,27 @@ export function Settings({
         <p className="setting-hint">
           Restored sessions come back as tabs, but a tab does not start its{" "}
           <code>claude</code> process or read its transcript until you open it.
+        </p>
+
+        <div className="setting-row">
+          <label>Check for upstream changes</label>
+          <div className="segmented">
+            <button data-active={upstreamWatch} onClick={() => onUpstreamWatch(true)}>
+              on
+            </button>
+            <button data-active={!upstreamWatch} onClick={() => onUpstreamWatch(false)}>
+              off
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          Runs <code>git fetch --all --prune</code> when a repo is opened and every five
+          minutes after, so the branch chip in the status bar knows what is waiting
+          upstream. Opening a repo with commits waiting offers to pull them, once per set
+          of commits; the later checks light the <code>pull</code> button instead of
+          interrupting. Fetching only writes remote-tracking refs — your branches and
+          worktree are untouched. Off keeps the chip and its counts, which then move only
+          when you fetch yourself.
         </p>
 
         <div className="setting-row">

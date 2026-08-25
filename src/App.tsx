@@ -3,6 +3,7 @@ import { Resizer, usePersistentSize } from "./layout/Split";
 import { ChatPane } from "./panes/ChatPane";
 import { Dashboard } from "./panes/Dashboard";
 import { FileTree } from "./panes/FileTree";
+import { BranchStatus } from "./panes/BranchStatus";
 import { GitPane } from "./panes/GitPane";
 import { QuickOpen } from "./panes/QuickOpen";
 import { SearchPane } from "./panes/SearchPane";
@@ -279,6 +280,29 @@ function Workbench() {
   useEffect(() => {
     writeBoolean(KEYS.prefs.restoreTabs, restoreTabs);
   }, [restoreTabs]);
+  /**
+   * Whether the app fetches on its own to notice upstream commits.
+   *
+   * A preference because it is the only thing here that reaches the network
+   * without being asked to. Off leaves the branch chip in place and reading
+   * refs — it just never learns anything the user's own `git fetch` has not
+   * already written down.
+   */
+  const [upstreamWatch, setUpstreamWatch] = useState(() =>
+    readBoolean(KEYS.prefs.upstreamWatch, true),
+  );
+  useEffect(() => {
+    writeBoolean(KEYS.prefs.upstreamWatch, upstreamWatch);
+  }, [upstreamWatch]);
+  /**
+   * Bumped when something outside Source Control changes the repo.
+   *
+   * Only a pull from the status bar, so far. The pane is the source of truth for
+   * its own writes and re-reads after each of them; this is for the writes that
+   * happen somewhere it cannot see.
+   */
+  const [gitRefresh, setGitRefresh] = useState(0);
+  const bumpGitRefresh = useCallback(() => setGitRefresh((token) => token + 1), []);
   /** Live facts lifted out of the chat pane for the status panel. */
   const [chatStats, setChatStats] = useState<ChatStats>({
     sessionId: null,
@@ -1820,7 +1844,12 @@ function Workbench() {
           >
             {activeRepo && (
               <PaneBoundary label="source control">
-                <GitPane cwd={activeRepo} onShowDiff={showDiffHere} onOpenFile={openFileHere} />
+                <GitPane
+                  cwd={activeRepo}
+                  refreshToken={gitRefresh}
+                  onShowDiff={showDiffHere}
+                  onOpenFile={openFileHere}
+                />
               </PaneBoundary>
             )}
           </div>
@@ -2163,6 +2192,8 @@ function Workbench() {
           permissionMode={permissionMode}
           onPermissionMode={setPermissionMode}
           restoreTabs={restoreTabs}
+          upstreamWatch={upstreamWatch}
+          onUpstreamWatch={setUpstreamWatch}
           onRestoreTabs={setRestoreTabs}
           workspaceRoot={workspaceRoot}
           onWorkspaceRoot={setWorkspaceRoot}
@@ -2259,6 +2290,15 @@ function Workbench() {
         }
       >
         <span>{activeRepo || "no repo"}</span>
+        {/* Which branch, what it owes its upstream, and one click to take it.
+            Here rather than only in Source Control because this is the question
+            that gets asked while looking at something else. */}
+        <BranchStatus
+          cwd={activeRepo}
+          watch={upstreamWatch}
+          onChanged={bumpGitRefresh}
+          onNotice={setSystemMessage}
+        />
         {liveSessionId && <span>session {liveSessionId.slice(0, 8)}</span>}
         {/* The technical answer to "why is nothing moving"; click for the
             full story — every frame, call and timing behind it. */}

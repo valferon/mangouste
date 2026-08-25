@@ -273,7 +273,7 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/claude.rs` | One `claude` child per chat pane over stream-json |
 | `src-tauri/src/pty.rs` | PTY-backed terminals (`portable-pty`), base64 on the wire |
 | `src-tauri/src/sessions.rs` | Scans `~/.claude/projects`, head/tail sampled |
-| `src-tauri/src/git.rs` | `git` porcelain: status, log, show, diff |
+| `src-tauri/src/git.rs` | `git` porcelain: status, tracking, log, show, diff |
 | `src-tauri/src/workspace.rs` | Repo discovery, lazy tree, quick-open search |
 | `src-tauri/src/format.rs` | Buffer through the repo's own formatter, stdin to stdout |
 | `src-tauri/src/primary.rs` | X11 PRIMARY + CLIPBOARD access |
@@ -587,6 +587,57 @@ The rest follows from the tab holding a program instead of a pane:
   works the same way, and says so when there is no transcript to write to yet.
 - **Entries written before this existed still restore.** A stored tab with no
   surface is a chat tab, which is the only surface there used to be.
+
+## The branch, and what it owes upstream
+
+The status bar carries the branch of the repo the strip is showing, `↑` for
+commits it has that the upstream does not, `↓` for the ones it does not have —
+and a `pull` button beside them when there is something to take. Source Control
+answers the same question in more detail, but only while it is the pane you have
+open, and "which branch am I on" is a question asked while looking at something
+else.
+
+Nothing here is remembered. A checkout in a terminal tab, a commit made by a
+session, a pull in the sidebar all move these numbers without telling the status
+bar, so it re-reads them every few seconds instead of tracking them. That is
+affordable only because the read is `git_tracking`, which is `symbolic-ref` and
+`rev-list --count` — refs on disk and nothing else. `git_status` answers the same
+question, but it answers it by walking every tracked file, and a poll doing that
+on a monorepo is a stutter on every tick.
+
+**Behind is a fact about the last fetch, not about the server.** So knowing
+whether there is anything to pull means fetching, and Settings ▸ **Check for
+upstream changes** is what allows it: `git fetch --all --prune` when a repo is
+opened, and every five minutes after, skipped whenever the window is off screen.
+A fetch writes remote-tracking refs and touches neither branches nor the
+worktree. Turned off, the chip and its counts stay — they just stop moving on
+their own.
+
+**The offer arrives when it is still cheap to accept.** Opening a repo is the
+moment before you start working in it, which is the one moment pulling is free;
+an hour of edits later the same pull is a rebase. So a repo that opens with
+commits waiting raises a dialog rather than lighting up two digits nobody was
+looking at, and it does so once per set of commits — dismissing three says
+nothing about the two that land afterwards, and the count is part of what
+identifies the news. Deliberately not remembered across restarts: a reminder
+that only ever fires once stops being a reminder.
+
+Only the open interrupts. The five-minute ticks land mid-work, where a dialog
+over the thing you are reading costs more than it tells you, so they move the
+counts and light the `pull` button instead — the button is the notification.
+
+**The pull is `--ff-only`, as it is in Source Control.** A pull that has to merge,
+in a worktree you may be mid-edit in, is exactly where an implicit merge commit
+is the wrong answer. A branch that has diverged is therefore not offered one at
+all: the button says `diverged` and opens the explanation, because reconciling
+the two sides is a merge or a rebase and picking between them is not something a
+status-bar button should do on your behalf. Everything that fails, fails in git's
+own words — a dirty file it would overwrite says so far better than any wording
+here would.
+
+Failures of the background fetch are silent, and that is the point: offline, no
+credential helper, a lock held by your own `git` — none of them is worth a dialog
+you did not open, and the next tick tries again.
 
 ## Terminal
 

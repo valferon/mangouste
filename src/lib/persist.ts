@@ -51,6 +51,7 @@ export const KEYS = {
     cliDebug: "mangouste.cliDebug",
     restoreTabs: "mangouste.restoreTabs",
     sessionSurface: "mangouste.sessionSurface",
+    upstreamWatch: "mangouste.upstreamWatch",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
