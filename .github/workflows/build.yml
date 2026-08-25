@@ -147,6 +147,45 @@ jobs:
             *) echo "not a universal binary"; exit 1 ;;
           esac
 
+      # Does the thing actually start?
+      #
+      # Every macOS check above is static -- it compiles, it is signed, it has
+      # both slices -- and none of that answers the only question that matters,
+      # which a bundle that hangs before drawing anything answered "no" to. The
+      # runner is a clean, unmanaged Mac, so it can say whether the app starts
+      # on a machine with no corporate policy in the way, which is exactly the
+      # variable that cannot be isolated on someone else's laptop.
+      #
+      # Copied out of the read-only image first: the app writes nothing here,
+      # but it does want a home for its runtime socket, and a launch from a
+      # mounted dmg is not the launch anyone performs.
+      - name: Launch the macOS app
+        if: runner.os == 'macOS'
+        run: |
+          dmg="$(find src-tauri/target/${{ matrix.bundle-target }}/release/bundle/dmg \
+                 -maxdepth 1 -name '*.dmg' -print -quit)"
+          mount="$(mktemp -d)"; smoke="$(mktemp -d)"
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly -quiet
+          cp -R "$(find "$mount" -maxdepth 1 -name '*.app' -print -quit)" "$smoke/"
+          app="$(find "$smoke" -maxdepth 1 -name '*.app' -print -quit)"
+
+          MANGOUSTE_TRACE_STARTUP=1 "$app/Contents/MacOS/mangouste" >"$smoke/out" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do
+            grep -q 'window shown' "$smoke/out" && break
+            kill -0 $pid 2>/dev/null || break
+            sleep 1
+          done
+          # Ask it to go before asserting: the app reaps its `claude` children
+          # from its own exit handler, and there is no reason to teach CI a
+          # habit the installer had to be careful about.
+          kill -TERM $pid 2>/dev/null || true
+          echo "--- startup trace ---"; cat "$smoke/out"
+          grep -q 'window shown' "$smoke/out" || {
+            echo "the app did not reach a window"; exit 1;
+          }
+
       # Tauri hardcodes the pre-t64 `libgtk-3-0` into Depends, which has no
       # candidate on 24.04, so the generated .deb will not install until the
       # field is rewritten. See scripts/fix-deb-depends.sh.
