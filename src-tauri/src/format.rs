@@ -623,23 +623,34 @@ mod tests {
         assert_eq!(strip_stdin_header("stdin: 1\n"), "stdin: 1\n");
     }
 
-    /// `cat` stands in for a formatter that agrees with the buffer, and `false`
-    /// for one that refuses it.
+    /// The three answers a formatter can give, stood in for by `sh`: one that
+    /// agrees with the buffer, one that refuses it, and one that exits happy
+    /// having said nothing.
+    ///
+    /// `/bin/sh` and nothing else, because it is the one path POSIX actually
+    /// promises. This test reached for `/bin/true` and `/bin/false` first, which
+    /// exist on Linux and do not on macOS — they live in `/usr/bin` there — so
+    /// it passed everywhere it was written and failed on one CI leg.
     #[test]
     #[cfg(unix)]
     fn a_run_pipes_the_buffer_through() {
+        let sh = Path::new("/bin/sh");
+        let script = |source: &str| vec!["-c".to_string(), source.to_string()];
         let dir = scratch("run");
         let text = "one\ntwo\n";
-        assert_eq!(run(Path::new("/bin/cat"), &[], &dir, text).unwrap(), text);
+        assert_eq!(run(sh, &script("cat"), &dir, text).unwrap(), text);
 
-        let refused = run(Path::new("/bin/false"), &[], &dir, text).unwrap_err();
+        let refused = run(sh, &script("exit 1"), &dir, text).unwrap_err();
         assert!(refused.contains("exited"), "{refused}");
 
-        // An empty answer to a non-empty buffer would empty the editor.
-        let emptied = run(Path::new("/bin/true"), &[], &dir, text).unwrap_err();
+        // An empty answer to a non-empty buffer would empty the editor. This one
+        // also never reads stdin, so the write fails with EPIPE or not depending
+        // on whether the buffer fitted in the pipe first — the empty output is
+        // the answer either way, which is what `run` orders its checks for.
+        let emptied = run(sh, &script("exit 0"), &dir, text).unwrap_err();
         assert!(emptied.contains("produced no output"), "{emptied}");
         // …but an empty buffer legitimately formats to an empty one.
-        assert_eq!(run(Path::new("/bin/true"), &[], &dir, "").unwrap(), "");
+        assert_eq!(run(sh, &script("exit 0"), &dir, "").unwrap(), "");
     }
 
     #[test]
@@ -824,6 +835,10 @@ mod tests {
     fn a_buffer_larger_than_the_pipe_survives() {
         let dir = scratch("big");
         let text = "abcdefgh\n".repeat(40_000); // ~350KB, well past a 64KB pipe
-        assert_eq!(run(Path::new("/bin/cat"), &[], &dir, &text).unwrap(), text);
+        // Through `sh` for the same reason as the test above: `/bin/sh` is the
+        // one path every unix promises, and a test binary that is only on some
+        // of them fails on a machine nobody ran it on.
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        assert_eq!(run(Path::new("/bin/sh"), &args, &dir, &text).unwrap(), text);
     }
 }
