@@ -1847,6 +1847,7 @@ function Workbench() {
                 <GitPane
                   cwd={activeRepo}
                   refreshToken={gitRefresh}
+                  visible={sidebarView === "git"}
                   onShowDiff={showDiffHere}
                   onOpenFile={openFileHere}
                 />

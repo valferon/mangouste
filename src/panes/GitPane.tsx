@@ -50,9 +50,28 @@ interface GitPaneProps {
    * history list describing a HEAD that has moved on.
    */
   refreshToken?: number;
+  /**
+   * Whether this sidebar view is the one on screen.
+   *
+   * The views are switched with `display: none`, so a hidden pane is a mounted
+   * pane: without this it would keep its timers running and walk the worktree
+   * for something nobody can see, and — worse — switching *to* it would not
+   * re-read anything, because nothing remounted.
+   */
+  visible?: boolean;
 }
 
 const COMMIT_PAGE = 150;
+
+/**
+ * How often an open Source Control pane re-reads the repo.
+ *
+ * `refresh` is a `git status` — which walks every tracked file — plus a `git
+ * log`, so this is the expensive read, not the cheap one the status bar polls.
+ * What makes the rate affordable is that it only runs while the pane is the
+ * sidebar view on screen: hidden, it costs nothing at all.
+ */
+const VISIBLE_REFRESH_MS = 10_000;
 
 /** Which sections are open. History stays open; the change lists follow VSCode. */
 type SectionKey = "staged" | "changes" | "history";
@@ -95,6 +114,7 @@ export const GitPane = memo(function GitPane({
   onShowDiff,
   onOpenFile,
   refreshToken = 0,
+  visible = true,
 }: GitPaneProps) {
   const menu = useMenu();
   const [status, setStatus] = useState<RepoStatus | null>(null);
@@ -137,11 +157,39 @@ export const GitPane = memo(function GitPane({
     }
   }, [cwd]);
 
+  /*
+   * Every automatic read, and all of them gated on being on screen.
+   *
+   * Covers becoming visible, a repo switch, and `refreshToken`; the listener and
+   * the timer cover the rest. `refreshToken` is a dep and nothing reads its
+   * value — a bump is the whole signal.
+   *
+   * The pane used to re-read on those first three and nothing else, which
+   * assumed what its own docstring says: that every write comes through `run`.
+   * That held when the sidebar was the only way to commit. It stopped holding
+   * once a session could run `git` in a terminal tab, and it does not hold at
+   * all when the writer is a `claude` outside the app — the case where the pane
+   * sat on a three-hour-old snapshot and reported changes that were long since
+   * committed.
+   */
   useEffect(() => {
+    if (!visible) return;
     void refresh();
-    // `refreshToken` is a dep and nothing else reads it: a bump is the whole
-    // signal, and the value it lands on means nothing.
-  }, [refresh, refreshToken]);
+    // Coming back to the window is the moment a stale list is most likely and
+    // most misleading — the same reason `Viewer` re-reads its buffer on focus.
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
+    // A watcher on the repo would be better than a clock, and is what VSCode
+    // does. Until there is one, this is bounded by the thing that makes it
+    // affordable: it only ticks while you are looking at the pane.
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, VISIBLE_REFRESH_MS);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.clearInterval(timer);
+    };
+  }, [visible, refresh, refreshToken]);
 
   // A draft commit message belongs to the repo it was typed for, and so does
   // an open branch menu — both are wrong the moment the active repo changes.
