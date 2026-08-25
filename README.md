@@ -589,6 +589,73 @@ The rest follows from the tab holding a program instead of a pane:
 - **Entries written before this existed still restore.** A stored tab with no
   surface is a chat tab, which is the only surface there used to be.
 
+## How much a session tells you
+
+The rail at the bottom of the chat pane has a third switch, next to the model and
+the permission mode: **quiet · normal · verbose**. It answers one question — how
+much of the model's own account of itself you want in the transcript while the
+turn is still running.
+
+The reason it is a setting and not a fixed choice is that a session you cannot
+read is a session you cannot stop. A column of collapsed `Bash` rows tells you
+that work is happening and nothing about what it is *for*, so by the time a wrong
+approach is legible the wrong edit has landed.
+
+- **quiet** — the transcript as a list of actions. Reasoning folds to a
+  `thought · 214 words` chip you can open. Nothing is dropped; a turn rendered
+  with its reasoning deleted would read as a turn that did not reason.
+- **normal** — the default. Every call is headlined with the model's own
+  description of it, with the command or path to its right, and reasoning is
+  inline prose.
+- **verbose** — the above, plus every call's arguments and output already open,
+  plus the inside of subagents.
+
+Two of the three are decisions about frames already received and apply on the
+click. Only `verbose` changes how `claude` is spawned, so only `verbose` can show
+the switch as pending: it adds `--forward-subagent-text`, and there is no control
+request for "start forwarding", so that half waits for a restart. The tooltip
+says which half you are waiting on.
+
+**Descriptions were already being written and thrown away.** Every `Bash` call
+carries a human-written `description`, and until this switch existed it reached
+only the spinner, where it lives exactly as long as the call does.
+`grep -n "MAX_THINKING_TOKENS" -r src-tauri/src src` and "Check thinking env
+plumbing" are the same call; only one of them answers "why". Above `quiet` the
+description is the headline and the payload moves to its right.
+
+**Thinking is not in the transcript.** This is worth knowing because it looks
+like a bug in this app and is not: every thinking block is written to disk as its
+signature and an empty string. Measured on this project's own logs — 193 blocks
+across four transcripts, none with text. The text exists only as
+`thinking_delta` events while the turn runs, which is why a resumed session used
+to show a rail of tool calls with the reasoning between them silently gone. So
+the pane keeps what it streams, keyed on the block's signature, and joins it back
+on when history is hydrated (`lib/thinkingStore.ts`, bounded to 256KB). A block
+this app never watched arrive — one written by the CLI itself, or evicted — still
+renders as it always did: not at all.
+
+**Subagent internals are otherwise invisible.** A fan-out is precisely when the
+parent transcript goes quiet for minutes, because the parent writes nothing until
+its agents return. At `verbose` the CLI forwards what they say and the pane
+renders it indented under the spawn that caused it. Indented, and never as a
+plain assistant bubble: a forwarded frame carries its own model and its own usage
+and no tool call, so letting one through the main path would reset the spinner
+mid-tool, overwrite the context count with a subagent's, and print a subagent's
+answer as though the turn had given it.
+
+**A turn can report itself complete and then continue.** When a background agent
+reports back the CLI re-invokes itself, so one exchange emits two `result` frames
+and the first one is a lie in hindsight. Only in hindsight: measured against the
+CLI, that first frame carries `subtype: success`, `stop_reason: end_turn`,
+`terminal_reason: completed`, `queued_turn_count: 0` and a `subagent_stats`
+already reporting the agent as completed — byte for byte what a genuinely final
+result carries. Nothing in it can be read as "more is coming". So the row is
+written as normal and corrected when a turn begins that the user did not ask for:
+it becomes `paused — waiting on background work`, amber rather than green, and
+gives up its copy of the running cost total so one exchange does not bill twice.
+The turn that follows says `resumed by task-notification`, which is the only frame
+of the pair that knows what it is.
+
 ## The branch, and what it owes upstream
 
 Laid out as VSCode lays it out. Leftmost, because it is the item the eye goes

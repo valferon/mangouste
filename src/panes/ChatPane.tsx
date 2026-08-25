@@ -50,6 +50,17 @@ import { ControlPanel } from "./ControlPanels";
 import { Markdown } from "./Markdown";
 import { ToolDiff, toolDiffLines } from "./Viewer";
 import { cliDebugEnabled, logDebug } from "../lib/debugLog";
+import {
+  FEEDBACK_LEVELS,
+  feedbackArgs,
+  feedbackNeedsRestart,
+  foldsThinking,
+  namesIntent,
+  opensTools,
+  showsSubagents,
+  type FeedbackLevel,
+} from "../lib/feedback";
+import { recallThinking, rememberThinking } from "../lib/thinkingStore";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -120,6 +131,10 @@ interface ChatPaneProps {
   model: string;
   /** Picking a model here becomes the default the next pane spawns with. */
   onModel: (alias: string) => void;
+  /** How much of a turn this pane narrates while it runs. */
+  feedback: FeedbackLevel;
+  /** Picking a level here becomes the default the next pane spawns with. */
+  onFeedback: (level: FeedbackLevel) => void;
   onStats: (stats: {
     sessionId: string | null;
     model: string | null;
@@ -132,8 +147,43 @@ interface ChatPaneProps {
 type ChatItem =
   | { kind: "user"; key: string; text: string }
   | { kind: "assistant"; key: string; blocks: ContentBlock[] }
-  | { kind: "result"; key: string; text: string; costUsd?: number; turns?: number; isError: boolean }
+  | {
+      kind: "result";
+      key: string;
+      text: string;
+      costUsd?: number;
+      turns?: number;
+      isError: boolean;
+      /**
+       * What started the turn this ended, when it was not the user.
+       *
+       * `origin.kind` off the frame — `task-notification` for the turn the CLI
+       * re-invokes itself for when a background agent reports back.
+       */
+      origin?: string | null;
+      /**
+       * A later turn began with no user input, so this "complete" was premature.
+       *
+       * Set in hindsight, because it can only be known in hindsight: measured
+       * against the real CLI, the first of the two result frames carries
+       * `subtype: success`, `stop_reason: end_turn`, `terminal_reason:
+       * completed`, `queued_turn_count: 0` and a `subagent_stats` already
+       * reporting the agent as completed — byte for byte what a genuinely final
+       * result carries. Nothing in it can be read as "more is coming".
+       */
+      superseded?: boolean;
+    }
   | { kind: "permission"; key: string; request: PermissionRequest; decided: string | null }
+  /**
+   * The inside of a subagent, forwarded by the CLI at the `verbose` level.
+   *
+   * Kept apart from `assistant` rather than merged into it because it is not this
+   * conversation talking: a fan-out's text arriving as a plain assistant bubble
+   * would read as the main turn answering, and its usage and phase would clobber
+   * the real turn's spinner. `parentId` is the `tool_use` that started it, which
+   * is how the row learns whose reasoning it is showing.
+   */
+  | { kind: "subagent"; key: string; parentId: string; blocks: ContentBlock[] }
   // A command answered in-app over the control protocol. The item only names
   // the command; the panel fetches its own data, so an answer arriving does not
   // re-render the timeline.
@@ -525,6 +575,23 @@ function toolSummary(name: string, input: Record<string, unknown>): string {
   return flat.length > SUMMARY_MAX ? `${flat.slice(0, SUMMARY_MAX)}…` : flat;
 }
 
+/**
+ * The model's own name for what a call is for, when it wrote one.
+ *
+ * `description` is on every Bash call and every subagent spawn, and until the
+ * feedback dial existed it reached only the spinner — where it lives exactly as
+ * long as the call does and then is gone. It is the difference between a rail
+ * that lists commands and a rail that explains itself, so above `quiet` it
+ * becomes the row's headline and the payload moves to its right.
+ */
+function toolIntent(input: Record<string, unknown>): string | null {
+  const description = input.description;
+  if (typeof description !== "string") return null;
+  const flat = description.replace(/\s+/g, " ").trim();
+  if (flat === "") return null;
+  return flat.length > SUMMARY_MAX ? `${flat.slice(0, SUMMARY_MAX)}…` : flat;
+}
+
 /** Longest line the spinner shows for a tool. */
 const SPINNER_DETAIL_MAX = 70;
 
@@ -539,9 +606,8 @@ function clipForSpinner(text: string): string {
  * block shows.
  */
 function spinnerDetail(name: string, input: Record<string, unknown>): string | null {
-  if (typeof input.description === "string" && input.description.trim()) {
-    return clipForSpinner(input.description);
-  }
+  const intent = toolIntent(input);
+  if (intent) return clipForSpinner(intent);
   const summary = toolSummary(name, input);
   return summary ? clipForSpinner(summary) : null;
 }
@@ -603,43 +669,109 @@ interface PendingTool {
   startedAt: number | null;
 }
 
+/**
+ * Reasoning, as prose or as a chip that opens into it.
+ *
+ * Its own component because the fold is state, and because `quiet` folding every
+ * block in a 400-row transcript must not mean 400 pieces of state in the
+ * timeline's render body.
+ *
+ * The chip counts words rather than reporting how long the model thought: the
+ * elapsed time of an individual block is not in any frame this app receives, and
+ * a plausible-looking number nobody measured is worse than none.
+ */
+const ThinkingRow = memo(function ThinkingRow({
+  text,
+  folded,
+  labelled,
+}: {
+  text: string;
+  /** Start closed, as `quiet` does. */
+  folded: boolean;
+  /** Say what the block is, as `verbose` does. */
+  labelled: boolean;
+}) {
+  const [open, setOpen] = useState(!folded);
+  // The dial is allowed to overrule a click: flipping to `verbose` mid-session
+  // is a request to see the reasoning, including the rows already on screen.
+  useEffect(() => setOpen(!folded), [folded]);
+  const words = useMemo(() => text.trim().split(/\s+/).length, [text]);
+
+  if (!open) {
+    return (
+      <button className="thinking-chip" onClick={() => setOpen(true)}>
+        <span className="twisty">▸</span>
+        thought · {words} {words === 1 ? "word" : "words"}
+      </button>
+    );
+  }
+  return (
+    <div className="thinking-block">
+      {labelled && <div className="thinking-label">thinking</div>}
+      {text}
+    </div>
+  );
+});
+
 const ToolBlock = memo(function ToolBlock({
   block,
   result,
   onOpenFile,
+  level,
 }: {
   block: ToolUseBlock;
   result: { text: string; isError: boolean } | undefined;
   onOpenFile: (path: string) => void;
+  level: FeedbackLevel;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => opensTools(level));
+  // Same as the thinking fold: the dial wins over an earlier click, so raising
+  // the level opens the rows you were already looking at.
+  useEffect(() => setOpen(opensTools(level)), [level]);
   // Blocks are appended once and never mutated, so this survives re-renders
   // caused by a result arriving — the stringify/regex work runs once per block.
   const summary = useMemo(() => toolSummary(block.name, block.input), [block]);
+  const intent = useMemo(
+    () => (namesIntent(level) ? toolIntent(block.input) : null),
+    [block, level],
+  );
   // An edit is a diff, not a pair of opaque strings: `old_string`/`new_string`
   // side by side made a two-line change unreadable. Null for every other tool,
   // which keeps the raw dump for anything this cannot render faithfully.
   const diffLines = useMemo(() => toolDiffLines(block.name, block.input), [block]);
   const filePath =
     typeof block.input.file_path === "string" ? (block.input.file_path as string) : null;
+  // Clickable file references are the main thing a terminal cannot do. The
+  // handler rides whichever span is actually showing the path — with an intent
+  // headline the payload moves to the second span, and the link must move with
+  // it rather than sit on prose that does not name a file.
+  const openPath = filePath
+    ? (event: { stopPropagation: () => void }) => {
+        event.stopPropagation();
+        onOpenFile(filePath);
+      }
+    : undefined;
+  const pathStyle = filePath ? { textDecoration: "underline", cursor: "pointer" } : undefined;
 
   return (
     <div className="tool-block" data-error={result?.isError ?? false}>
       <div className="tool-head" onClick={() => setOpen((v) => !v)}>
         <span className="twisty">{open ? "▾" : "▸"}</span>
         <span className="tool-name">{block.name}</span>
-        <span
-          className="tool-summary"
-          onClick={(event) => {
-            if (!filePath) return;
-            // Clickable file references are the main thing a terminal cannot do.
-            event.stopPropagation();
-            onOpenFile(filePath);
-          }}
-          style={filePath ? { textDecoration: "underline", cursor: "pointer" } : undefined}
-        >
-          {summary}
-        </span>
+        {intent === null ? (
+          <span className="tool-summary" onClick={openPath} style={pathStyle}>
+            {summary}
+          </span>
+        ) : (
+          <>
+            <span className="tool-summary" data-intent="true">
+              {intent}
+            </span>
+            <span className="tool-target" onClick={openPath} style={pathStyle}>
+              {summary}
+            </span>
+          </>
+        )}
       </div>
       {open && (
         <>
@@ -692,7 +824,16 @@ function hydrate(
   for (const record of records) {
     const blocks = blocksOf(record);
     if (record.type === "assistant") {
-      if (blocks.length > 0) items.push({ kind: "assistant", key: historyKey(), blocks });
+      // Thinking is written to disk as a signature and an empty string, so a
+      // resumed session's reasoning can only come from what this app kept while
+      // the turn was live. A block with no remembered text renders as it always
+      // did: not at all.
+      const restored = blocks.map((block) =>
+        isThinking(block) && !block.thinking
+          ? { ...block, thinking: recallThinking(block.signature) ?? "" }
+          : block,
+      );
+      if (restored.length > 0) items.push({ kind: "assistant", key: historyKey(), blocks: restored });
       continue;
     }
     if (record.type !== "user") continue;
@@ -725,6 +866,23 @@ type TimelineEntry = { key: string; state?: string } & (
   | { kind: "user"; text: string }
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
+  | {
+      kind: "subagent";
+      /** The subagent's type where the spawn named one, else the tool's name. */
+      label: string | null;
+      /**
+       * What the subagent produced.
+       *
+       * A forwarded frame carries whatever the agent's own turn carried — the
+       * CLI's `--forward-subagent-text` also sends its `tool_use` blocks, and
+       * dropping those would show a fan-out reasoning and concluding with no
+       * account of what it actually read.
+       */
+      inner:
+        | { kind: "text"; text: string }
+        | { kind: "thinking"; text: string }
+        | { kind: "tool"; block: ToolUseBlock };
+    }
   | { kind: "tool"; block: ToolUseBlock }
   | { kind: "unknown"; block: ContentBlock }
   | { kind: "permission"; request: PermissionRequest; decided: string | null }
@@ -735,6 +893,8 @@ type TimelineEntry = { key: string; state?: string } & (
       isError: boolean;
       turns?: number;
       costUsd?: number;
+      origin?: string | null;
+      superseded?: boolean;
     }
 );
 
@@ -751,6 +911,10 @@ function entryText(entry: TimelineEntry): string | null {
     case "text":
     case "thinking":
       return entry.text;
+    case "subagent":
+      return entry.inner.kind === "tool"
+        ? JSON.stringify(entry.inner.block.input, null, 2)
+        : entry.inner.text;
     case "tool":
       return JSON.stringify(entry.block.input, null, 2);
     case "unknown":
@@ -768,11 +932,56 @@ function toTimeline(
   toolResults: Record<string, { text: string; isError: boolean }>,
 ): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
+  /**
+   * `tool_use` id → what to call the subagent it started.
+   *
+   * Built as the loop goes rather than up front: a forwarded block always
+   * follows the spawn that caused it, so by the time one is reached its parent
+   * has been seen. A miss is possible — history is truncated to a tail, so the
+   * spawn can be off the top — and reads as an unlabelled row, not a crash.
+   */
+  const agentLabels = new Map<string, string>();
   for (const item of items) {
     switch (item.kind) {
       case "user":
         entries.push({ kind: "user", key: item.key, text: item.text, state: "user" });
         break;
+      case "subagent": {
+        const label = agentLabels.get(item.parentId) ?? null;
+        item.blocks.forEach((block, index) => {
+          const key = `${item.key}-${index}`;
+          if (isText(block) && block.text.trim()) {
+            entries.push({
+              kind: "subagent",
+              key,
+              label,
+              inner: { kind: "text", text: block.text },
+              state: "assistant",
+            });
+          } else if (isThinking(block) && block.thinking.trim()) {
+            entries.push({
+              kind: "subagent",
+              key,
+              label,
+              inner: { kind: "thinking", text: block.thinking },
+              state: "thinking",
+            });
+          } else if (isToolUse(block)) {
+            // The agent's own results arrive as forwarded `user` frames and are
+            // merged into the same map, so a nested call fills in exactly like
+            // one on the main thread.
+            const result = toolResults[block.id];
+            entries.push({
+              kind: "subagent",
+              key: block.id ?? key,
+              label,
+              inner: { kind: "tool", block },
+              state: result ? (result.isError ? "error" : "done") : "running",
+            });
+          }
+        });
+        break;
+      }
       case "assistant":
         item.blocks.forEach((block, index) => {
           const key = `${item.key}-${index}`;
@@ -786,6 +995,13 @@ function toTimeline(
             }
           } else if (isToolUse(block)) {
             const result = toolResults[block.id];
+            const agentType = block.input.subagent_type;
+            if (block.id) {
+              agentLabels.set(
+                block.id,
+                typeof agentType === "string" && agentType.trim() ? agentType : block.name,
+              );
+            }
             entries.push({
               kind: "tool",
               key: block.id ?? key,
@@ -825,7 +1041,12 @@ function toTimeline(
           isError: item.isError,
           turns: item.turns,
           costUsd: item.costUsd,
-          state: item.isError ? "error" : "done",
+          origin: item.origin,
+          superseded: item.superseded,
+          // Not the green of a finished turn — it did not finish. `waiting`
+          // rather than `running`, which pulses: the waiting is long over, and a
+          // row of history animating forever reads as work still in flight.
+          state: item.isError ? "error" : item.superseded ? "waiting" : "done",
         });
         break;
     }
@@ -973,6 +1194,7 @@ const Timeline = memo(function Timeline({
   onDecide,
   panelContext,
   logMenu,
+  level,
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
@@ -987,6 +1209,8 @@ const Timeline = memo(function Timeline({
   panelContext: PanelContext;
   /** The chat-wide entries a row's menu ends with. */
   logMenu: () => MenuEntry[];
+  /** How much of each row to show. */
+  level: FeedbackLevel;
 }) {
   const menu = useMenu();
   return (
@@ -1030,7 +1254,29 @@ const Timeline = memo(function Timeline({
             )}
 
             {entry.kind === "thinking" && (
-              <div className="thinking-block">{entry.text}</div>
+              <ThinkingRow
+                text={entry.text}
+                folded={foldsThinking(level)}
+                labelled={level === "verbose"}
+              />
+            )}
+
+            {entry.kind === "subagent" && (
+              <div className="subagent-row">
+                <span className="subagent-label">{entry.label ?? "subagent"}</span>
+                {entry.inner.kind === "tool" ? (
+                  <ToolBlock
+                    block={entry.inner.block}
+                    result={toolResults[entry.inner.block.id]}
+                    onOpenFile={onOpenFile}
+                    level={level}
+                  />
+                ) : entry.inner.kind === "thinking" ? (
+                  <div className="thinking-block">{entry.inner.text}</div>
+                ) : (
+                  <Markdown onOpenFile={onOpenFile}>{entry.inner.text}</Markdown>
+                )}
+              </div>
             )}
 
             {entry.kind === "tool" && (
@@ -1038,6 +1284,7 @@ const Timeline = memo(function Timeline({
                 block={entry.block}
                 result={toolResults[entry.block.id]}
                 onOpenFile={onOpenFile}
+                level={level}
               />
             )}
 
@@ -1050,10 +1297,26 @@ const Timeline = memo(function Timeline({
             )}
 
             {entry.kind === "result" && (
-              <div className="turn-result" data-error={entry.isError}>
-                <span>{entry.isError ? "error" : "turn complete"}</span>
+              <div
+                className="turn-result"
+                data-error={entry.isError}
+                data-superseded={entry.superseded ?? false}
+              >
+                <span>
+                  {entry.isError
+                    ? "error"
+                    : entry.superseded
+                      ? "paused — waiting on background work"
+                      : "turn complete"}
+                </span>
+                {entry.origin && <span>resumed by {entry.origin}</span>}
                 {entry.turns !== undefined && <span>{entry.turns} turns</span>}
-                {entry.costUsd !== undefined && <span>${entry.costUsd.toFixed(4)}</span>}
+                {/* The cost is a running total for the whole session, so
+                    repeating it on a row the next turn overtook would show the
+                    same figure twice for one exchange. */}
+                {entry.costUsd !== undefined && !entry.superseded && (
+                  <span>${entry.costUsd.toFixed(4)}</span>
+                )}
                 {entry.isError && entry.text && (
                   <div className="text" style={{ color: "var(--red)" }}>
                     {entry.text}
@@ -1084,6 +1347,8 @@ export const ChatPane = memo(function ChatPane({
   permissionMode: defaultPermissionMode,
   model: defaultModelAlias,
   onModel,
+  feedback: defaultFeedback,
+  onFeedback,
 }: ChatPaneProps) {
   const menu = useMenu();
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -1136,6 +1401,17 @@ export const ChatPane = memo(function ChatPane({
   const [modelAlias, setModelAlias] = useState<string>(defaultModelAlias);
   const modelAliasRef = useRef(defaultModelAlias);
   const [spawnedModelAlias, setSpawnedModelAlias] = useState(defaultModelAlias);
+  /**
+   * Chosen feedback level, and the one the live process was spawned with.
+   *
+   * Both, because the level is two things at once. Folding, labelling and
+   * expanding are decisions about frames already received and apply on the
+   * click; asking the CLI to forward what subagents say is a spawn flag, and
+   * `feedbackNeedsRestart` is what stops the strip from claiming otherwise.
+   */
+  const [level, setLevel] = useState<FeedbackLevel>(defaultFeedback);
+  const levelRef = useRef(defaultFeedback);
+  const [spawnedLevel, setSpawnedLevel] = useState<FeedbackLevel>(defaultFeedback);
   const [sessionId, setSessionId] = useState<string | null>(resume);
   const [costUsd, setCostUsd] = useState<number | null>(null);
   const [model, setModel] = useState<string | null>(null);
@@ -1152,6 +1428,19 @@ export const ChatPane = memo(function ChatPane({
   const [toolActivity, setToolActivity] = useState<string | null>(null);
   /** Accumulates input_json_delta while the model types a tool call. */
   const partialToolRef = useRef<{ name: string; json: string } | null>(null);
+  /**
+   * The row of the last `result` frame, while nothing has happened since.
+   *
+   * Held so a turn that starts without the user asking for one can go back and
+   * correct it. A background agent reporting in makes the CLI re-invoke itself,
+   * which ends the first turn for real — same `subtype`, same `stop_reason`, same
+   * `terminal_reason` as any final result — and then simply keeps going. The
+   * premature "turn complete" is only visible from the far side of it.
+   *
+   * Cleared when the user sends, so an ordinary next turn never rewrites the
+   * result of the previous one.
+   */
+  const closedTurnKeyRef = useRef<string | null>(null);
   // Settled `assistant` frames carry thinking blocks with `thinking: ""` — the
   // text only ever arrives as stream deltas, so it is buffered by block index
   // here and grafted back on when the frame lands.
@@ -1240,7 +1529,10 @@ export const ChatPane = memo(function ChatPane({
     modelAliasRef.current = defaultModelAlias;
     setModelAlias(defaultModelAlias);
     setSpawnedModelAlias(defaultModelAlias);
-  }, [defaultPermissionMode, defaultModelAlias]);
+    levelRef.current = defaultFeedback;
+    setLevel(defaultFeedback);
+    setSpawnedLevel(defaultFeedback);
+  }, [defaultPermissionMode, defaultModelAlias, defaultFeedback]);
   /** Mirrors `sessionId` state for the stable frame handler. */
   const sessionIdRef = useRef<string | null>(resume);
 
@@ -1374,12 +1666,16 @@ export const ChatPane = memo(function ChatPane({
     setSpawnedPermissionMode(spawnMode);
     const spawnModelAlias = modelAliasRef.current;
     setSpawnedModelAlias(spawnModelAlias);
+    const spawnLevel = levelRef.current;
+    setSpawnedLevel(spawnLevel);
     const options = {
       chatId,
       cwd,
       resume: resumeTarget,
       permissionMode: spawnMode,
       model: spawnModelAlias === MODEL_DEFAULT ? null : spawnModelAlias,
+      // The only part of a feedback level the CLI has to know about.
+      extraArgs: feedbackArgs(spawnLevel),
       debug: cliDebugEnabled(),
     };
     const attach = mode === "attach" ? claudeStart : claudeRestart;
@@ -1530,6 +1826,44 @@ export const ChatPane = memo(function ChatPane({
           return;
 
         case "assistant": {
+          // Forwarded from inside a subagent, not said by this conversation.
+          //
+          // Taken before anything below touches the pane's state: a fan-out's
+          // frames carry their own model, their own usage and no tool call, so
+          // letting them through would reset the spinner mid-tool, overwrite the
+          // context count with a subagent's, and print the subagent's answer as
+          // if the main turn had given it.
+          if (typeof frame.parent_tool_use_id === "string") {
+            const nested = blocksOf(frame);
+            for (const block of nested) {
+              if (isThinking(block) && block.thinking) {
+                rememberThinking(block.signature, block.thinking);
+              }
+            }
+            if (nested.length > 0) {
+              appendItem({
+                kind: "subagent",
+                key: nextKey(),
+                parentId: frame.parent_tool_use_id,
+                blocks: nested,
+              });
+            }
+            return;
+          }
+          // A turn starting with no user input behind it means the result before
+          // it closed nothing. Correcting the row is the only honest option: the
+          // frame that wrote it was, on the wire, a completed turn.
+          const premature = closedTurnKeyRef.current;
+          if (premature !== null) {
+            closedTurnKeyRef.current = null;
+            setItems((current) =>
+              current.map((item) =>
+                item.kind === "result" && item.key === premature
+                  ? { ...item, superseded: true }
+                  : item,
+              ),
+            );
+          }
           setRunning(true);
           setCutOff(false);
           // A tool_use block means the CLI now waits on that tool; nothing else
@@ -1577,6 +1911,15 @@ export const ChatPane = memo(function ChatPane({
             buffered.delete(index);
             return streamed ? { ...block, thinking: streamed } : block;
           });
+          // Kept the moment it is complete, because this is the last time it
+          // exists: the record written from this frame has the signature and an
+          // empty string, so a reload of this very session would otherwise show
+          // the tool calls with the reasoning between them gone.
+          for (const block of blocks) {
+            if (isThinking(block) && block.thinking) {
+              rememberThinking(block.signature, block.thinking);
+            }
+          }
           if (blocks.length > 0) {
             appendItem({ kind: "assistant", key: nextKey(), blocks });
           }
@@ -1587,6 +1930,25 @@ export const ChatPane = memo(function ChatPane({
           // User frames echoed by the CLI carry tool results, not typed input.
           const blocks = blocksOf(frame);
           const results = blocks.filter(isToolResult);
+          // A subagent's own results are forwarded down the same pipe. They fill
+          // in the nested rows — same map, keyed by tool_use id — but they are
+          // not this turn's news: clearing the spinner here would announce that
+          // the main thread's tool had returned because someone else's did.
+          if (typeof frame.parent_tool_use_id === "string") {
+            if (results.length > 0) {
+              setToolResults((current) => {
+                const next = { ...current };
+                for (const result of results) {
+                  next[result.tool_use_id] = {
+                    text: toolResultText(result.content),
+                    isError: Boolean(result.is_error),
+                  };
+                }
+                return next;
+              });
+            }
+            return;
+          }
           if (results.length > 0) {
             setPhase("receiving");
             setPendingTool(null);
@@ -1605,7 +1967,7 @@ export const ChatPane = memo(function ChatPane({
           return;
         }
 
-        case "result":
+        case "result": {
           setRunning(false);
           // `success` is the only subtype that means the turn closed on its own.
           // Everything else — an ESC, a dropped stream, an API error, the turn
@@ -1618,15 +1980,20 @@ export const ChatPane = memo(function ChatPane({
           setTurnStartedAt(null);
           thinkingTextRef.current = new Map();
           if (typeof frame.total_cost_usd === "number") setCostUsd(frame.total_cost_usd);
+          const origin = frame.origin as { kind?: string } | null | undefined;
+          const resultKey = nextKey();
+          closedTurnKeyRef.current = resultKey;
           appendItem({
             kind: "result",
-            key: nextKey(),
+            key: resultKey,
             text: frame.result ?? frame.subtype ?? "done",
             costUsd: frame.total_cost_usd,
             turns: frame.num_turns,
             isError: Boolean(frame.is_error),
+            origin: typeof origin?.kind === "string" ? origin.kind : null,
           });
           return;
+        }
 
         case "stream_event": {
           // Deltas drive the spinner only; the settled `assistant` frame still
@@ -1962,6 +2329,9 @@ export const ChatPane = memo(function ChatPane({
           ? `${text}${text ? "\n" : ""}[${attachments.length} image${attachments.length > 1 ? "s" : ""} attached]`
           : text,
     });
+    // This turn was asked for, so the result before it closed exactly what it
+    // said it closed.
+    closedTurnKeyRef.current = null;
     setRunning(true);
     setCutOff(false);
     setPhase("sending");
@@ -2131,6 +2501,22 @@ export const ChatPane = memo(function ChatPane({
     [alive, chatId, onModel],
   );
 
+  /**
+   * Arm a feedback level.
+   *
+   * No control-channel counterpart to the model and permission pickers: there is
+   * no request for "start forwarding subagent text", so the spawn-flag half of a
+   * level genuinely waits for a restart and the strip says so.
+   */
+  const pickFeedback = useCallback(
+    (next: FeedbackLevel) => {
+      levelRef.current = next;
+      setLevel(next);
+      onFeedback(next);
+    },
+    [onFeedback],
+  );
+
   const pickPermissionMode = useCallback(
     (mode: string) => {
       permissionModeRef.current = mode;
@@ -2164,7 +2550,13 @@ export const ChatPane = memo(function ChatPane({
     [chatId, cwd, sessionId, catalog, spawnedPermissionMode, applyModel, applyPermissionMode],
   );
 
-  const timeline = useMemo(() => toTimeline(items, toolResults), [items, toolResults]);
+  const timeline = useMemo(() => {
+    const entries = toTimeline(items, toolResults);
+    // Forwarding is a spawn flag, so frames keep arriving after a drop back to
+    // `normal`. Dropping the rows here rather than at ingest means raising the
+    // level again shows the ones that arrived in between, instead of a gap.
+    return showsSubagents(level) ? entries : entries.filter((e) => e.kind !== "subagent");
+  }, [items, toolResults, level]);
 
   const statusLabel = useMemo(() => {
     // "stopped" claims an exit; a cold pane simply has not started yet.
@@ -2259,6 +2651,7 @@ export const ChatPane = memo(function ChatPane({
           onDecide={decide}
           panelContext={panelContext}
           logMenu={logMenu}
+          level={level}
         />
 
         {running && !awaitingPermission && (
@@ -2385,6 +2778,26 @@ export const ChatPane = memo(function ChatPane({
                 onClick={() => pickPermissionMode(mode)}
               >
                 {MODE_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+          <div
+            className="mode-switch"
+            data-pending={feedbackNeedsRestart(spawnedLevel, level)}
+            title={
+              feedbackNeedsRestart(spawnedLevel, level)
+                ? `Pending — running as "${spawnedLevel}". Restart to apply subagent forwarding; everything else is already applied.`
+                : "How much of a turn this pane narrates"
+            }
+          >
+            {FEEDBACK_LEVELS.map((option) => (
+              <button
+                key={option}
+                className="toggle-button"
+                data-active={option === level}
+                onClick={() => pickFeedback(option)}
+              >
+                {option}
               </button>
             ))}
           </div>

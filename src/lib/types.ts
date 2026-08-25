@@ -306,6 +306,15 @@ export interface TextBlock {
 export interface ThinkingBlock {
   type: "thinking";
   thinking: string;
+  /**
+   * The API's opaque attestation of this block, and the only stable name it has.
+   *
+   * Load-bearing here because `thinking` is *not* persisted: every block written
+   * to a transcript carries its signature and an empty string, so the text a
+   * resumed session shows can only come from what this app kept while the turn
+   * was live. The signature is what joins the two.
+   */
+  signature?: string;
 }
 
 export interface ToolUseBlock {

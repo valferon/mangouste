@@ -91,6 +91,11 @@ import {
   SESSION_SURFACES,
   type SessionSurface,
 } from "./lib/sessionSurface";
+import {
+  FEEDBACK_DEFAULT,
+  FEEDBACK_LEVELS,
+  type FeedbackLevel,
+} from "./lib/feedback";
 
 /* Persisted keys all come from the catalogue in `lib/persist.ts`, so a reset or
    a migration can enumerate them without grepping for string literals. */
@@ -101,6 +106,7 @@ const ACTIVE_REPO_KEY = KEYS.state.activeRepo;
 const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
 const TERMINAL_DOCK_KEY = KEYS.state.terminalDock;
 const SESSION_SURFACE_KEY = KEYS.prefs.sessionSurface;
+const FEEDBACK_KEY = KEYS.prefs.feedback;
 
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "search" | "git";
@@ -243,6 +249,16 @@ function Workbench() {
   );
   /** `--model` alias new panes spawn with; "default" leaves the flag off. */
   const [modelAlias, setModelAlias] = useState(() => readString(MODEL_KEY, "default"));
+  /**
+   * How much of a turn the chat pane narrates while it runs.
+   *
+   * Lives here rather than in each pane for the same reason the model alias does:
+   * it is one opinion about how you want to work, and picking it in the pane you
+   * are looking at is meant to be the answer for the next pane too.
+   */
+  const [feedback, setFeedback] = useState<FeedbackLevel>(() =>
+    readEnum<FeedbackLevel>(FEEDBACK_KEY, FEEDBACK_LEVELS, FEEDBACK_DEFAULT),
+  );
   /**
    * What a session tab holds: this app's chat pane, or `claude` in a pty.
    *
@@ -676,6 +692,10 @@ function Workbench() {
   useEffect(() => {
     writeString(MODEL_KEY, modelAlias);
   }, [modelAlias]);
+
+  useEffect(() => {
+    writeString(FEEDBACK_KEY, feedback);
+  }, [feedback]);
 
   /* ---------- workspace discovery ---------- */
 
@@ -2090,6 +2110,8 @@ function Workbench() {
                       permissionMode={permissionMode}
                       model={modelAlias}
                       onModel={setModelAlias}
+                      feedback={feedback}
+                      onFeedback={setFeedback}
                     />
                   )}
                   </PaneBoundary>

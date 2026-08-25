@@ -24,8 +24,9 @@ export const SCHEMA_VERSION = 1;
  * Every persisted key.
  *
  * Grouped by what forgets them: `state` is where you left the workbench,
- * `prefs` is what you chose, `overlay` is your opinion of the sessions on disk.
- * The distinction is what lets a future "reset layout" clear one group without
+ * `prefs` is what you chose, `overlay` is your opinion of the sessions on disk,
+ * and `cache` is content recovered off the wire that nothing else keeps. The
+ * distinction is what lets a future "reset layout" clear one group without
  * touching the others.
  */
 export const KEYS = {
@@ -52,10 +53,19 @@ export const KEYS = {
     restoreTabs: "mangouste.restoreTabs",
     sessionSurface: "mangouste.sessionSurface",
     upstreamWatch: "mangouste.upstreamWatch",
+    feedback: "mangouste.feedback",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
     sessionsArchived: "mangouste.sessionsArchived",
+  },
+  cache: {
+    /**
+     * Streamed thinking text, kept because the transcript does not keep it.
+     * Reconstructible only while the turn is live, so losing it to a "reset
+     * layout" would be losing it for good.
+     */
+    thinkingText: "mangouste.thinkingText",
   },
 } as const;
 

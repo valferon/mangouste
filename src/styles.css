@@ -1537,6 +1537,19 @@ mark.search-new {
   margin-top: 6px;
   font-size: 11px;
   color: var(--fg-dim);
+  /*
+   * Wraps rather than overflows. Three switches, a restart and a Send do not fit
+   * a narrow pane on one line, and the failure without this is the worst
+   * available: the row keeps its width, the pane clips it, and the button pushed
+   * past the edge is Send.
+   */
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* On a wrapped row the spacer has already done its job; the switches lead. */
+.composer-bar .mode-switch {
+  flex: 0 0 auto;
 }
 
 .composer-bar .spacer {
@@ -1544,8 +1557,8 @@ mark.search-new {
 }
 
 /*
- * Each switch is its own inset group, so the model and permission clusters read
- * as two separate controls rather than one eight-button strip.
+ * Each switch is its own inset group, so the model, permission and feedback
+ * clusters read as three separate controls rather than one twelve-button strip.
  */
 .mode-switch {
   display: inline-flex;
@@ -3665,6 +3678,18 @@ select {
   color: var(--red);
 }
 
+/*
+ * A turn that reported itself complete and then continued.
+ *
+ * Amber rather than green, and dimmer than a real close: the row is kept because
+ * the frame behind it was real — the CLI genuinely ended a turn there — but it is
+ * not the end of the exchange and must not read like one.
+ */
+.turn-result[data-superseded="true"] {
+  background: color-mix(in srgb, var(--amber) 10%, var(--bg-elevated));
+  color: color-mix(in srgb, var(--amber) 65%, var(--fg-dim));
+}
+
 .turn-result .text {
   flex-basis: 100%;
   font-family: var(--font-ui);
@@ -4595,4 +4620,84 @@ select {
 
 .pane-error .setting-row .toggle-button {
   border-color: var(--border);
+}
+
+/* ---------- feedback level ---------- */
+
+/*
+ * A call labelled with the model's own words for it.
+ *
+ * The headline is the intent and the payload sits to its right, dimmer and
+ * smaller — the reverse of the reading order that made the rail a list of
+ * shell commands. The intent is capped rather than greedy so a long
+ * description cannot push the command it describes off the row entirely.
+ */
+.tool-block .tool-summary[data-intent="true"] {
+  color: var(--fg);
+  flex: 0 1 auto;
+  max-width: 55%;
+}
+
+.tool-block .tool-target {
+  color: var(--fg-dim);
+  opacity: 0.75;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Reasoning folded away: present, one click from readable, one line tall. */
+.thinking-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--purple) 35%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--purple) 8%, var(--bg));
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.thinking-chip:hover {
+  color: var(--fg);
+  border-color: var(--purple);
+}
+
+.thinking-label {
+  color: var(--purple);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+
+/*
+ * The inside of a subagent.
+ *
+ * Indented and rail-marked because it is not this conversation talking: without
+ * the offset a fan-out's answer reads as the main turn's, which is the exact
+ * confusion that made dropping these frames look reasonable.
+ */
+.subagent-row {
+  margin: 6px 0 6px 14px;
+  padding-left: 10px;
+  border-left: 1px dashed var(--border);
+  min-width: 0;
+}
+
+.subagent-label {
+  display: inline-block;
+  margin-bottom: 4px;
+  color: var(--blue);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
