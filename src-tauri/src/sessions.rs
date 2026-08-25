@@ -41,7 +41,9 @@ const TAIL_RETRY_BYTES: u64 = 8 * TAIL_BYTES;
 ///
 /// Recent enough that a dangling turn means work is genuinely in flight.
 const ACTIVE_WINDOW_MS: u64 = 5 * 60_000;
-/// Beyond this a session is stale regardless of how it ended.
+/// Beyond this a session is stale — unless it ended cut off or blocked on you,
+/// which `classify` decides first. Those two outcomes do not expire on a clock.
+/// Everything else does: nothing is in flight and nothing is owed.
 const IDLE_WINDOW_MS: u64 = 24 * 3_600_000;
 /// Tool calls append nothing to the transcript while they run, so an unanswered
 /// `tool_use` at the tail must be given far longer than ACTIVE_WINDOW_MS before
@@ -555,17 +557,24 @@ fn classify(
 ) -> &'static str {
     let age = now_ms.saturating_sub(last_activity_ms);
 
-    // Stale: nothing has happened for a day.
-    if age > IDLE_WINDOW_MS {
-        return "idle";
-    }
-    // Explicit ESC. Definitive, so it cannot masquerade as active while recent.
+    // Explicit ESC. Definitive, so it cannot masquerade as active while recent —
+    // nor be swallowed by the idle window while old. A cut-off turn is a fact
+    // about how the session ended, and no amount of elapsed time makes it a
+    // different fact; `idle` in its place would report the clock and drop the
+    // outcome, and the rail hides idle rows by default.
     if inputs.interrupted {
         return "interrupted";
     }
-    // Blocked on you until answered, however long that takes.
+    // Blocked on you until answered, however long that takes. Ageing this into
+    // `idle` is how an unanswered question gets lost: the row disappears and
+    // nothing on the surface ever said it wanted you. Dismissing one is what
+    // archiving is for — a decision, not a timeout.
     if inputs.awaiting_input && inputs.last_conv_role.as_deref() == Some("assistant") {
         return "awaiting";
+    }
+    // Stale: nothing has happened for a day, and nothing above claimed it.
+    if age > IDLE_WINDOW_MS {
+        return "idle";
     }
 
     // A sidechain written more recently than the conversation, and recently in
@@ -1523,5 +1532,155 @@ mod search_tests {
         assert!(search_one(&path, "-tmp", &both, MatchMode::Any).is_some());
 
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000_000;
+
+    /// A session whose newest conversational record is what the name says.
+    fn ended(role: &str, stop: Option<&str>) -> StatusInputs {
+        StatusInputs {
+            last_conv_role: Some(role.to_string()),
+            last_stop_reason: stop.map(str::to_string),
+            ..StatusInputs::default()
+        }
+    }
+
+    /// No sidechain, so every case below turns on the transcript alone.
+    fn status(inputs: &StatusInputs, age_ms: u64) -> &'static str {
+        classify(inputs, NOW - age_ms, 0, NOW)
+    }
+
+    #[test]
+    fn a_cut_off_turn_does_not_age_into_idle() {
+        let mut inputs = ended("user", None);
+        inputs.interrupted = true;
+        assert_eq!(status(&inputs, 1_000), "interrupted");
+        // The whole point of the ordering: a week later it is still the reason
+        // the session stopped, and `idle` rows are hidden by default.
+        assert_eq!(status(&inputs, 7 * IDLE_WINDOW_MS), "interrupted");
+    }
+
+    #[test]
+    fn a_blocked_session_does_not_age_into_idle() {
+        let mut inputs = ended("assistant", Some("tool_use"));
+        inputs.awaiting_input = true;
+        assert_eq!(status(&inputs, 1_000), "awaiting");
+        assert_eq!(status(&inputs, 7 * IDLE_WINDOW_MS), "awaiting");
+    }
+
+    #[test]
+    fn awaiting_needs_the_assistant_to_be_the_one_waiting() {
+        // The flag survives on the inputs until the next assistant record, so a
+        // user reply at the tail must not read as still blocked.
+        let mut inputs = ended("user", None);
+        inputs.awaiting_input = true;
+        assert_eq!(status(&inputs, 1_000), "active");
+    }
+
+    #[test]
+    fn everything_else_still_ages_into_idle() {
+        assert_eq!(status(&ended("assistant", Some("end_turn")), IDLE_WINDOW_MS + 1), "idle");
+        assert_eq!(status(&ended("assistant", None), IDLE_WINDOW_MS + 1), "idle");
+        assert_eq!(status(&ended("user", None), IDLE_WINDOW_MS + 1), "idle");
+    }
+
+    #[test]
+    fn a_dangling_turn_is_active_while_recent_and_interrupted_once_quiet() {
+        let inputs = ended("assistant", None);
+        assert_eq!(status(&inputs, ACTIVE_WINDOW_MS - 1), "active");
+        assert_eq!(status(&inputs, ACTIVE_WINDOW_MS + 1), "interrupted");
+    }
+
+    #[test]
+    fn an_unanswered_tool_use_holds_active_through_its_grace() {
+        let inputs = ended("assistant", Some("tool_use"));
+        // Tool calls append nothing while they run, so the active window alone
+        // would call a long build interrupted.
+        assert_eq!(status(&inputs, ACTIVE_WINDOW_MS + 1), "active");
+        assert_eq!(status(&inputs, TOOL_RUNNING_GRACE_MS - 1), "active");
+        assert_eq!(status(&inputs, TOOL_RUNNING_GRACE_MS + 1), "interrupted");
+    }
+
+    #[test]
+    fn a_clean_end_is_finished_unless_something_is_still_working() {
+        let clean = ended("assistant", Some("end_turn"));
+        assert_eq!(status(&clean, 1_000), "finished");
+        assert_eq!(status(&clean, ACTIVE_WINDOW_MS + 1), "finished");
+
+        // Queued prompts mean the harness is about to keep going — trusted only
+        // while recent, since a live harness dequeues within seconds.
+        let mut queued = clean.clone();
+        queued.queue_depth = 1;
+        assert_eq!(status(&queued, 1_000), "active");
+        assert_eq!(status(&queued, ACTIVE_WINDOW_MS + 1), "finished");
+
+        // A fanned-out session writes nothing to its own transcript for minutes.
+        let sidechain = NOW - 1_000;
+        assert_eq!(classify(&clean, NOW - ACTIVE_WINDOW_MS - 1, sidechain, NOW), "active");
+    }
+
+    #[test]
+    fn pause_turn_is_not_a_clean_end() {
+        // The harness auto-continues, so the turn is still in flight.
+        assert_eq!(status(&ended("assistant", Some("pause_turn")), 1_000), "active");
+    }
+
+    #[test]
+    fn an_assistant_turn_after_a_marker_clears_the_interrupt() {
+        let tail = vec![
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-25T10:00:00.000Z",
+                "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]},
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-25T10:00:05.000Z",
+                "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "resumed"}]},
+            }),
+        ];
+        let inputs = status_inputs(&tail);
+        assert!(!inputs.interrupted);
+        assert_eq!(inputs.last_conv_role.as_deref(), Some("assistant"));
+    }
+
+    #[test]
+    fn a_synthetic_record_after_a_marker_leaves_the_interrupt_standing() {
+        // A task notification lands hours after the turn; counting it as
+        // conversation would both move the watermark and clear the marker.
+        let tail = vec![
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-25T10:00:00.000Z",
+                "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-25T11:00:00.000Z",
+                "message": {"content": [{"type": "text", "text": "<task-notification>done</task-notification>"}]},
+            }),
+        ];
+        let inputs = status_inputs(&tail);
+        assert!(inputs.interrupted);
+        assert_eq!(
+            inputs.ended_at_ms,
+            parse_timestamp_ms("2026-08-25T10:00:00.000Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn both_marker_wordings_are_recognised_in_either_content_shape() {
+        for text in ["[Request interrupted by user]", "[Request interrupted by user for tool use]"] {
+            assert!(is_interrupt_marker(&serde_json::json!({"content": text})));
+            assert!(is_interrupt_marker(
+                &serde_json::json!({"content": [{"type": "text", "text": text}]})
+            ));
+        }
+        assert!(!is_interrupt_marker(&serde_json::json!({"content": "interrupt the turn"})));
     }
 }

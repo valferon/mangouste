@@ -7,7 +7,10 @@
 /// pendingReview — ended cleanly, but you have not looked at it since
 /// finished      — ended cleanly and you have seen it
 /// interrupted   — went quiet mid-turn: ESC, dead window, or an API error
-/// idle          — nothing for over a day
+/// idle          — nothing for over a day, and none of the above
+///
+/// `awaiting` and `interrupted` outrank `idle`: an unanswered question and a
+/// cut-off turn do not expire on a clock, and `idle` rows are hidden by default.
 ///
 /// `pendingReview` never comes off the wire: Rust reports `finished` and the
 /// seen-store overlay in `sessionStore.ts` rewrites it, exactly as the extension

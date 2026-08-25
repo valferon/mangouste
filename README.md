@@ -318,7 +318,15 @@ Status is a port of the state machine in
 | `pendingReview` | Ended cleanly, but you have not looked at it since |
 | `finished` | Ended cleanly and you have seen it |
 | `interrupted` | Went quiet mid-turn: ESC, dead window, or an API error |
-| `idle` | Nothing for over 24 h |
+| `idle` | Nothing for over 24 h, and nothing above claimed it |
+
+`awaiting` and `interrupted` are decided before the recency windows, so neither
+ages into `idle`. A question nobody answered is still unanswered a week later,
+and a turn that was cut off is still the reason the session stopped; collapsing
+either into `idle` reports the clock and drops the outcome, and `idle` rows are
+hidden in the rail by default. Dismissing one of those rows is what archiving is
+for — a decision, not a timeout. Everything else does age out: nothing is in
+flight and nothing is owed.
 
 `pendingReview` never comes off the wire. Rust reports `finished` and the
 seen-store overlay rewrites it, exactly as the extension does — see below.
