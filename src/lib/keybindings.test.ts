@@ -41,12 +41,6 @@ describe("the macOS chord table", () => {
     expect(MAC.toggleTerminal).toBe("Ctrl+`");
   });
 
-  it("keeps the chat toggle beside it, and off the window-cycling chord", () => {
-    // Cmd+` cycles windows on macOS and Cmd+Shift+` cycles them backwards, so
-    // the pair stays on Ctrl together or the two panels stop reading as a pair.
-    expect(MAC.toggleChat).toBe("Ctrl+Shift+`");
-  });
-
   it("does not leave a bare F-key where macOS has a media key", () => {
     expect(MAC.fullScreen).toBe("Ctrl+Cmd+F");
   });

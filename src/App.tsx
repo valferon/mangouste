@@ -381,32 +381,6 @@ function Workbench() {
     writeJson(KEYS.state.terminalOpen, persistable);
   }, [terminalOpen]);
   /**
-   * Chat visibility per repo, persisted. The terminal's flag above, mirrored.
-   *
-   * Not everyone uses the built-in chat: a repo where the work happens in a
-   * shell should be able to put the whole thing away — the panes, the session
-   * sidebar, the tabs — and get the column back, the same way a repo where the
-   * work happens in the chat can put the terminal away. Per repo for the same
-   * reason the terminal's flag is: hiding the chat in a repo you only ever run
-   * builds in must not hide it in the repo you talk to Claude in.
-   *
-   * Hidden means no `claude` either. A hidden pane is still mounted — a turn
-   * that was already streaming when you hid it keeps streaming — but nothing
-   * *starts* behind a hidden chat: the seed below does not run, restored panes
-   * stay cold, and a terminal-only workbench spawns no CLI at all.
-   */
-  const [chatOpen, setChatOpen] = useState<Record<string, boolean>>(() =>
-    readBoolMap(KEYS.state.chatOpen),
-  );
-  const chatVisible = chatOpen[activeRepo] ?? true;
-  useEffect(() => {
-    // The "" entry is the no-repo window's, as above: useful for the run,
-    // garbage after it.
-    const persistable = { ...chatOpen };
-    delete persistable[""];
-    writeJson(KEYS.state.chatOpen, persistable);
-  }, [chatOpen]);
-  /**
    * Explicit collapse, mirroring `terminalVisible`.
    *
    * The old Ctrl+B fed a delta into a setter clamped to [160,700], so the first
@@ -529,31 +503,6 @@ function Workbench() {
     setTerminalOpen((current) =>
       current[activeRepo] === false ? current : { ...current, [activeRepo]: false },
     );
-  }, [activeRepo]);
-
-  /**
-   * Reveal the chat of a named repo, for anything that opens a session in one.
-   *
-   * Takes the repo rather than reading `activeRepo`, and that is the whole
-   * point: resuming a session from the sidebar sets the repo and opens the tab
-   * in one go, so a callback closing over `activeRepo` would unhide the chat of
-   * the repo being *left*. Passing it in also leaves this identity stable.
-   */
-  const showChat = useCallback((repo: string) => {
-    setChatOpen((current) => (current[repo] === true ? current : { ...current, [repo]: true }));
-    // The terminal gives the column back when the chat appears beside it.
-    setRefitToken((token) => token + 1);
-  }, []);
-
-  /** Ctrl+Shift+`, the titlebar button and the menus all go through this. */
-  const toggleChat = useCallback(() => {
-    setChatOpen((current) => ({
-      // Absent means "never touched", which reads as shown — so the first
-      // toggle of a fresh repo must hide, exactly as the terminal's does.
-      ...current,
-      [activeRepo]: !(current[activeRepo] ?? true),
-    }));
-    setRefitToken((token) => token + 1);
   }, [activeRepo]);
 
   /**
@@ -877,58 +826,42 @@ function Workbench() {
   );
 
   /** Focus the tab for this session, opening one if it is not already up. */
-  const openSessionTab = useCallback(
-    (cwd: string, sessionId: string, file: string | null) => {
-      // Same bargain the terminal chords strike with a hidden panel: asking for
-      // a session is asking to see it.
-      showChat(cwd);
-      setTabs((current) => {
-        const existing = current.find(
-          (tab) => tab.kind === "chat" && tab.sessionId === sessionId,
-        );
-        if (existing) {
-          setActiveTab(existing.id);
-          return current;
-        }
-        const tab: ChatTab = {
-          kind: "chat",
-          id: `chat|${cwd}|${sessionId}`,
-          cwd,
-          sessionId,
-          resumeFile: file,
-        };
-        setActiveTab(tab.id);
-        return [...current, tab];
-      });
-    },
-    [showChat],
-  );
-
-  const openNewChatTab = useCallback(
-    (cwd: string) => {
-      showChat(cwd);
+  const openSessionTab = useCallback((cwd: string, sessionId: string, file: string | null) => {
+    setTabs((current) => {
+      const existing = current.find(
+        (tab) => tab.kind === "chat" && tab.sessionId === sessionId,
+      );
+      if (existing) {
+        setActiveTab(existing.id);
+        return current;
+      }
       const tab: ChatTab = {
         kind: "chat",
-        id: `chat|${cwd}|new-${(newSessionCounter.current += 1)}`,
+        id: `chat|${cwd}|${sessionId}`,
         cwd,
-        sessionId: null,
-        resumeFile: null,
+        sessionId,
+        resumeFile: file,
       };
-      setTabs((current) => [...current, tab]);
       setActiveTab(tab.id);
-    },
-    [showChat],
-  );
+      return [...current, tab];
+    });
+  }, []);
+
+  const openNewChatTab = useCallback((cwd: string) => {
+    const tab: ChatTab = {
+      kind: "chat",
+      id: `chat|${cwd}|new-${(newSessionCounter.current += 1)}`,
+      cwd,
+      sessionId: null,
+      resumeFile: null,
+    };
+    setTabs((current) => [...current, tab]);
+    setActiveTab(tab.id);
+  }, []);
 
   // Every repo needs at least one chat tab, or switching to it shows nothing.
-  //
-  // Gated on `chatVisible`, and listed in the deps for both halves of that: a
-  // repo whose chat is hidden must not be given a pane — the tab would be
-  // invisible and the `claude` behind it would be a process nobody asked for —
-  // and unhiding has to run the seed then, since the repo may have gone its
-  // whole life without one.
   useEffect(() => {
-    if (!activeRepo || !chatVisible) return;
+    if (!activeRepo) return;
     setTabs((current) => {
       const mine = current.filter((tab) => tab.kind === "chat" && tab.cwd === activeRepo);
       // Only the dashboard belongs to no repo, so switching repos — which the
@@ -955,32 +888,7 @@ function Workbench() {
       setActiveTab((active) => (repoIndependent(active) ? active : tab.id));
       return [...current, tab];
     });
-  }, [activeRepo, chatVisible]);
-
-  /**
-   * A hidden chat must not be the tab in front.
-   *
-   * The strip drops chat tabs while the chat is hidden, so a chat left in front
-   * — restored from the last run, or the repo you just switched into — would
-   * leave the centre blank with no tab looking active and nothing to click. An
-   * effect rather than a line in `toggleChat`, because visibility also flips by
-   * switching repos, which no toggle runs through. Falls back to a tab of this
-   * repo that is still shown, and to nothing when there is none: the seed above
-   * puts a chat back in front the moment the chat is shown again.
-   */
-  useEffect(() => {
-    if (chatVisible) return;
-    // The phase chip is the front chat's transport state, and there is no front
-    // chat: a hidden pane's `onPhase` is a noop, so the last word it wrote would
-    // otherwise sit in the status bar describing nothing.
-    setPhase("idle");
-    setActiveTab((active) => {
-      const front = tabs.find((tab) => tab.id === active);
-      if (!front || front.kind !== "chat") return active;
-      const shown = tabs.find((tab) => tab.kind !== "chat" && tabInRepo(tab, activeRepo));
-      return shown?.id ?? "";
-    });
-  }, [chatVisible, tabs, activeRepo]);
+  }, [activeRepo]);
 
   /**
    * Open a file under `cwd`, which is the repo whose strip will show the tab.
@@ -1181,19 +1089,13 @@ function Workbench() {
         const next = current.filter((tab) => tab.id !== id);
         if (activeTabRef.current !== id) return next;
         // Only a tab the strip shows is selectable: a tab from another repo is
-        // filtered out of it, so focusing one leaves the centre pane blank. A
-        // chat tab is not shown either while the chat is hidden.
-        const selectable = next.filter(
-          (tab) => tabInRepo(tab, activeRepo) && (chatVisible || tab.kind !== "chat"),
-        );
+        // filtered out of it, so focusing one leaves the centre pane blank.
+        const selectable = next.filter((tab) => tabInRepo(tab, activeRepo));
         // A file or dashboard tab is selectable but is not a chat: leaving the
         // repo with none of its own means no live session, so the seed below
         // has to run even when something else could hold focus.
         const chatSibling = selectable.find((tab) => tab.kind === "chat") ?? null;
-        // With the chat hidden there is no seeding either: closing the last chat
-        // of a repo you are only running shells in must not quietly start a new
-        // one behind a panel you cannot see.
-        if (chatSibling || !activeRepo || !chatVisible) {
+        if (chatSibling || !activeRepo) {
           setActiveTab(chatSibling?.id ?? selectable[0]?.id ?? "");
           return next;
         }
@@ -1210,7 +1112,7 @@ function Workbench() {
         return [...next, fresh];
       });
     },
-    [activeRepo, chatVisible],
+    [activeRepo],
   );
 
   /**
@@ -1394,18 +1296,10 @@ function Workbench() {
     if (picked) setWorkspaceRoot(picked);
   }, [pickDirectory]);
 
-  /**
-   * Only the tabs the strip is showing: "others" and "all" mean those.
-   *
-   * A hidden chat takes its tabs out of the strip along with its panes — a row
-   * you can click that brings nothing forward is worse than no row.
-   */
+  /** Only the tabs the strip is showing: "others" and "all" mean those. */
   const visibleTabs = useMemo(
-    () =>
-      tabs.filter(
-        (tab) => tabInRepo(tab, activeRepo) && (chatVisible || tab.kind !== "chat"),
-      ),
-    [tabs, activeRepo, chatVisible],
+    () => tabs.filter((tab) => tabInRepo(tab, activeRepo)),
+    [tabs, activeRepo],
   );
 
   /**
@@ -1573,13 +1467,6 @@ function Workbench() {
         run: toggleTerminal,
       },
       {
-        id: ID.toggleChat,
-        label: "Chat",
-        chord: CHORD.toggleChat,
-        checked: chatVisible,
-        run: toggleChat,
-      },
-      {
         id: ID.debugLog,
         label: "Session Debug Log",
         checked: debugOpen,
@@ -1680,8 +1567,6 @@ function Workbench() {
       openDashboard,
       terminalVisible,
       toggleTerminal,
-      chatVisible,
-      toggleChat,
       debugOpen,
       activeChat,
       theme,
@@ -1689,18 +1574,6 @@ function Workbench() {
       terminalDock,
     ],
   );
-
-  /**
-   * Is the editor side of the centre worth any space?
-   *
-   * Only a hidden chat can make it worthless: with the chat shown the box holds
-   * a pane, or is about to — an empty strip in a window with no repo picked is
-   * waiting for one, and collapsing it there would make picking a repo shuffle
-   * the layout. Hidden, with no file, diff or dashboard tab up, there is nothing
-   * coming: an empty box between the strip and the terminal is dead pixels with
-   * a drag handle on it, so it leaves the layout and the panel takes the column.
-   */
-  const centerVisible = chatVisible || visibleTabs.length > 0;
 
   const barMenus = useMemo(() => buildBarMenus(commands), [commands]);
   const viewMenu = useCallback(() => viewEntries(commands), [commands]);
@@ -1766,14 +1639,6 @@ function Workbench() {
           title="Settings (Ctrl+,)"
         >
           ⚙
-        </button>
-        <button
-          className="toggle-button"
-          data-active={chatVisible}
-          onClick={toggleChat}
-          title={`Toggle chat (${formatChord(CHORD.toggleChat)})`}
-        >
-          chat
         </button>
         <button
           className="toggle-button"
@@ -1868,9 +1733,6 @@ function Workbench() {
         <div className="center-column">
           <div
             className="tab-strip"
-            // Nothing in it and no `+` to add anything: a hidden chat with no
-            // file open leaves an empty 35px bar, so it goes too.
-            style={{ display: centerVisible ? "flex" : "none" }}
             onContextMenu={(event) =>
               menu.openContextMenu(event, [
                 activeRepo && {
@@ -2012,17 +1874,13 @@ function Workbench() {
                 </div>
               );
             })}
-            {/* The only thing it makes is a chat, so it has nothing to offer a
-                workbench where the chat is put away. */}
-            {chatVisible && (
-              <button
-                className="tab-new"
-                onClick={() => activeRepo && openNewChatTab(activeRepo)}
-                title="New session in this repo"
-              >
-                +
-              </button>
-            )}
+            <button
+              className="tab-new"
+              onClick={() => activeRepo && openNewChatTab(activeRepo)}
+              title="New session in this repo"
+            >
+              +
+            </button>
           </div>
 
           <div
@@ -2034,17 +1892,14 @@ function Workbench() {
             // its cleanup closes every pty behind it.
             style={{ flexDirection: terminalDock === "right" ? "row" : "column" }}
           >
-            <div
-              className="center-content"
-              style={{ display: centerVisible ? "flex" : "none" }}
-            >
+            <div className="center-content">
               {/* Every chat tab stays mounted: hiding is not unmounting, so a turn
                   keeps streaming while you read another session. */}
               {chatTabs.map((tab) => (
                 <div
                   key={tab.id}
                   style={{
-                    display: chatVisible && tab.id === activeTab ? "flex" : "none",
+                    display: tab.id === activeTab ? "flex" : "none",
                     flex: 1,
                     minHeight: 0,
                   }}
@@ -2053,13 +1908,8 @@ function Workbench() {
                   <ChatPane
                     chatId={tab.id}
                     cwd={tab.cwd}
-                    visible={chatVisible && tab.id === activeTab}
-                    // A pane behind a hidden chat is as cold as a restored one:
-                    // it has not been shown, so it owes no spawn and no
-                    // transcript read. Already-warm panes are unaffected —
-                    // ChatPane's latch only ever goes one way — so a turn that
-                    // was streaming when the chat went away keeps streaming.
-                    cold={coldTabs.has(tab.id) || !chatVisible}
+                    visible={tab.id === activeTab}
+                    cold={coldTabs.has(tab.id)}
                     resume={tab.sessionId}
                     resumeFile={tab.resumeFile}
                     onSessionId={sessionIdHandlerFor(tab.id)}
@@ -2120,8 +1970,7 @@ function Workbench() {
               )}
             </div>
 
-            {/* Nothing to divide when the panel is the only thing in the box. */}
-            {terminalVisible && centerVisible && (
+            {terminalVisible && (
               <Resizer
                 orientation={terminalDock === "right" ? "vertical" : "horizontal"}
                 onDelta={dragTerminal}
@@ -2136,7 +1985,6 @@ function Workbench() {
               repo={activeRepo}
               visible={terminalVisible}
               size={terminalDock === "right" ? terminalWidth : terminalHeight}
-              fill={!centerVisible}
               dock={terminalDock}
               refitToken={refitToken}
               themeKey={theme}
@@ -2148,22 +1996,9 @@ function Workbench() {
           </div>
         </div>
 
-        {chatVisible && (
-          <Resizer orientation="vertical" onDelta={(delta) => resizeRight(-delta)} />
-        )}
+        <Resizer orientation="vertical" onDelta={(delta) => resizeRight(-delta)} />
 
-        {/* Both panes here are about sessions, so they go with the chat. Hidden
-            rather than unmounted, and not only out of habit: the sessions pane
-            is what scans the transcripts on disk, and the dashboard and
-            quick-open read the groups it publishes. */}
-        <div
-          className="sidebar"
-          style={{
-            width: chatVisible ? rightWidth : 0,
-            flex: `0 0 ${chatVisible ? rightWidth : 0}px`,
-            display: chatVisible ? "flex" : "none",
-          }}
-        >
+        <div className="sidebar" style={{ width: rightWidth, flex: `0 0 ${rightWidth}px` }}>
           <PaneBoundary label="status">
             <StatusPanel groups={sessionGroups} cwd={activeRepo} stats={chatStats} />
           </PaneBoundary>

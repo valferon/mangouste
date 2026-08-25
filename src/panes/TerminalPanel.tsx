@@ -74,14 +74,6 @@ interface TerminalPanelProps {
   visible: boolean;
   /** Panel size along the docked edge, in pixels, owned by the parent's drag handle. */
   size: number;
-  /**
-   * Nothing is sharing the column: take all of it.
-   *
-   * A terminal-only workbench — chat hidden, no file tab up — leaves the panel
-   * the only thing in the centre, and a `0 1 size` item in an empty flex box
-   * still measures `size` and leaves the rest of the column bare background.
-   */
-  fill: boolean;
   /** Bottom of the column, or its right-hand side. */
   dock: TerminalDock;
   /** Bumped by the parent when the panel's box changes, to force a refit. */
@@ -111,7 +103,6 @@ export function TerminalPanel({
   repo,
   visible,
   size,
-  fill,
   dock,
   refitToken,
   themeKey,
@@ -147,10 +138,7 @@ export function TerminalPanel({
     setGroups((current) => (current[repo] ? current : { ...current, [repo]: makeGroup() }));
   }, [visible, repo]);
 
-  useEffect(
-    () => setShowToken((token) => token + 1),
-    [repo, group?.activeTab, visible, fill, dock],
-  );
+  useEffect(() => setShowToken((token) => token + 1), [repo, group?.activeTab, visible, dock]);
 
   const addTab = useCallback(() => {
     if (!repo) return;
@@ -357,10 +345,8 @@ export function TerminalPanel({
       // it nothing to give: when the column is smaller than the stored size, the
       // panel is the item that yields rather than overflowing its edge.
       style={{
-        // Filling, the stored size means nothing: it is what the panel is worth
-        // *beside* something, and there is nothing beside it.
-        ...(fill ? {} : dock === "right" ? { width: size } : { height: size }),
-        flex: fill ? "1 1 auto" : `0 1 ${size}px`,
+        ...(dock === "right" ? { width: size } : { height: size }),
+        flex: `0 1 ${size}px`,
         display: visible ? "flex" : "none",
       }}
     >

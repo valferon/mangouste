@@ -99,17 +99,6 @@ describe("matchChord", () => {
     expect(matchChord("Ctrl+Shift+E", press("KeyE", { ctrl: true }))).toBe(false);
   });
 
-  it("keeps the two panel toggles off each other's keystroke", () => {
-    // The chat and the terminal sit one Shift apart on the same key, so the
-    // exactness above is what stops one press hiding both panels.
-    const backquote = press("Backquote", { ctrl: true });
-    const shifted = press("Backquote", { ctrl: true, shift: true });
-    expect(matchChord(CHORD.toggleTerminal, backquote)).toBe(true);
-    expect(matchChord(CHORD.toggleTerminal, shifted)).toBe(false);
-    expect(matchChord(CHORD.toggleChat, shifted)).toBe(true);
-    expect(matchChord(CHORD.toggleChat, backquote)).toBe(false);
-  });
-
   it("never fires when the desktop's super key is held", () => {
     expect(matchChord("Ctrl+N", press("KeyN", { ctrl: true, meta: true }))).toBe(false);
   });

@@ -44,7 +44,6 @@ export const ID = {
   dashboard: "view.dashboard",
   toggleSidebar: "view.toggleSidebar",
   toggleTerminal: "view.toggleTerminal",
-  toggleChat: "view.toggleChat",
   debugLog: "view.debugLog",
   themeSystem: "view.theme.system",
   zoomIn: "view.zoomIn",
@@ -87,7 +86,6 @@ export function viewEntries(commands: Rows): MenuEntry[] {
     "separator",
     entry(commands, ID.toggleSidebar),
     entry(commands, ID.toggleTerminal),
-    entry(commands, ID.toggleChat),
     entry(commands, ID.debugLog),
     "separator",
     {
@@ -136,7 +134,6 @@ export function appEntries(commands: Rows): MenuEntry[] {
     "separator",
     entry(commands, ID.toggleSidebar),
     entry(commands, ID.toggleTerminal),
-    entry(commands, ID.toggleChat),
     "separator",
     entry(commands, ID.settings),
   ];
