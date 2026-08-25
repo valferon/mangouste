@@ -2153,7 +2153,7 @@ select {
 
 /* ---------- status bar: branch ---------- */
 
-/* Sits on the accent bar, so everything here is drawn in `--accent-fg` and
+/* Everything here sits on the accent bar, so it is drawn in `--accent-fg` and
    separated by translucency rather than by borders in a colour that would have
    to be picked per theme. */
 .status-branch {
@@ -2170,50 +2170,90 @@ select {
   white-space: nowrap;
 }
 
-/* Commits owed in each direction. Same weight as each other: which one matters
-   is the reader's business, and colouring one of them red would make an
-   ordinary branch look broken. */
-.status-ahead,
-.status-behind {
-  font-variant-numeric: tabular-nums;
-  opacity: 0.85;
+/* Uncommitted work. Nudged up because `*` sits on the baseline in most faces
+   and reads as punctuation rather than as a marker down there. */
+.status-branch-dirty {
+  margin-left: -1px;
+  font-weight: 700;
+  line-height: 1;
+  transform: translateY(1px);
 }
 
-/* A fetch in flight. No spin: the bar is glanced at, and a moving glyph in the
-   corner of the eye is a notification, which this is not. */
-.status-checking {
-  opacity: 0.6;
-}
-
-.status-pull {
+/* The sync item: glyph plus both counts, as VSCode arranges it. Negative margin
+   pulls it inside the bar's 14px gap so it reads as attached to the branch it
+   belongs to rather than as the next item along. */
+.status-sync {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   margin-left: -8px;
-  padding: 1px 7px;
-  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent-fg) 35%, transparent);
-  border-radius: 9px;
+  padding: 1px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
   color: var(--accent-fg);
   cursor: pointer;
   font-family: inherit;
   font-size: 11px;
 }
 
-.status-pull:hover {
-  background: color-mix(in srgb, var(--accent-fg) 30%, transparent);
+.status-sync:hover {
+  background: color-mix(in srgb, var(--accent-fg) 22%, transparent);
 }
 
-.status-pull:disabled {
+.status-sync:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
-/* Diverged: the button opens the explanation instead of promising a pull that
-   `--ff-only` cannot deliver, so it is drawn as a warning rather than an
-   action. */
-.status-pull[data-diverged="true"] {
-  border-style: dashed;
+.status-sync-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Diverged: the click explains rather than pulls, so the item is marked as
+   something to read instead of something that will act. */
+.status-sync[data-action="explain"] {
+  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
+}
+
+/* A fetch in flight. One slow turn, not a spinner: the bar is glanced at, and
+   something whirling in the corner of the eye is a notification, which this is
+   not. */
+.status-spinning {
+  animation: status-spin 1.6s linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The repo path yields first when the bar runs out of room: the branch, the
+   phase and the editor facts are all shorter and all more perishable. */
+.status-repo {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- status bar: editor facts ---------- */
+
+.status-facts {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-fact {
+  white-space: nowrap;
+}
+
+/* Room for the widest reading, so the digits changing under the caret do not
+   shove every fact after them sideways on each keystroke. */
+.status-caret {
+  min-width: 13ch;
 }
 
 /* ---------- upstream prompt ---------- */

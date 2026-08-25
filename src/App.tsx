@@ -4,6 +4,7 @@ import { ChatPane } from "./panes/ChatPane";
 import { Dashboard } from "./panes/Dashboard";
 import { FileTree } from "./panes/FileTree";
 import { BranchStatus } from "./panes/BranchStatus";
+import { EditorFacts } from "./panes/EditorFacts";
 import { GitPane } from "./panes/GitPane";
 import { QuickOpen } from "./panes/QuickOpen";
 import { SearchPane } from "./panes/SearchPane";
@@ -2290,16 +2291,16 @@ function Workbench() {
           ])
         }
       >
-        <span>{activeRepo || "no repo"}</span>
-        {/* Which branch, what it owes its upstream, and one click to take it.
-            Here rather than only in Source Control because this is the question
-            that gets asked while looking at something else. */}
+        {/* Branch first and leftmost, where VSCode puts it: it is the item the
+            eye goes to, and the repo path after it is context for it rather
+            than the other way round. */}
         <BranchStatus
           cwd={activeRepo}
           watch={upstreamWatch}
           onChanged={bumpGitRefresh}
           onNotice={setSystemMessage}
         />
+        <span className="status-repo">{activeRepo || "no repo"}</span>
         {liveSessionId && <span>session {liveSessionId.slice(0, 8)}</span>}
         {/* The technical answer to "why is nothing moving"; click for the
             full story — every frame, call and timing behind it. */}
@@ -2324,6 +2325,8 @@ function Workbench() {
             {systemMessage}
           </span>
         )}
+        {/* The editor's own facts, only while there is an editor in front. */}
+        <EditorFacts />
         <span>{repos.length} repos</span>
       </div>
     </div>

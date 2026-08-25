@@ -5,6 +5,9 @@ import {
   canFastForward,
   describeNews,
   newsKey,
+  syncAction,
+  syncCounts,
+  syncTitle,
   trackingTitle,
   upstreamNews,
   type Tracking,
@@ -144,6 +147,62 @@ describe("trackingTitle", () => {
   it("notes a branch that has no commits yet", () => {
     expect(trackingTitle(tracking({ branch: "No commits yet on main", upstream: null }))).toBe(
       "main (no commits yet)\nNo upstream: nothing to compare against",
+    );
+  });
+});
+
+describe("syncCounts", () => {
+  it("puts behind before ahead, as VSCode does", () => {
+    expect(syncCounts(tracking({ ahead: 3, behind: 2 }))).toBe("↓2↑3");
+  });
+
+  it("shows only the direction that has anything", () => {
+    expect(syncCounts(tracking({ behind: 2 }))).toBe("↓2");
+    expect(syncCounts(tracking({ ahead: 3 }))).toBe("↑3");
+  });
+
+  it("is empty in sync, so two zeroes never render", () => {
+    expect(syncCounts(tracking())).toBe("");
+  });
+
+  it("is empty with no upstream to count against", () => {
+    expect(syncCounts(tracking({ upstream: null }))).toBe("");
+    expect(syncCounts(null)).toBe("");
+  });
+});
+
+describe("syncAction", () => {
+  it("pulls what is waiting", () => {
+    expect(syncAction(tracking({ behind: 2 }))).toBe("pull");
+  });
+
+  it("explains instead of attempting an impossible fast-forward", () => {
+    expect(syncAction(tracking({ ahead: 1, behind: 2 }))).toBe("explain");
+  });
+
+  it("fetches when there is nothing to take", () => {
+    expect(syncAction(tracking())).toBe("fetch");
+    // Ahead only: pushing from the status bar is not this button's decision.
+    expect(syncAction(tracking({ ahead: 4 }))).toBe("fetch");
+    expect(syncAction(tracking({ upstream: null }))).toBe("fetch");
+  });
+});
+
+describe("syncTitle", () => {
+  it("says what a click will do", () => {
+    expect(syncTitle(tracking({ behind: 1 }))).toBe("Click to pull 1 commit behind origin/main");
+    expect(syncTitle(tracking())).toBe("Up to date with origin/main\nClick to fetch");
+  });
+
+  it("sends a push to Source Control rather than offering one", () => {
+    expect(syncTitle(tracking({ ahead: 2 }))).toBe(
+      "2 to push — pushing is in Source Control\nClick to fetch",
+    );
+  });
+
+  it("does not promise a pull it cannot deliver", () => {
+    expect(syncTitle(tracking({ ahead: 1, behind: 2 }))).toBe(
+      "2 commits behind origin/main, and you are ahead — click for why",
     );
   });
 });

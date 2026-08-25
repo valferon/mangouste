@@ -274,6 +274,7 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/pty.rs` | PTY-backed terminals (`portable-pty`), base64 on the wire |
 | `src-tauri/src/sessions.rs` | Scans `~/.claude/projects`, head/tail sampled |
 | `src-tauri/src/git.rs` | `git` porcelain: status, tracking, log, show, diff |
+| `src/lib/editorFacts.ts` | Caret, EOL, indent and language, in a store of their own |
 | `src-tauri/src/workspace.rs` | Repo discovery, lazy tree, quick-open search |
 | `src-tauri/src/format.rs` | Buffer through the repo's own formatter, stdin to stdout |
 | `src-tauri/src/primary.rs` | X11 PRIMARY + CLIPBOARD access |
@@ -590,12 +591,36 @@ The rest follows from the tab holding a program instead of a pane:
 
 ## The branch, and what it owes upstream
 
-The status bar carries the branch of the repo the strip is showing, `↑` for
-commits it has that the upstream does not, `↓` for the ones it does not have —
-and a `pull` button beside them when there is something to take. Source Control
+Laid out as VSCode lays it out. Leftmost, because it is the item the eye goes
+to: the branch of the repo the strip is showing, a `*` when anything is
+uncommitted, and one sync item carrying the glyph and both counts — `↓` for what
+the upstream has and this branch does not, `↑` for the reverse. The repo path
+follows as context for it rather than the other way round. Source Control
 answers the same question in more detail, but only while it is the pane you have
 open, and "which branch am I on" is a question asked while looking at something
 else.
+
+Clicking the sync item does the useful, safe half of a sync in each state: pull
+what is waiting, explain why it cannot be pulled, or — with nothing to take — go
+and ask the remote what it has. Not VSCode's sync, which also pushes. Pushing
+from a status bar is a decision this one does not make: Source Control has that
+button, and it knows whether the branch needs its upstream set first.
+
+The `*` is the one thing here that costs a worktree walk, so it has a slower
+clock of its own and skips the untracked-file scan — the expensive half of a
+status, since it descends directories git has nothing recorded for. A repo whose
+only change is a brand new file therefore reads as clean. That is the wrong
+answer, taken deliberately: the marker is a hint, and the alternative is a
+directory crawl every few seconds on a monorepo.
+
+At the other end of the bar sit the editor's own facts — `Ln 12, Col 4`,
+`Spaces: 2`, `UTF-8`, `LF`, `TypeScript` — and only while there is a file in
+front to have them. `UTF-8` is a statement about this app rather than a
+detection: the Rust side reads and writes nothing else. Those facts travel from
+the editor to the bar through a module store, not through `App`, for one reason:
+the caret moves on every keystroke, and taking it through `App` state would
+re-render the workbench once per character typed. This way the only thing that
+re-reads is the one item showing it.
 
 Nothing here is remembered. A checkout in a terminal tab, a commit made by a
 session, a pull in the sidebar all move these numbers without telling the status

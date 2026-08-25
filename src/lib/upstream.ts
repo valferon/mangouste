@@ -112,6 +112,52 @@ export function newsKey(cwd: string, news: UpstreamNews): string {
   return [cwd, news.upstream, news.behind].join("\u0000");
 }
 
+/**
+ * The counts beside the sync glyph, as VSCode arranges them: behind then ahead.
+ *
+ * Empty when there is nothing either way — the glyph still shows, because "in
+ * sync" is a thing worth being able to see, and two zeroes are not how to say it.
+ */
+export function syncCounts(tracking: Tracking | null): string {
+  if (!tracking?.upstream) return "";
+  const parts: string[] = [];
+  if (tracking.behind > 0) parts.push(`\u2193${tracking.behind}`);
+  if (tracking.ahead > 0) parts.push(`\u2191${tracking.ahead}`);
+  return parts.join("");
+}
+
+/**
+ * What clicking the sync item does.
+ *
+ * Not VSCode's sync, which pulls *and pushes*. Pushing from a status bar is a
+ * decision this one does not make — Source Control has the button, and it knows
+ * whether the branch needs an upstream setting first. So the click is the
+ * useful, safe half in each state: take what is waiting, explain why it cannot
+ * be taken, or go and ask the remote what it has.
+ */
+export type SyncAction = "pull" | "explain" | "fetch";
+
+export function syncAction(tracking: Tracking | null): SyncAction {
+  const news = upstreamNews(tracking);
+  if (!news) return "fetch";
+  return news.diverged ? "explain" : "pull";
+}
+
+/** The sync item's tooltip: exactly what a click will do, in its own words. */
+export function syncTitle(tracking: Tracking | null): string {
+  const news = upstreamNews(tracking);
+  if (!news) {
+    const ahead = tracking?.ahead ?? 0;
+    const state =
+      ahead > 0
+        ? `${ahead} to push — pushing is in Source Control`
+        : "Up to date with " + (tracking?.upstream ?? "the upstream");
+    return `${state}\nClick to fetch`;
+  }
+  if (news.diverged) return `${describeNews(news)}, and you are ahead — click for why`;
+  return `Click to pull ${describeNews(news)}`;
+}
+
 /** The chip's tooltip: everything the two arrows are compressing. */
 export function trackingTitle(tracking: Tracking | null): string {
   const label = branchLabel(tracking);

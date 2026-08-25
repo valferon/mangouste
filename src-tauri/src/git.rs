@@ -282,6 +282,23 @@ fn parse_counts(out: &str) -> (u32, u32) {
     (ahead, behind)
 }
 
+/// Whether anything is uncommitted: the `*` VSCode puts beside the branch.
+///
+/// `--untracked-files=no` deliberately. Walking for untracked files is the
+/// expensive half of a status — it descends directories git has nothing recorded
+/// for — and this is polled. The cost of leaving it out is that a repo whose only
+/// change is a brand new file reads as clean, which is the wrong answer; the cost
+/// of leaving it in is a directory crawl every few seconds on a monorepo. The
+/// marker is a hint, so it is the cheap one.
+#[tauri::command(async)]
+pub fn git_dirty(cwd: String) -> Result<bool, String> {
+    // Porcelain rather than `diff --quiet HEAD`, which needs a HEAD to compare
+    // against: this answers on an unborn branch and a detached one alike, and
+    // costs the same now that the untracked walk is off.
+    let stdout = git(&cwd, &["status", "--porcelain", "--untracked-files=no"])?;
+    Ok(!stdout.trim().is_empty())
+}
+
 /// Byte ceiling on a returned patch. Far more than the viewer will render
 /// (`Viewer.tsx` stops at 5000 lines), but small enough that the IPC hop and the
 /// JSON encode stay imperceptible; a commit touching a generated file can
@@ -849,6 +866,39 @@ mod tracking_tests {
         run(&clone, &["fetch", "--quiet", "origin"]);
         let diverged = tracking(&clone);
         assert_eq!((diverged.ahead, diverged.behind), (1, 2));
+    }
+
+    #[test]
+    fn dirty_sees_tracked_changes_and_not_untracked_ones() {
+        let dir = repo("dirty");
+        commit(&dir, "one");
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(!git_dirty(cwd.clone()).unwrap());
+
+        // A worktree edit, then the same edit staged: both are uncommitted work.
+        std::fs::write(dir.join("f.txt"), "changed").expect("write");
+        assert!(git_dirty(cwd.clone()).unwrap());
+        run(&dir, &["add", "f.txt"]);
+        assert!(git_dirty(cwd.clone()).unwrap());
+        run(&dir, &["commit", "--quiet", "-m", "two"]);
+        assert!(!git_dirty(cwd.clone()).unwrap());
+
+        // The documented cost of skipping the untracked walk: a brand new file
+        // reads as clean. Pinned so the trade is a decision, not a surprise.
+        std::fs::write(dir.join("new.txt"), "hello").expect("write");
+        assert!(!git_dirty(cwd).unwrap());
+    }
+
+    #[test]
+    fn dirty_answers_on_a_branch_with_no_commits() {
+        // `diff --quiet HEAD` cannot: there is no HEAD to compare against, which
+        // is why this reads porcelain instead.
+        let dir = repo("dirty-unborn");
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(!git_dirty(cwd.clone()).unwrap());
+        std::fs::write(dir.join("f.txt"), "staged").expect("write");
+        run(&dir, &["add", "f.txt"]);
+        assert!(git_dirty(cwd).unwrap());
     }
 
     #[test]

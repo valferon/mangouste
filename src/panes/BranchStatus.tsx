@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { copyText } from "../lib/editing";
-import { BranchIcon, FetchIcon, PullIcon } from "../lib/icons";
-import { gitFetch, gitPull, gitTracking } from "../lib/ipc";
+import { BranchIcon, FetchIcon } from "../lib/icons";
+import { gitDirty, gitFetch, gitPull, gitTracking } from "../lib/ipc";
 import { useMenu } from "../lib/menu";
 import {
   branchLabel,
   canFastForward,
   describeNews,
   newsKey,
+  syncAction,
+  syncCounts,
+  syncTitle,
   trackingTitle,
   upstreamNews,
   type Tracking,
@@ -34,6 +37,16 @@ const READ_MS = 5_000;
  * tether and fast enough that "you should pull" arrives while it still matters.
  */
 const FETCH_MS = 5 * 60_000;
+
+/**
+ * How often the `*` beside the branch is re-checked.
+ *
+ * Slower than the branch itself, because unlike `gitTracking` this one has to
+ * compare tracked files against HEAD — the cheaper half of a status, but still
+ * a walk. The marker says "you have uncommitted work", which is not a fact that
+ * needs to be a second old.
+ */
+const DIRTY_MS = 10_000;
 
 interface BranchStatusProps {
   /** The repo the strip is showing. Empty outside a repo. */
@@ -69,6 +82,8 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
   /** The news a dialog is currently asking about, with its own error and result. */
   const [prompt, setPrompt] = useState<UpstreamNews | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
+  /** Whether anything is uncommitted: the `*` VSCode puts beside the branch. */
+  const [dirty, setDirty] = useState(false);
 
   /**
    * News already put to the user, so the same commits are not raised twice.
@@ -93,6 +108,7 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
   useEffect(() => {
     generation.current += 1;
     setTracking(null);
+    setDirty(false);
     setBusy(null);
     setPrompt(null);
     setPromptError(null);
@@ -195,6 +211,30 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
   }, [cwd, read]);
 
   /*
+   * The `*`, on its own slower clock.
+   *
+   * Separate from the refs poll rather than folded into it: this read walks
+   * tracked files and that one does not, so putting them on the same tick would
+   * make the cheap read cost what the expensive one does.
+   */
+  useEffect(() => {
+    if (!cwd) return;
+    const mine = generation.current;
+    const look = () => {
+      void gitDirty(cwd)
+        .then((next) => {
+          if (mine === generation.current) setDirty(next);
+        })
+        .catch(() => {});
+    };
+    look();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") look();
+    }, DIRTY_MS);
+    return () => window.clearInterval(timer);
+  }, [cwd]);
+
+  /*
    * The network half: once when the repo opens, then on a long interval.
    *
    * Only the open announces. Opening a repo is the moment the question "is there
@@ -218,9 +258,26 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
 
   const news = upstreamNews(tracking);
   const ready = canFastForward(tracking);
+  const counts = syncCounts(tracking);
+  const action = syncAction(tracking);
+
+  /** The sync item's click, which is only ever the safe half of a sync. */
+  const sync = () => {
+    if (action === "pull") return void pull(onNotice);
+    // Diverged: the dialog explains, because the answer is a merge or a rebase
+    // and neither is a decision a status-bar button should make.
+    if (action === "explain" && news) {
+      setPromptError(null);
+      setPrompt(news);
+      return;
+    }
+    void check(false);
+  };
 
   return (
     <>
+      {/* Branch first and leftmost, as VSCode puts it — this is the item the eye
+          goes to, and everything after it is context for it. */}
       <span
         className="status-branch"
         title={trackingTitle(tracking)}
@@ -242,41 +299,29 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
       >
         <BranchIcon />
         <span className="status-branch-name">{label.text}</span>
-        {/* Only counts that are non-zero: a row of zeroes is four characters
-            saying nothing, every second of every day. */}
-        {tracking && tracking.ahead > 0 && <span className="status-ahead">↑{tracking.ahead}</span>}
-        {tracking && tracking.behind > 0 && (
-          <span className="status-behind">↓{tracking.behind}</span>
+        {/* Uncommitted work, in one character, exactly where VSCode puts it. */}
+        {dirty && (
+          <span className="status-branch-dirty" title="Uncommitted changes">
+            *
+          </span>
         )}
-        {busy === "fetch" && <FetchIcon className="status-checking" />}
       </span>
 
-      {/* The button appears only when it has something to do. A pull that is
-          permanently greyed out is furniture; one that shows up when commits
-          land is the notification. */}
-      {news && (
+      {/* One item carrying the glyph and both counts, as VSCode arranges it,
+          rather than a labelled button. Shown whenever there is an upstream: "in
+          sync" is worth being able to see, and the click is useful in every
+          state — see `syncAction`. */}
+      {tracking?.upstream && (
         <button
-          className="status-pull"
-          data-diverged={news.diverged}
+          className="status-sync"
+          data-action={action}
+          data-busy={busy !== null}
           disabled={busy !== null}
-          title={
-            news.diverged
-              ? `${describeNews(news)}, and ${tracking?.ahead} of yours it does not have — a fast-forward is not possible`
-              : `Pull ${describeNews(news)}`
-          }
-          onClick={() => {
-            // Diverged: the dialog explains, because the answer is a merge or a
-            // rebase and neither is a decision a status-bar button should make.
-            if (news.diverged) {
-              setPromptError(null);
-              setPrompt(news);
-              return;
-            }
-            void pull(onNotice);
-          }}
+          title={busy === "pull" ? "Pulling…" : syncTitle(tracking)}
+          onClick={sync}
         >
-          <PullIcon />
-          {busy === "pull" ? "pulling…" : news.diverged ? "diverged" : "pull"}
+          <FetchIcon className={busy === "fetch" ? "status-spinning" : undefined} />
+          {counts && <span className="status-sync-counts">{counts}</span>}
         </button>
       )}
 

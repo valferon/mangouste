@@ -10,6 +10,7 @@ import {
 } from "react";
 import { copyText } from "../lib/editing";
 import { highlightCode, languageForPath } from "../lib/highlight";
+import { clearEditorFacts, factsFor, publishEditorFacts } from "../lib/editorFacts";
 import { formatText, readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -748,6 +749,32 @@ export const FileView = memo(function FileView({
   );
 
   const language = useMemo(() => languageForPath(path), [path]);
+
+  /**
+   * Publish the caret row for the status bar.
+   *
+   * Read off the field rather than out of `draft`: this is called from the same
+   * handlers that set `draft`, and the state behind it is one render old.
+   */
+  const reportFacts = useCallback(() => {
+    const field = textareaRef.current;
+    if (!field) return;
+    publishEditorFacts(factsFor(path, field.value, field.selectionStart ?? 0));
+  }, [path]);
+
+  /*
+   * Only the pane on screen describes itself, and it stops when it leaves.
+   *
+   * Editors stay mounted when hidden — an unmount would throw away an unsaved
+   * draft — so without the gate every open file would be publishing over the
+   * others. The clear is keyed on the path for the same reason: two editors
+   * changing places both fire, in whichever order React runs them.
+   */
+  useEffect(() => {
+    if (!visible) return;
+    reportFacts();
+    return () => clearEditorFacts(path);
+  }, [visible, path, reportFacts]);
   // Typing must not wait on the tokeniser: the deferred copy lags behind during
   // a burst of keystrokes and catches up once it stops, so the caret never does.
   const deferredDraft = useDeferredValue(draft);
@@ -847,8 +874,13 @@ export const FileView = memo(function FileView({
             value={draft}
             spellCheck={false}
             wrap="off"
-            onChange={onDraftChange}
+            onChange={(event) => {
+              onDraftChange(event);
+              reportFacts();
+            }}
             onKeyDown={onKeyDown}
+            // Caret moves that are not edits: a click, an arrow key, a selection.
+            onSelect={reportFacts}
             // The gutter and the highlight layer are separate scrollers driven
             // from here; neither has a scrollbar of its own and neither can
             // drift out of step with the text it sits beside.

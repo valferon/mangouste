@@ -299,6 +299,13 @@ export const gitStatus = (cwd: string) => invoke<RepoStatus>("git_status", { cwd
  * branch header — which is the poll in the status bar, so the cost matters.
  */
 export const gitTracking = (cwd: string) => invoke<RepoStatus>("git_tracking", { cwd });
+/**
+ * Whether anything is uncommitted, for the `*` beside the branch.
+ *
+ * Skips the untracked-file walk, so a repo whose only change is a new file
+ * reads as clean — see the Rust side for why the marker takes that trade.
+ */
+export const gitDirty = (cwd: string) => invoke<boolean>("git_dirty", { cwd });
 export const gitShow = (cwd: string, sha: string) => invoke<string>("git_show", { cwd, sha });
 export const gitDiffFile = (cwd: string, path: string, staged = false) =>
   invoke<string>("git_diff_file", { cwd, path, staged });
