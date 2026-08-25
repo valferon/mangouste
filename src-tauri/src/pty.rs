@@ -249,19 +249,31 @@ pub fn pty_open(
 
 /// Write keystrokes to a terminal. `data` is base64 so control bytes survive.
 ///
-/// `async`, and the writer is cloned out before writing: a blocking PTY write
-/// must hold neither the main thread nor the terminal map.
-#[tauri::command(async)]
-pub fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
+/// The writer is cloned out before writing, and the write itself runs on a
+/// blocking thread: it must hold neither the terminal map nor an async worker.
+/// `command(async)` was not enough — that only moves the call off the main
+/// thread onto the runtime, where a PTY whose reader has stopped draining (a
+/// full pipe, a stopped program) parks a worker for as long as it stays full.
+/// A handful of those and every other async command in the app waits with it.
+#[tauri::command]
+pub async fn pty_write(
+    state: State<'_, PtyState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
     let bytes = BASE64.decode(data.as_bytes()).map_err(|e| e.to_string())?;
     let writer = {
         let terminals = state.terminals.lock();
         let terminal = terminals.get(&id).ok_or("no such terminal")?;
         Arc::clone(&terminal.writer)
     };
-    let mut writer = writer.lock();
-    writer.write_all(&bytes).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut writer = writer.lock();
+        writer.write_all(&bytes).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
