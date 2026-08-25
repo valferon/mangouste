@@ -458,8 +458,11 @@ export const SessionsPane = memo(function SessionsPane({
   // Keep the attached session visible when it changes out from under the scroll.
   useEffect(() => {
     if (!activeSessionId) return;
+    // Qualified: the repo row above carries `data-selected` too and comes first
+    // in document order, so the bare selector scrolled the group header into
+    // view and left the session row wherever it already was.
     bodyRef.current
-      ?.querySelector('[data-selected="true"]')
+      ?.querySelector('.session-row[data-selected="true"]')
       ?.scrollIntoView({ block: "nearest" });
   }, [activeSessionId, groups]);
 
