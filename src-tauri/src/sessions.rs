@@ -1050,9 +1050,9 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
             .iter()
             .find_map(|s| s.cwd.clone())
             .unwrap_or_else(|| unescape_dir_name(&dir_name));
-        // Sessions spawned by the background title generator are tooling,
+        // Sessions spawned by the background `claude -p` helpers are tooling,
         // not conversations; the whole scratch group stays hidden.
-        if Path::new(&cwd) == crate::chats::titlegen_dir() {
+        if Path::new(&cwd) == crate::chats::helper_dir() {
             continue;
         }
         let label = Path::new(&cwd)
