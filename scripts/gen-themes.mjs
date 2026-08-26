@@ -13,6 +13,12 @@
  * inherits a few hundred. Everything this app needs and a theme does not name is
  * therefore derived from what it does name — see `pick` and the mixes below —
  * rather than left to a fallback that would make half the themes look identical.
+ *
+ * Themes VS Code does not bundle — Monokai++, One Monokai — are vendored under
+ * `vendor/themes/`, with their licences, exactly as their extensions publish
+ * them, and read from there. A `.tmTheme` is handled the way VS Code handles
+ * one: the scope-less first rule's `background`, `foreground` and `selection`
+ * become editor colours, and the rest are TextMate rules like any other.
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -35,24 +41,39 @@ if (!root) {
   process.exit(1);
 }
 
-/** id, label, kind, and where the palette comes from. Order is menu order. */
+/**
+ * id, label, kind, and where the palette comes from. Order is menu order.
+ *
+ * `file` is under the VS Code install unless it starts with `vendor/`, which is
+ * this repo. A vendored `uiTheme: vs-dark` extension paints over VS Code's dark
+ * workbench defaults, so `base` names the bundled theme that fills in whatever
+ * colours it does not set — the fallback VS Code itself applies. Token rules
+ * are never inherited from the base: VS Code adds none, and neither does this.
+ */
+const DARK_BASE = "theme-defaults/themes/dark_plus.json";
 const THEMES = [
-  ["dark-plus", "Dark+", "dark", "theme-defaults/themes/dark_plus.json"],
-  ["dark-modern", "Dark Modern", "dark", "theme-defaults/themes/dark_modern.json"],
-  ["monokai", "Monokai", "dark", "theme-monokai/themes/monokai-color-theme.json"],
-  ["monokai-dimmed", "Monokai Dimmed", "dark", "theme-monokai-dimmed/themes/dimmed-monokai-color-theme.json"],
-  ["solarized-dark", "Solarized Dark", "dark", "theme-solarized-dark/themes/solarized-dark-color-theme.json"],
-  ["abyss", "Abyss", "dark", "theme-abyss/themes/abyss-color-theme.json"],
-  ["kimbie-dark", "Kimbie Dark", "dark", "theme-kimbie-dark/themes/kimbie-dark-color-theme.json"],
-  ["red", "Red", "dark", "theme-red/themes/Red-color-theme.json"],
-  ["tomorrow-night-blue", "Tomorrow Night Blue", "dark", "theme-tomorrow-night-blue/themes/tomorrow-night-blue-color-theme.json"],
-  ["hc-black", "High Contrast Dark", "dark", "theme-defaults/themes/hc_black.json"],
-  ["light-plus", "Light+", "light", "theme-defaults/themes/light_plus.json"],
-  ["light-modern", "Light Modern", "light", "theme-defaults/themes/light_modern.json"],
-  ["solarized-light", "Solarized Light", "light", "theme-solarized-light/themes/solarized-light-color-theme.json"],
-  ["quiet-light", "Quiet Light", "light", "theme-quietlight/themes/quietlight-color-theme.json"],
-  ["hc-light", "High Contrast Light", "light", "theme-defaults/themes/hc_light.json"],
+  { id: "dark-plus", label: "Dark+", kind: "dark", file: "theme-defaults/themes/dark_plus.json" },
+  { id: "dark-modern", label: "Dark Modern", kind: "dark", file: "theme-defaults/themes/dark_modern.json" },
+  { id: "monokai", label: "Monokai", kind: "dark", file: "theme-monokai/themes/monokai-color-theme.json" },
+  { id: "monokai-dimmed", label: "Monokai Dimmed", kind: "dark", file: "theme-monokai-dimmed/themes/dimmed-monokai-color-theme.json" },
+  { id: "monokai-plusplus", label: "Monokai++", kind: "dark", file: "vendor/themes/monokai-plusplus/Monokai++-color-theme.json", base: DARK_BASE },
+  { id: "monokai-plusplus-unified", label: "Monokai++ Unified", kind: "dark", file: "vendor/themes/monokai-plusplus/Monokai++-Unified-color-theme.json", base: DARK_BASE },
+  { id: "one-monokai", label: "One Monokai", kind: "dark", file: "vendor/themes/one-monokai/OneMonokai-color-theme.json", base: DARK_BASE },
+  { id: "solarized-dark", label: "Solarized Dark", kind: "dark", file: "theme-solarized-dark/themes/solarized-dark-color-theme.json" },
+  { id: "abyss", label: "Abyss", kind: "dark", file: "theme-abyss/themes/abyss-color-theme.json" },
+  { id: "kimbie-dark", label: "Kimbie Dark", kind: "dark", file: "theme-kimbie-dark/themes/kimbie-dark-color-theme.json" },
+  { id: "red", label: "Red", kind: "dark", file: "theme-red/themes/Red-color-theme.json" },
+  { id: "tomorrow-night-blue", label: "Tomorrow Night Blue", kind: "dark", file: "theme-tomorrow-night-blue/themes/tomorrow-night-blue-color-theme.json" },
+  { id: "hc-black", label: "High Contrast Dark", kind: "dark", file: "theme-defaults/themes/hc_black.json" },
+  { id: "light-plus", label: "Light+", kind: "light", file: "theme-defaults/themes/light_plus.json" },
+  { id: "light-modern", label: "Light Modern", kind: "light", file: "theme-defaults/themes/light_modern.json" },
+  { id: "solarized-light", label: "Solarized Light", kind: "light", file: "theme-solarized-light/themes/solarized-light-color-theme.json" },
+  { id: "quiet-light", label: "Quiet Light", kind: "light", file: "theme-quietlight/themes/quietlight-color-theme.json" },
+  { id: "hc-light", label: "High Contrast Light", kind: "light", file: "theme-defaults/themes/hc_light.json" },
 ];
+
+/** Resolve a THEMES `file`: the repo for vendored themes, the install for the rest. */
+const locate = (file) => (file.startsWith("vendor/") ? resolve(file) : join(root, file));
 
 /* ---------- colour arithmetic ---------- */
 
@@ -128,19 +149,97 @@ const alpha = (color, a) => color + Math.round(a * 255).toString(16).padStart(2,
 
 /* ---------- theme loading ---------- */
 
-function load(path) {
-  const theme = JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, ""));
+function load(path, base) {
+  const theme = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
   let colors = {};
   let tokens = [];
   if (theme.include) {
-    const base = load(resolve(dirname(path), theme.include));
-    colors = { ...base.colors };
-    tokens = [...base.tokens];
+    const parent = load(resolve(dirname(path), theme.include));
+    colors = { ...parent.colors };
+    tokens = [...parent.tokens];
+  } else if (base) {
+    colors = { ...load(base).colors };
   }
-  return {
-    colors: { ...colors, ...(theme.colors ?? {}) },
-    tokens: [...tokens, ...(theme.tokenColors ?? [])],
-  };
+  colors = { ...colors, ...(theme.colors ?? {}) };
+  if (typeof theme.tokenColors === "string") {
+    const tm = loadTmTheme(resolve(dirname(path), theme.tokenColors));
+    // VS Code applies the plist's editor colours after the theme's own
+    // `colors`, so they win here too.
+    colors = { ...colors, ...tm.colors };
+    tokens = [...tokens, ...tm.tokens];
+  } else {
+    tokens = [...tokens, ...(theme.tokenColors ?? [])];
+  }
+  return { colors, tokens };
+}
+
+/** What VS Code lifts out of a `.tmTheme`'s scope-less global rule. */
+const TM_GLOBALS = {
+  background: "editor.background",
+  foreground: "editor.foreground",
+  selection: "editor.selectionBackground",
+  inactiveSelection: "editor.inactiveSelectionBackground",
+  lineHighlight: "editor.lineHighlightBackground",
+  caret: "editorCursor.foreground",
+  invisibles: "editorWhitespace.foreground",
+};
+
+/**
+ * Read a `.tmTheme`.
+ *
+ * A plist of `<dict>`, `<array>` and `<string>` nodes, which is all a colour
+ * theme ever uses of the format — so this is a reader for exactly that, not a
+ * plist library. Returns the TextMate rules, in the shape a JSON theme's
+ * `tokenColors` has, plus the editor colours from the global rule.
+ */
+function loadTmTheme(path) {
+  const xml = readFileSync(path, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+  const tags = [...xml.matchAll(/<(\/?)(dict|array|key|string|true|false|integer|real|date|data)\b[^>]*?(\/?)>([^<]*)/g)];
+  const text = (raw) =>
+    raw
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, "&")
+      .trim();
+  let i = 0;
+  const closes = (name) => tags[i][1] === "/" && tags[i][2] === name;
+  function value() {
+    const [, close, name, self, body] = tags[i++];
+    if (close) throw new Error(`${path}: unexpected </${name}>`);
+    if (name === "dict") {
+      const out = {};
+      while (!closes("dict")) {
+        const key = tags[i++];
+        if (key[2] !== "key") throw new Error(`${path}: expected <key>, got <${key[2]}>`);
+        i += 1; // </key>
+        out[text(key[4])] = value();
+      }
+      i += 1; // </dict>
+      return out;
+    }
+    if (name === "array") {
+      const out = [];
+      while (!closes("array")) out.push(value());
+      i += 1; // </array>
+      return out;
+    }
+    if (!self) i += 1; // the closing tag of a scalar
+    if (name === "true") return true;
+    if (name === "false") return false;
+    if (name === "integer" || name === "real") return Number(body);
+    return text(body);
+  }
+  const rules = value().settings ?? [];
+  const colors = {};
+  for (const rule of rules) {
+    if (rule.scope || !rule.settings) continue;
+    for (const [key, id] of Object.entries(TM_GLOBALS)) {
+      if (typeof rule.settings[key] === "string") colors[id] = rule.settings[key];
+    }
+  }
+  return { colors, tokens: rules };
 }
 
 /**
@@ -194,6 +293,14 @@ const SYNTAX_ROLES = {
   "--syn-regexp": ["string.regexp", "constant.character.escape"],
 };
 
+/**
+ * Least contrast `--fg-bright` may have against `--bg-active`. WCAG's floor for
+ * large text is 3:1; this sits under it because Monokai++ Unified's blue
+ * selection under its near-white text is 2.7:1 and that is the theme's look,
+ * the same one VS Code shows. Anything lower is unreadable, not a look.
+ */
+const ACTIVE_FLOOR = 2.5;
+
 /** VS Code's own ANSI ramp, for the themes that do not name one. */
 const ANSI = {
   dark: {
@@ -212,8 +319,8 @@ const ANSI = {
   },
 };
 
-function build(id, label, kind, file) {
-  const { colors, tokens } = load(join(root, file));
+function build({ id, label, kind, file, base }) {
+  const { colors, tokens } = load(locate(file), base ? join(root, base) : undefined);
   const pick = (...keys) => {
     for (const key of keys) {
       if (typeof key !== "string") return key;
@@ -230,7 +337,24 @@ function build(id, label, kind, file) {
   const panel = flatten(pick("sideBar.background", "editorGroupHeader.tabsBackground") ?? mix(bg, away, 0.25), bg);
   const elevated = flatten(pick("editorWidget.background", "dropdown.background", "menu.background") ?? mix(bg, away, 0.3), bg);
   const hover = flatten(pick("list.hoverBackground") ?? mix(bg, toward, 0.08), bg);
-  const active = flatten(pick("list.activeSelectionBackground", "editor.selectionBackground", "list.inactiveSelectionBackground") ?? mix(bg, toward, 0.2), bg);
+  const bright = mix(fg, toward, 0.6);
+  // The one surface besides `bg` that text is drawn on: the selected row, the
+  // active tab, the pressed toggle. VS Code pairs `editor.selectionBackground`
+  // with an `editor.selectionForeground` — black in High Contrast Dark, whose
+  // selection is solid white — but this app has one foreground per theme and
+  // draws `bright` here, so a candidate that would leave it unreadable is passed
+  // over for the next. The only place a colour the theme names is not taken as
+  // written: white on white is not a decision anyone made.
+  const active =
+    [
+      pick("list.activeSelectionBackground"),
+      pick("editor.selectionBackground"),
+      pick("list.inactiveSelectionBackground"),
+      mix(bg, toward, 0.2),
+    ]
+      .filter(Boolean)
+      .map((color) => flatten(color, bg))
+      .find((color) => contrast(bright, color) >= ACTIVE_FLOOR) ?? mix(bg, toward, 0.3);
   const border = flatten(pick("panel.border", "editorGroup.border", "sideBar.border", "contrastBorder") ?? mix(bg, toward, 0.16), bg);
   // Dim text has to be dimmer than plain text and still readable. Light Modern
   // sets `descriptionForeground` to exactly its `editor.foreground`, which is
@@ -286,7 +410,7 @@ function build(id, label, kind, file) {
       "--border": border,
       "--fg": fg,
       "--fg-dim": dim,
-      "--fg-bright": mix(fg, toward, 0.6),
+      "--fg-bright": bright,
       "--accent": accent,
       "--accent-fg": accentFg,
       "--green": green,
@@ -322,7 +446,7 @@ function build(id, label, kind, file) {
   };
 }
 
-const built = THEMES.map((args) => build(...args));
+const built = THEMES.map(build);
 
 /**
  * Check the invariants here rather than in a test.
@@ -352,6 +476,23 @@ for (const theme of built) {
       throw new Error(`${theme.id} ${name}: ${value} is not a hex colour`);
     }
   }
+  // Text is drawn on each of these pairs somewhere in the app. The floors are
+  // the least any theme currently manages, rounded down, not a target: they
+  // exist so the next white-on-white selection fails here and not in a
+  // screenshot. High Contrast Dark's `--bg-active` was 1.0:1 before this.
+  for (const [text, surface, floor] of [
+    ["--fg", "--bg", 4.0],
+    ["--fg-dim", "--bg", 4.0],
+    ["--fg", "--bg-hover", 3.0],
+    ["--fg", "--bg-elevated", 3.0],
+    ["--fg-bright", "--bg-active", ACTIVE_FLOOR],
+    ["--accent-fg", "--accent", 2.5],
+  ]) {
+    const ratio = contrast(theme.tokens[text], theme.tokens[surface]);
+    if (ratio < floor) {
+      throw new Error(`${theme.id}: ${text} on ${surface} is ${ratio.toFixed(2)}:1, under ${floor}:1`);
+    }
+  }
 }
 
 const byId = Object.fromEntries(built.map((theme) => [theme.id, theme]));
@@ -368,8 +509,10 @@ const out =
   `   Run \`npm run gen:themes\` to regenerate.\n\n` +
   `   Palettes are read out of the colour themes bundled with Visual Studio Code\n` +
   `   (MIT, Microsoft) and, for Solarized, Monokai, Kimbie and Tomorrow, the\n` +
-  `   upstream palettes those themes package. Only the mapping onto this app's\n` +
-  `   tokens is ours; the colours are theirs.\n\n` +
+  `   upstream palettes those themes package; Monokai++ (MIT, Davide Casella)\n` +
+  `   and One Monokai (MIT, Joshua Azemoh) come from the copies of their\n` +
+  `   extensions vendored under vendor/themes/. Only the mapping onto this\n` +
+  `   app's tokens is ours; the colours are theirs.\n\n` +
   `   Fonts and metrics are NOT here — they live in styles.css, which is what a\n` +
   `   theme switch must leave alone. */\n\n` +
   `/* Default, and what \`follow desktop\` paints when the desktop is dark. */\n` +

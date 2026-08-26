@@ -15,7 +15,10 @@ describe("THEME_LIST", () => {
     expect(ids).toContain("dark-plus");
     expect(ids).toContain("light-plus");
     expect(ids).toContain("monokai");
+    expect(ids).toContain("monokai-plusplus");
+    expect(ids).toContain("one-monokai");
     expect(ids).toContain("solarized-dark");
+    expect(ids).toContain("hc-black");
   });
 
   it("has unique ids", () => {

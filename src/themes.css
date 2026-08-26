@@ -3,8 +3,10 @@
 
    Palettes are read out of the colour themes bundled with Visual Studio Code
    (MIT, Microsoft) and, for Solarized, Monokai, Kimbie and Tomorrow, the
-   upstream palettes those themes package. Only the mapping onto this app's
-   tokens is ours; the colours are theirs.
+   upstream palettes those themes package; Monokai++ (MIT, Davide Casella)
+   and One Monokai (MIT, Joshua Azemoh) come from the copies of their
+   extensions vendored under vendor/themes/. Only the mapping onto this
+   app's tokens is ours; the colours are theirs.
 
    Fonts and metrics are NOT here — they live in styles.css, which is what a
    theme switch must leave alone. */
@@ -59,6 +61,7 @@
   --syn-variable: #9cdcfe;
   --syn-constant: #569cd6;
   --syn-tag: #569cd6;
+  --syn-regexp: #d16969;
 }
 
 /* `follow desktop`, light. Scoped to :not([data-theme]) so an explicit
@@ -113,6 +116,7 @@
     --syn-variable: #001080;
     --syn-constant: #0000ff;
     --syn-tag: #800000;
+    --syn-regexp: #811f3f;
   }
 }
 
@@ -166,6 +170,7 @@
   --syn-variable: #9cdcfe;
   --syn-constant: #569cd6;
   --syn-tag: #569cd6;
+  --syn-regexp: #d16969;
 }
 
 /* Dark Modern */
@@ -218,6 +223,7 @@
   --syn-variable: #9cdcfe;
   --syn-constant: #569cd6;
   --syn-tag: #569cd6;
+  --syn-regexp: #d16969;
 }
 
 /* Monokai */
@@ -270,6 +276,7 @@
   --syn-variable: #f8f8f2;
   --syn-constant: #ae81ff;
   --syn-tag: #f92672;
+  --syn-regexp: #e6db74;
 }
 
 /* Monokai Dimmed */
@@ -322,6 +329,166 @@
   --syn-variable: #6089b4;
   --syn-constant: #408080;
   --syn-tag: #6089b4;
+  --syn-regexp: #9aa83a;
+}
+
+/* Monokai++ */
+:root[data-theme="monokai-plusplus"] {
+  --bg: #1c1c1c;
+  --bg-elevated: #252526;
+  --bg-panel: #151515;
+  --bg-hover: #2e2e2e;
+  --bg-active: #59201b;
+  --border: #404040;
+  --fg: #cccccc;
+  --fg-dim: #8e8e8e;
+  --fg-bright: #ebebeb;
+  --accent: #0078d4;
+  --accent-fg: #ffffff;
+  --green: #0dbc79;
+  --amber: #e5e510;
+  --red: #cd3131;
+  --purple: #bc3fbc;
+  --orange: #d88222;
+  --blue: #2472c8;
+  --cyan: #11a8cd;
+  --chip-bg: #1e344c;
+  --chip-fg: #87b1e1;
+  --chip-head-bg: #492649;
+  --chip-head-fg: #da95da;
+  --status-idle: #5b5b5b;
+  --track: #ffffff1f;
+  --scrollbar-thumb: #ffffff59;
+  --scrollbar-thumb-hover: #ffffff8c;
+  --scrim: #00000066;
+  --shadow: #000000a6;
+  --term-black: #4d4d4d;
+  --term-white: #e5e5e5;
+  --term-bright-black: #666666;
+  --term-bright-red: #f14c4c;
+  --term-bright-green: #23d18b;
+  --term-bright-yellow: #f5f543;
+  --term-bright-blue: #3b8eea;
+  --term-bright-magenta: #d670d6;
+  --term-bright-cyan: #29b8db;
+  --term-bright-white: #e5e5e5;
+  --syn-comment: #696d70;
+  --syn-keyword: #2be98a;
+  --syn-control: #f92672;
+  --syn-string: #e6db74;
+  --syn-number: #ae81ff;
+  --syn-function: #b0ec38;
+  --syn-type: #2be98a;
+  --syn-variable: #a9a9a9;
+  --syn-constant: #ae81ff;
+  --syn-tag: #f92672;
+  --syn-regexp: #49e0fd;
+}
+
+/* Monokai++ Unified */
+:root[data-theme="monokai-plusplus-unified"] {
+  --bg: #1c1c1c;
+  --bg-elevated: #1c1c1c;
+  --bg-panel: #1c1c1c;
+  --bg-hover: #2e2e2e;
+  --bg-active: #328eff;
+  --border: #404040;
+  --fg: #cccccc;
+  --fg-dim: #8e8e8e;
+  --fg-bright: #ebebeb;
+  --accent: #328eff;
+  --accent-fg: #ffffff;
+  --green: #2be98a;
+  --amber: #e6db74;
+  --red: #e62a19;
+  --purple: #f92672;
+  --orange: #e67a42;
+  --blue: #328eff;
+  --cyan: #49e0fd;
+  --chip-bg: #223c5c;
+  --chip-fg: #8ec1ff;
+  --chip-head-bg: #5a1f34;
+  --chip-head-fg: #fc88b1;
+  --status-idle: #5b5b5b;
+  --track: #ffffff1f;
+  --scrollbar-thumb: #ffffff59;
+  --scrollbar-thumb-hover: #ffffff8c;
+  --scrim: #00000066;
+  --shadow: #000000a6;
+  --term-black: #606060;
+  --term-white: #cccccc;
+  --term-bright-black: #696d70;
+  --term-bright-red: #e62a19;
+  --term-bright-green: #2be98a;
+  --term-bright-yellow: #e6db74;
+  --term-bright-blue: #328eff;
+  --term-bright-magenta: #f92672;
+  --term-bright-cyan: #49e0fd;
+  --term-bright-white: #f1f1f1;
+  --syn-comment: #696d70;
+  --syn-keyword: #2be98a;
+  --syn-control: #f92672;
+  --syn-string: #e6db74;
+  --syn-number: #ae81ff;
+  --syn-function: #b0ec38;
+  --syn-type: #2be98a;
+  --syn-variable: #a9a9a9;
+  --syn-constant: #ae81ff;
+  --syn-tag: #f92672;
+  --syn-regexp: #49e0fd;
+}
+
+/* One Monokai */
+:root[data-theme="one-monokai"] {
+  --bg: #282c34;
+  --bg-elevated: #21252b;
+  --bg-panel: #21252b;
+  --bg-hover: #292d35;
+  --bg-active: #2c313a;
+  --border: #181a1f;
+  --fg: #d4d4d4;
+  --fg-dim: #898e99;
+  --fg-bright: #eeeeee;
+  --accent: #528bff;
+  --accent-fg: #ffffff;
+  --green: #98c379;
+  --amber: #e5c07b;
+  --red: #e06c75;
+  --purple: #c678dd;
+  --orange: #e29278;
+  --blue: #528bff;
+  --cyan: #56b6c2;
+  --chip-bg: #34476d;
+  --chip-fg: #a0bfff;
+  --chip-head-bg: #544163;
+  --chip-head-fg: #e0b5ec;
+  --status-idle: #5d626c;
+  --track: #ffffff1f;
+  --scrollbar-thumb: #ffffff59;
+  --scrollbar-thumb-hover: #ffffff8c;
+  --scrim: #00000066;
+  --shadow: #000000a6;
+  --term-black: #6c6f74;
+  --term-white: #d7dae0;
+  --term-bright-black: #7f848e;
+  --term-bright-red: #f44747;
+  --term-bright-green: #98c379;
+  --term-bright-yellow: #e5c07b;
+  --term-bright-blue: #528bff;
+  --term-bright-magenta: #7e0097;
+  --term-bright-cyan: #56b6c2;
+  --term-bright-white: #d7dae0;
+  --syn-comment: #676f7d;
+  --syn-keyword: #56b6c2;
+  --syn-control: #e06c75;
+  --syn-string: #e5c07b;
+  --syn-number: #c678dd;
+  --syn-function: #98c379;
+  --syn-type: #61afef;
+  --syn-variable: #abb2bf;
+  --syn-constant: #56b6c2;
+  --syn-tag: #e06c75;
+  --syn-regexp: #e5c07b;
 }
 
 /* Solarized Dark */
@@ -374,6 +541,7 @@
   --syn-variable: #268bd2;
   --syn-constant: #b58900;
   --syn-tag: #268bd2;
+  --syn-regexp: #dc322f;
 }
 
 /* Abyss */
@@ -426,6 +594,7 @@
   --syn-variable: #5b76ac;
   --syn-constant: #f280d0;
   --syn-tag: #225588;
+  --syn-regexp: #22aa44;
 }
 
 /* Kimbie Dark */
@@ -478,6 +647,7 @@
   --syn-variable: #dc3958;
   --syn-constant: #f79a32;
   --syn-tag: #dc3958;
+  --syn-regexp: #7e602c;
 }
 
 /* Red */
@@ -530,6 +700,7 @@
   --syn-variable: #fb9a4b;
   --syn-constant: #994646;
   --syn-tag: #fec758;
+  --syn-regexp: #ffb454;
 }
 
 /* Tomorrow Night Blue */
@@ -582,6 +753,7 @@
   --syn-variable: #ff9da4;
   --syn-constant: #ffc58f;
   --syn-tag: #ff9da4;
+  --syn-regexp: #ff9da4;
 }
 
 /* High Contrast Dark */
@@ -590,7 +762,7 @@
   --bg-elevated: #000000;
   --bg-panel: #000000;
   --bg-hover: #141414;
-  --bg-active: #ffffff;
+  --bg-active: #333333;
   --border: #292929;
   --fg: #ffffff;
   --fg-dim: #a6a6a6;
@@ -634,6 +806,7 @@
   --syn-variable: #9cdcfe;
   --syn-constant: #569cd6;
   --syn-tag: #569cd6;
+  --syn-regexp: #d16969;
 }
 
 /* Light+ */
@@ -686,6 +859,7 @@
   --syn-variable: #001080;
   --syn-constant: #0000ff;
   --syn-tag: #800000;
+  --syn-regexp: #811f3f;
 }
 
 /* Light Modern */
@@ -738,6 +912,7 @@
   --syn-variable: #001080;
   --syn-constant: #0000ff;
   --syn-tag: #800000;
+  --syn-regexp: #811f3f;
 }
 
 /* Solarized Light */
@@ -790,6 +965,7 @@
   --syn-variable: #268bd2;
   --syn-constant: #b58900;
   --syn-tag: #268bd2;
+  --syn-regexp: #dc322f;
 }
 
 /* Quiet Light */
@@ -842,6 +1018,7 @@
   --syn-variable: #7a3e9d;
   --syn-constant: #9c5d27;
   --syn-tag: #4b69c6;
+  --syn-regexp: #4b69c6;
 }
 
 /* High Contrast Light */
@@ -894,4 +1071,5 @@
   --syn-variable: #001080;
   --syn-constant: #0f4a85;
   --syn-tag: #0f4a85;
+  --syn-regexp: #811f3f;
 }

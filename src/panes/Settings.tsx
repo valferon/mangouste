@@ -74,8 +74,9 @@ export function Settings({
           </select>
         </div>
         <p className="setting-hint">
-          Replicas of the themes shipped with VS Code. <code>Follow desktop</code> tracks
-          your desktop's light/dark preference live, painting Dark+ or Light+.
+          Replicas of the themes shipped with VS Code, plus Monokai++ and One Monokai from
+          their extensions. <code>Follow desktop</code> tracks your desktop's light/dark
+          preference live, painting Dark+ or Light+.
         </p>
 
         <div className="setting-row">
