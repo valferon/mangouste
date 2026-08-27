@@ -1840,10 +1840,19 @@ select {
 
 .diff-add {
   color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
 }
 
 .diff-del {
   color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+/* Once a line is syntax-highlighted its words keep their own colours; the
+   marker and the tint are what say which side of the change it is on. */
+.diff-add .hljs,
+.diff-del .hljs {
+  color: var(--fg);
 }
 
 .diff-hunk {
@@ -2643,6 +2652,54 @@ select {
   min-width: 0;
 }
 
+/* A result that is not one <pre>: a patch with per-file sections. Same box as
+   `.tool-block pre`, so the two kinds of OUT line up. */
+.tool-out {
+  flex: 1;
+  min-width: 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+/* The patch scrolls with the pane around it, not in scrollers of its own — one
+   per file would nest three scrollbars deep. */
+.tool-out .diff-view-sections {
+  overflow: visible;
+}
+
+.tool-out pre {
+  max-height: none;
+  overflow: visible;
+  padding: 4px 8px;
+}
+
+/* A file as Read returned it: the CLI's own numbers, kept out of a copy. */
+.code-line {
+  display: flex;
+  gap: 10px;
+}
+
+.code-ln {
+  flex: 0 0 auto;
+  text-align: right;
+  color: var(--fg-dim);
+  user-select: none;
+}
+
+.code-line > .hljs {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* What the CLI said around the output — a cwd note, a system reminder — and
+   the arguments of a Bash call other than the script itself. */
+.io-meta {
+  color: var(--fg-dim);
+}
+
 /* ---------- composer attachments ---------- */
 
 .attachment-strip {
@@ -3083,6 +3140,18 @@ select {
 /* Newlines in a string are content, so they survive; everything else wraps. */
 .permission-text {
   white-space: pre-wrap;
+}
+
+/* The script of a Bash call awaiting permission, as code rather than prose. */
+.permission-command {
+  margin: 0 0 8px;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .permission-scalar {

@@ -9,22 +9,13 @@ import {
   type ReactNode,
 } from "react";
 import { copyText } from "../lib/editing";
-import { highlightCode, languageForPath } from "../lib/highlight";
+import { highlightCode, highlightDiff, languageForPath } from "../lib/highlight";
+import { diffFileHeaderPath, diffHeaderPath, diffLineClass } from "../lib/diff";
 import { clearEditorFacts, factsFor, publishEditorFacts } from "../lib/editorFacts";
 import { formatText, readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
-
-/** Colourise a unified diff. Line class is decided by the first character. */
-function diffLineClass(line: string): string {
-  if (line.startsWith("+++") || line.startsWith("---")) return "diff-meta";
-  if (line.startsWith("@@")) return "diff-hunk";
-  if (line.startsWith("+")) return "diff-add";
-  if (line.startsWith("-")) return "diff-del";
-  if (line.startsWith("diff ") || line.startsWith("index ")) return "diff-meta";
-  return "";
-}
 
 /**
  * Ceiling on rendered diff lines. One DOM node per line with no virtualisation,
@@ -45,6 +36,8 @@ interface PatchFile {
   /** `diff --git` line index, which is unique within a patch. */
   key: number;
   label: string;
+  /** Post-image path (pre-image for a delete), which names the grammar. */
+  path: string | null;
   lines: string[];
   added: number;
   removed: number;
@@ -93,6 +86,7 @@ function splitPatch(lines: string[]): { preamble: string[]; files: PatchFile[] }
       files.push({
         key: index,
         label: fileLabelOf(line),
+        path: diffHeaderPath(line),
         lines: [line],
         added: 0,
         removed: 0,
@@ -113,18 +107,35 @@ function splitPatch(lines: string[]): { preamble: string[]; files: PatchFile[] }
   return { preamble, files };
 }
 
-/** Colourised diff lines, one DOM node each. */
-const DiffLines = memo(function DiffLines({ lines }: { lines: string[] }) {
+/**
+ * Colourised diff lines, one DOM node each.
+ *
+ * Given a language, the text of every content line is syntax-highlighted too;
+ * the stylesheet then tints the row by side and leaves the words their colours.
+ */
+const DiffLines = memo(function DiffLines({
+  lines,
+  language = null,
+}: {
+  lines: string[];
+  language?: string | null;
+}) {
+  const rendered = useMemo(() => highlightDiff(lines, language), [lines, language]);
   return (
     <>
-      {lines.map((line, index) => (
-        <div key={index} className={diffLineClass(line)}>
-          {line || " "}
+      {rendered.map((nodes, index) => (
+        <div key={index} className={diffLineClass(lines[index])}>
+          {/* An empty div has no height, and a blank diff line still needs its row. */}
+          {lines[index] === "" ? " " : nodes}
         </div>
       ))}
     </>
   );
 });
+
+/** Grammar for a file named in a patch, or null when the name says nothing. */
+const languageForPatchPath = (path: string | null): string | null =>
+  path === null ? null : languageForPath(path);
 
 export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
   const menu = useMenu();
@@ -139,7 +150,7 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
   );
   // Split and cap once per patch, not once per parent render — patches reach
   // thousands of lines, each with its own class computation.
-  const { preamble, files, flat, hidden, cutNote } = useMemo(() => {
+  const { preamble, files, flat, flatLanguage, hidden, cutNote } = useMemo(() => {
     const lines = patch.split("\n");
     // The last element is the artefact of the trailing newline, so the marker,
     // when present, is the one before it.
@@ -154,9 +165,14 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
     const { preamble, files } = splitPatch(shown);
     // Not a patch at all — an error string, or `(no textual diff)`. Nothing to
     // section, so render it as it came.
+    // A patch without git's own headers (`diff -u`) still names its file on the
+    // `+++` line, which is enough to pick a grammar for the whole thing.
+    const header = shown.find((line) => line.startsWith("+++ ") || line.startsWith("--- "));
+    const flatLanguage =
+      header === undefined ? null : languageForPatchPath(diffFileHeaderPath(header));
     return files.length === 0
-      ? { preamble: [], files: [], flat: shown, hidden, cutNote }
-      : { preamble, files, flat: null, hidden, cutNote };
+      ? { preamble: [], files: [], flat: shown, flatLanguage, hidden, cutNote }
+      : { preamble, files, flat: null, flatLanguage: null, hidden, cutNote };
   }, [patch]);
 
   /**
@@ -186,7 +202,7 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
         className="diff-view selectable"
         onContextMenu={(event) => menu.openContextMenu(event, patchMenu())}
       >
-        <DiffLines lines={flat} />
+        <DiffLines lines={flat} language={flatLanguage} />
         {footer}
       </pre>
     );
@@ -233,7 +249,7 @@ export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
             </div>
             {open && (
               <pre className="diff-view selectable">
-                <DiffLines lines={file.lines} />
+                <DiffLines lines={file.lines} language={languageForPatchPath(file.path)} />
               </pre>
             )}
           </div>
@@ -353,11 +369,18 @@ export function toolDiffLines(
 }
 
 /** Diff synthesised from a tool call, for the chat's IN pane. */
-export const ToolDiff = memo(function ToolDiff({ lines }: { lines: string[] }) {
+export const ToolDiff = memo(function ToolDiff({
+  lines,
+  language = null,
+}: {
+  lines: string[];
+  /** Grammar of the file being edited, for syntax colour inside the diff. */
+  language?: string | null;
+}) {
   const shown = lines.length > MAX_DIFF_LINES ? lines.slice(0, MAX_DIFF_LINES) : lines;
   return (
     <pre className="diff-view selectable tool-diff">
-      <DiffLines lines={shown} />
+      <DiffLines lines={shown} language={language} />
       {shown.length < lines.length && (
         <div className="diff-meta">
           … truncated, {(lines.length - shown.length).toLocaleString()} more lines

@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   claudeInterrupt,
   claudeSend,
@@ -48,7 +56,14 @@ import { Activity } from "./Activity";
 import { ComposerMenu, type ComposerMenuItem } from "./ComposerMenu";
 import { ControlPanel } from "./ControlPanels";
 import { Markdown } from "./Markdown";
-import { ToolDiff, toolDiffLines } from "./Viewer";
+import { DiffView, ToolDiff, toolDiffLines } from "./Viewer";
+import { highlightCode, highlightLines, languageForPath, TOOL_HIGHLIGHT_MAX } from "../lib/highlight";
+import {
+  classifyOutput,
+  parseNumberedLines,
+  type NumberedLine,
+  type NumberedText,
+} from "../lib/toolOutput";
 import { cliDebugEnabled, logDebug } from "../lib/debugLog";
 import {
   FEEDBACK_LEVELS,
@@ -521,11 +536,16 @@ const PermissionInput = memo(function PermissionInput({
         : null,
     [input, toolName],
   );
-  const filePath =
-    typeof input === "object" && input !== null &&
-    typeof (input as Record<string, unknown>).file_path === "string"
-      ? ((input as Record<string, unknown>).file_path as string)
-      : null;
+  const record = asRecord(input);
+  const filePath = typeof record?.file_path === "string" ? (record.file_path as string) : null;
+  // The script of a Bash call is code, and reads as code: the same colours the
+  // transcript gives it once it has run.
+  const command =
+    toolName === "Bash" && typeof record?.command === "string" ? (record.command as string) : null;
+  const commandTokens = useMemo(
+    () => (command === null ? null : highlightCode(command, "bash", TOOL_HIGHLIGHT_MAX)),
+    [command],
+  );
   // `AskUserQuestion` is absent here on purpose: a well-formed one is rendered
   // by `AskUserQuestionForm`, and a malformed one belongs in the generic view
   // where the raw payload is the only honest thing to show.
@@ -533,7 +553,14 @@ const PermissionInput = memo(function PermissionInput({
     edit !== null ? (
       <>
         {filePath !== null && <div className="count">{filePath}</div>}
-        <ToolDiff lines={edit} />
+        <ToolDiff lines={edit} language={filePath === null ? null : languageForPath(filePath)} />
+      </>
+    ) : command !== null && record !== null ? (
+      <>
+        <pre className="permission-command selectable hljs">{commandTokens}</pre>
+        <PermissionValue
+          value={Object.fromEntries(Object.entries(record).filter(([key]) => key !== "command"))}
+        />
       </>
     ) : null;
   return (
@@ -713,6 +740,145 @@ const ThinkingRow = memo(function ThinkingRow({
   );
 });
 
+/** A Bash call's arguments: the script highlighted as one, the rest dimmed beneath it. */
+const BashInput = memo(function BashInput({ input }: { input: Record<string, unknown> }) {
+  const command = typeof input.command === "string" ? input.command : null;
+  const tokens = useMemo(
+    () => (command === null ? null : highlightCode(command, "bash", TOOL_HIGHLIGHT_MAX)),
+    [command],
+  );
+  if (command === null) return <pre className="selectable">{formatToolInput(input)}</pre>;
+  const rest = Object.entries(input).filter(([key]) => key !== "command");
+  return (
+    <pre className="selectable hljs">
+      {tokens}
+      {rest.length > 0 && (
+        <span className="io-meta">
+          {"\n" +
+            rest
+              .map(
+                ([key, value]) =>
+                  `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+              )
+              .join("\n")}
+        </span>
+      )}
+    </pre>
+  );
+});
+
+/**
+ * A file as `Read` returned it: the CLI's own line numbers in a gutter, the
+ * text coloured by the file's extension.
+ */
+const NumberedCode = memo(function NumberedCode({
+  lines,
+  language,
+  trailer,
+}: {
+  lines: NumberedLine[];
+  language: string | null;
+  trailer: string | null;
+}) {
+  const highlighted = useMemo(
+    () => highlightLines(lines.map((line) => line.text).join("\n"), language, TOOL_HIGHLIGHT_MAX),
+    [lines, language],
+  );
+  const width = `${String(lines[lines.length - 1]?.number ?? 0).length}ch`;
+  return (
+    <pre className="selectable code-lines">
+      {lines.map((line, index) => (
+        <div className="code-line" key={index}>
+          <span className="code-ln" style={{ minWidth: width }}>
+            {line.number}
+          </span>
+          <span className="hljs">{highlighted[index]}</span>
+        </div>
+      ))}
+      {trailer !== null && <div className="io-meta">{trailer}</div>}
+    </pre>
+  );
+});
+
+type OutputView =
+  | { kind: "numbered"; numbered: NumberedText; language: string | null }
+  | { kind: "diff"; text: string; trailer: string | null }
+  | { kind: "code"; nodes: ReactNode; trailer: string | null }
+  | { kind: "plain"; text: string; trailer: string | null };
+
+/**
+ * A tool's result, shown as what it is: a Read as a numbered file, a patch as a
+ * patch with per-file sections, JSON as JSON — and everything else as the text
+ * it was. A language comes only from a file path or an exact marker, never from
+ * a guess at the bytes, which is the rule the CLI and VS Code extension follow.
+ */
+const ToolOutput = memo(function ToolOutput({
+  name,
+  input,
+  result,
+}: {
+  name: string;
+  input: Record<string, unknown>;
+  result: { text: string; isError: boolean };
+}) {
+  const filePath = typeof input.file_path === "string" ? input.file_path : null;
+  // Results are written once, so the sniffing and the tokenising run once per
+  // block, not once per re-render of the timeline around it.
+  const view = useMemo((): OutputView => {
+    if (name === "Read") {
+      const numbered = parseNumberedLines(result.text);
+      if (numbered !== null) {
+        return {
+          kind: "numbered",
+          numbered,
+          language: filePath === null ? null : languageForPath(filePath),
+        };
+      }
+    }
+    const { shape, trailer } = classifyOutput(result.text);
+    if (shape.kind === "code") {
+      return {
+        kind: "code",
+        nodes: highlightCode(shape.text, shape.language, TOOL_HIGHLIGHT_MAX),
+        trailer,
+      };
+    }
+    return { ...shape, trailer };
+  }, [filePath, input, name, result]);
+
+  switch (view.kind) {
+    case "numbered":
+      return (
+        <NumberedCode
+          lines={view.numbered.lines}
+          language={view.language}
+          trailer={view.numbered.trailer}
+        />
+      );
+    case "diff":
+      return (
+        <div className="tool-out">
+          <DiffView patch={view.text} />
+          {view.trailer !== null && <div className="io-meta">{view.trailer}</div>}
+        </div>
+      );
+    case "code":
+      return (
+        <pre className="selectable hljs">
+          {view.nodes}
+          {view.trailer !== null && <span className="io-meta">{"\n" + view.trailer}</span>}
+        </pre>
+      );
+    default:
+      return (
+        <pre className="selectable">
+          {view.text || "(no output)"}
+          {view.trailer !== null && <span className="io-meta">{"\n" + view.trailer}</span>}
+        </pre>
+      );
+  }
+});
+
 const ToolBlock = memo(function ToolBlock({
   block,
   result,
@@ -741,6 +907,8 @@ const ToolBlock = memo(function ToolBlock({
   const diffLines = useMemo(() => toolDiffLines(block.name, block.input), [block]);
   const filePath =
     typeof block.input.file_path === "string" ? (block.input.file_path as string) : null;
+  // The grammar an edit's diff is coloured in comes from the file's own name.
+  const language = filePath === null ? null : languageForPath(filePath);
   // Clickable file references are the main thing a terminal cannot do. The
   // handler rides whichever span is actually showing the path — with an intent
   // headline the payload moves to the second span, and the link must move with
@@ -777,16 +945,18 @@ const ToolBlock = memo(function ToolBlock({
         <>
           <div className="tool-io">
             <span className="io-tag">IN</span>
-            {diffLines === null ? (
+            {block.name === "Bash" ? (
+              <BashInput input={block.input} />
+            ) : diffLines === null ? (
               <pre className="selectable">{formatToolInput(block.input)}</pre>
             ) : (
-              <ToolDiff lines={diffLines} />
+              <ToolDiff lines={diffLines} language={language} />
             )}
           </div>
           {result && (
             <div className="tool-io" data-error={result.isError}>
               <span className="io-tag">OUT</span>
-              <pre className="selectable">{result.text || "(no output)"}</pre>
+              <ToolOutput name={block.name} input={block.input} result={result} />
             </div>
           )}
         </>
