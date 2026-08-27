@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   claudeInterrupt,
   claudeSend,
@@ -81,9 +81,9 @@ interface ChatPaneProps {
   /**
    * Whether this pane is the one on screen.
    *
-   * Hidden panes keep streaming, but a `display: none` box measures zero, so
-   * scrolling it to the bottom is a no-op that leaves it pinned to the top of
-   * the transcript once it is shown again.
+   * Hidden panes keep streaming. Coming to the front is what focuses the
+   * composer; the scroll pin needs no help, since a `display: none` box measures
+   * zero and the log's size observer fires the moment it measures again.
    */
   visible: boolean;
   /**
@@ -1484,6 +1484,8 @@ export const ChatPane = memo(function ChatPane({
    */
   const startGenerationRef = useRef(0);
   const logRef = useRef<HTMLDivElement>(null);
+  /** The log's content, sized by what is in it; the thing the scroll pin watches. */
+  const bodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stickyRef = useRef(true);
   const sequenceRef = useRef(0);
@@ -2191,13 +2193,30 @@ export const ChatPane = memo(function ChatPane({
     stickyRef.current = distanceFromBottom < STICKY_THRESHOLD_PX;
   }, []);
 
-  // Also on `visible`: turns that arrived while the pane was hidden could not
-  // be scrolled to, so becoming visible is the moment to re-pin.
-  useLayoutEffect(() => {
-    if (visible && stickyRef.current && logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-    }
-  }, [items, visible]);
+  /*
+   * Re-pin on measured height, not on state.
+   *
+   * Keying this off `items` missed everything that grows the log without adding
+   * to it: a tool result landing in a card that `verbose` holds open, the dial
+   * flipping to `verbose` and opening every card at once (a post-paint effect,
+   * so it lands after any effect here has run), an attachment thumbnail
+   * decoding, the composer growing into the log's space. The observer sees all
+   * of them as the same thing, and fires before paint, so there is no flash.
+   *
+   * A hidden pane measures zero; being shown again is a resize too, which is
+   * what re-pins turns that streamed in while another tab was up.
+   */
+  useEffect(() => {
+    const log = logRef.current;
+    const body = bodyRef.current;
+    if (!log || !body) return;
+    const observer = new ResizeObserver(() => {
+      if (stickyRef.current) log.scrollTop = log.scrollHeight;
+    });
+    observer.observe(body);
+    observer.observe(log);
+    return () => observer.disconnect();
+  }, []);
 
   // Coming to the front means you want to type: a new session, or a tab switch
   // back to this one, should not need a click in the composer first.
@@ -2644,27 +2663,29 @@ export const ChatPane = memo(function ChatPane({
           menu.openContextMenu(event, ["editing", "separator", ...logMenu()])
         }
       >
-        <Timeline
-          entries={timeline}
-          toolResults={toolResults}
-          onOpenFile={onOpenFile}
-          onDecide={decide}
-          panelContext={panelContext}
-          logMenu={logMenu}
-          level={level}
-        />
-
-        {running && !awaitingPermission && (
-          <Activity
-            detail={
-              pendingTool
-                ? [pendingTool.name, pendingTool.detail].filter(Boolean).join(" · ")
-                : null
-            }
-            startedAt={pendingTool?.startedAt ?? turnStartedAt}
-            sub={toolActivity}
+        <div className="chat-log-body" ref={bodyRef}>
+          <Timeline
+            entries={timeline}
+            toolResults={toolResults}
+            onOpenFile={onOpenFile}
+            onDecide={decide}
+            panelContext={panelContext}
+            logMenu={logMenu}
+            level={level}
           />
-        )}
+
+          {running && !awaitingPermission && (
+            <Activity
+              detail={
+                pendingTool
+                  ? [pendingTool.name, pendingTool.detail].filter(Boolean).join(" · ")
+                  : null
+              }
+              startedAt={pendingTool?.startedAt ?? turnStartedAt}
+              sub={toolActivity}
+            />
+          )}
+        </div>
       </div>
 
       <div
