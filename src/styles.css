@@ -4543,6 +4543,64 @@ select {
   white-space: nowrap;
 }
 
+/* ---------- status bar: update chip ---------- */
+
+/* Sits on the accent bar with everything else there, so it is drawn in
+   `--accent-fg` and lifted by translucency rather than by a border in a colour
+   that would have to be picked per theme. Present only when there is a release
+   to name, which is why it can afford to be brighter than its neighbours. */
+.status-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
+  color: inherit;
+  font: inherit;
+  line-height: var(--statusbar-height);
+  cursor: pointer;
+}
+
+.status-update:hover {
+  background: color-mix(in srgb, var(--accent-fg) 30%, transparent);
+}
+
+.status-update .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* ---------- update sheet ---------- */
+
+.update {
+  width: min(640px, 94vw);
+}
+
+/* The release body. Capped and scrolled rather than left to grow: a release
+   with a long changelog must not push its own Download button off-screen. The
+   rule above it separates somebody else's prose from the sheet's own. */
+.update-notes {
+  max-height: min(46vh, 420px);
+  margin: 10px 14px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  overflow: auto;
+}
+
+/* The notes arrive as a whole document, not as a chat turn, so the renderer's
+   own first-child margin is the wrong shape here. */
+.update-notes .markdown > :first-child {
+  margin-top: 0;
+}
+
+/* `.setting-hint` is indented to clear the Settings pane's label column. This
+   sheet has no labels, so the hint starts where everything else in it does. */
+.update-hint {
+  margin-left: 14px;
+}
+
 /* ---------- about and shortcuts sheets ---------- */
 
 .about-head {

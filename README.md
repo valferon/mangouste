@@ -130,7 +130,9 @@ curl -fsSL https://raw.githubusercontent.com/valferon/mangouste/main/scripts/ins
 ```
 
 `| bash`, not `| sh`. Re-run it to update; it skips the work when the installed
-version already matches, and `--force` reinstalls anyway.
+version already matches, and `--force` reinstalls anyway. The app tells you when
+there is something to re-run it for — see [Knowing there is a newer
+mangouste](#knowing-there-is-a-newer-mangouste).
 
 That one command exists because of a single extended attribute. A browser
 attaches `com.apple.quarantine` to a download; Gatekeeper then assesses the app,
@@ -734,6 +736,59 @@ Failures of the background fetch are silent, and that is the point: offline, no
 credential helper, a lock held by your own `git` — none of them is worth a dialog
 you did not open, and the next tick tries again.
 
+## Knowing there is a newer mangouste
+
+The other end of the status bar carries news about the app itself. A chip
+appears there — `⭳ update 0.2.0` — when the project's latest published GitHub
+release is a higher version than the bundle running, and nothing at all appears
+otherwise, which is almost always. Clicking it opens the release notes; so does
+`Help ▸ Check for Updates…`, which asks on the spot and reports either answer.
+
+It is a notice and not an updater, and that is a distribution fact rather than a
+missing feature. This app ships as a `.deb`, an AppImage and a `.dmg`. A `.deb`
+install belongs to apt and would be wrong to overwrite from underneath it; and
+replacing the other two in place needs Tauri's updater plugin, which needs a
+minisign keypair whose public half is baked into every bundle — lose the private
+half and every install ever shipped stops being updatable. So the sheet's
+`Download` button opens the release page in a browser, where the artefact for
+the way *you* installed is the one you pick. On macOS, `install-macos.sh` is
+still the shortest path, and re-running it is the update.
+
+The version comparison is arithmetic, not a string compare, and it lives in
+`src/lib/update.ts` with a test for the case that motivates saying so: `0.1.13`
+is newer than `0.1.9`, which every string compare gets backwards. A pre-release
+sorts below the release it leads to, an unparseable version compares to
+"cannot say" rather than to a guess, and every one of those paths turns into
+silence rather than a wrong notice.
+
+`Skip this version` silences one release, not the feature. The version is
+remembered rather than a flag being set, because "not now" is an answer about
+*this* release and the next one has to be able to interrupt again — otherwise
+the notice is worth nothing.
+
+The first launch after an update opens **What's new** by itself, once. The
+bundle carries no changelog, so the notes come from the release the running tag
+names; the app knows it restarted into a different version because it wrote the
+previous one down. A fresh install is not an update and gets no sheet, and
+neither does a deliberate downgrade.
+
+The request is one anonymous `GET` of a public endpoint, made from Rust and not
+from the webview — the CSP in `tauri.conf.json` allows `'self'` and the IPC
+origin and nothing else, deliberately, which is why `src-tauri/src/update.rs`
+exists rather than a `fetch` in a component. Nothing is sent: no token, no
+identifier, not even the version being compared, which is compared here. Once
+about twenty seconds after launch and every six hours after that, and anonymous
+GitHub allows sixty requests an hour per IP — so `Settings ▸ Check for mangouste
+updates ▸ off` stops the polling, and leaves the menu item and the what's-new
+sheet working, because those are requests rather than a poll.
+
+Releases here are cut as drafts, and `/releases/latest` does not see a draft.
+A tag that has been pushed but not published therefore reads as "nothing to
+report", which is the right answer: nobody should be told to download something
+that is not downloadable yet. Failures are silent on the timer and spoken on the
+menu item — a rate limit or an offline laptop is not worth a notice about a
+check nobody asked to run, but it is worth an answer to someone who did.
+
 ## Terminal
 
 `Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the
@@ -974,3 +1029,6 @@ backend.
 - New file, rename and delete in the tree. Every filesystem write goes through
   the editor or through claude, and the context menus deliberately kept it that
   way — see Menus above
+- Updating itself. The app notices a new release and shows its notes; installing
+  one is a download in a browser. See Knowing there is a newer mangouste above
+  for why, and what it would cost to change

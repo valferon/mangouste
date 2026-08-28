@@ -12,6 +12,8 @@ interface SettingsProps {
   onRestoreTabs: (on: boolean) => void;
   upstreamWatch: boolean;
   onUpstreamWatch: (on: boolean) => void;
+  updateCheck: boolean;
+  onUpdateCheck: (on: boolean) => void;
   workspaceRoot: string;
   onWorkspaceRoot: (root: string) => void;
   onClose: () => void;
@@ -30,6 +32,8 @@ export function Settings({
   onRestoreTabs,
   upstreamWatch,
   onUpstreamWatch,
+  updateCheck,
+  onUpdateCheck,
   workspaceRoot,
   onWorkspaceRoot,
   onClose,
@@ -157,6 +161,28 @@ export function Settings({
           interrupting. Fetching only writes remote-tracking refs — your branches and
           worktree are untouched. Off keeps the chip and its counts, which then move only
           when you fetch yourself.
+        </p>
+
+        <div className="setting-row">
+          <label>Check for mangouste updates</label>
+          <div className="segmented">
+            <button data-active={updateCheck} onClick={() => onUpdateCheck(true)}>
+              on
+            </button>
+            <button data-active={!updateCheck} onClick={() => onUpdateCheck(false)}>
+              off
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          Asks GitHub for this project's latest published release once shortly after
+          launch and every six hours after, and lights a chip in the status bar when
+          there is a newer one. An anonymous <code>GET</code> of a public endpoint —
+          nothing about you, your repos or your sessions is sent, and the version you
+          are on is compared here rather than there. Downloads open in your browser;
+          this app never replaces itself. Off stops the polling only:{" "}
+          <code>Help ▸ Check for Updates…</code> still works, and so does the{" "}
+          <code>What's new</code> sheet after you install a new build.
         </p>
 
         <div className="setting-row">

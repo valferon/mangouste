@@ -619,3 +619,18 @@ export interface ReloadPluginsResult {
   commands: SlashCommand[];
   agents?: AgentSummary[];
 }
+
+/** One published GitHub release, as `update::fetch_release` reduces it. */
+export interface Release {
+  /** The tag with its `v` stripped, so it compares against the bundle version. */
+  version: string;
+  /** The tag as GitHub has it. */
+  tag: string;
+  name: string;
+  /** Release body, verbatim markdown. Empty when the notes are blank. */
+  notes: string;
+  /** The release page, which is where the downloads are. */
+  url: string;
+  publishedAt: string | null;
+  prerelease: boolean;
+}

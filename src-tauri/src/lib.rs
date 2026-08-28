@@ -9,6 +9,7 @@ mod pty;
 mod search;
 mod sessions;
 mod stats;
+mod update;
 mod usage;
 mod windows;
 mod workspace;
@@ -328,6 +329,8 @@ pub fn run() {
             git::git_merge,
             // windows
             windows::open_window,
+            // updates
+            update::fetch_release,
             // usage
             usage::fetch_usage,
             // dashboard statistics

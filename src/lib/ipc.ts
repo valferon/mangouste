@@ -15,6 +15,7 @@ import type {
   FileText,
   Formatted,
   ProjectGroup,
+  Release,
   ReplaceOutcome,
   RepoInfo,
   RepoStatus,
@@ -363,6 +364,19 @@ export const openWindow = () => invoke<string>("open_window");
  * a byte offset per file, so refreshing on a watcher event is cheap.
  */
 export const statsSummary = () => invoke<StatsSummary>("stats_summary");
+
+/* ---------- updates ---------- */
+
+/**
+ * The project's latest published release, or the one a tag names.
+ *
+ * `null` rather than an error when there is nothing published: the releases here
+ * start as drafts, and `/releases/latest` does not see a draft. Goes through
+ * Rust because the webview's CSP has no route to api.github.com, and because
+ * that keeps the one outbound request this feature makes in a file that says so.
+ */
+export const fetchRelease = (tag?: string) =>
+  invoke<Release | null>("fetch_release", { tag: tag ?? null });
 
 /* ---------- usage ---------- */
 

@@ -35,6 +35,7 @@ export const SCHEMA_VERSION = 1;
  *
  * Grouped by what forgets them: `state` is where you left the workbench,
  * `prefs` is what you chose, `overlay` is your opinion of the sessions on disk,
+ * `release` is what this install has already been told about its own version,
  * and `cache` is content recovered off the wire that nothing else keeps. The
  * distinction is what lets a future "reset layout" clear one group without
  * touching the others — and it is the same line the window scoping falls on,
@@ -66,10 +67,26 @@ export const KEYS = {
     sessionSurface: "mangouste.sessionSurface",
     upstreamWatch: "mangouste.upstreamWatch",
     feedback: "mangouste.feedback",
+    updateCheck: "mangouste.updateCheck",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
     sessionsArchived: "mangouste.sessionsArchived",
+  },
+  release: {
+    /**
+     * The version whose update notice was waved away.
+     *
+     * One version and not a flag: "not now" is an answer about this release,
+     * and the next one has to be able to interrupt again or the notice is worth
+     * nothing. Shared across windows — a notice dismissed is dismissed.
+     */
+    updateDismissed: "mangouste.updateDismissed",
+    /**
+     * The version the previous run was on, which is how a launch knows it is
+     * the first on a new build and owes a what's-new sheet.
+     */
+    lastRunVersion: "mangouste.lastRunVersion",
   },
   cache: {
     /**

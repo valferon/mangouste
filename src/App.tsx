@@ -20,6 +20,7 @@ import { TerminalPane } from "./panes/TerminalPane";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
+import { UpdateStatus, type UpdateActions } from "./panes/UpdatePanel";
 import { MenuBar } from "./panes/MenuBar";
 import {
   appEntries,
@@ -313,6 +314,30 @@ function Workbench() {
   useEffect(() => {
     writeBoolean(KEYS.prefs.upstreamWatch, upstreamWatch);
   }, [upstreamWatch]);
+  /**
+   * Whether the app asks GitHub on its own whether there is a newer release.
+   *
+   * The second and last thing here that reaches the network unprompted, and the
+   * only one that leaves the machine. Off still leaves Help ▸ Check for Updates
+   * working: that one is a request, not a poll.
+   */
+  const [updateCheck, setUpdateCheck] = useState(() =>
+    readBoolean(KEYS.prefs.updateCheck, true),
+  );
+  useEffect(() => {
+    writeBoolean(KEYS.prefs.updateCheck, updateCheck);
+  }, [updateCheck]);
+  /**
+   * The update chip's own action, published upward.
+   *
+   * Same shape as `terminalActions` below and for the same reason: the check
+   * belongs to the component holding the release state, and the Help menu has
+   * to be able to reach it.
+   */
+  const updateActions = useRef<UpdateActions | null>(null);
+  const registerUpdateActions = useCallback((actions: UpdateActions | null) => {
+    updateActions.current = actions;
+  }, []);
   /**
    * Bumped when something outside Source Control changes the repo.
    *
@@ -1701,6 +1726,11 @@ function Workbench() {
       },
       { id: ID.documentation, label: "Documentation", run: () => void openExternal(REPO_URL) },
       { id: ID.reportIssue, label: "Report an Issue", run: () => void openExternal(ISSUES_URL) },
+      {
+        id: ID.checkUpdates,
+        label: "Check for Updates…",
+        run: () => updateActions.current?.check(),
+      },
       { id: ID.about, label: "About mangouste", run: () => setAboutOpen(true) },
     ],
     [
@@ -2229,6 +2259,8 @@ function Workbench() {
           restoreTabs={restoreTabs}
           upstreamWatch={upstreamWatch}
           onUpstreamWatch={setUpstreamWatch}
+          updateCheck={updateCheck}
+          onUpdateCheck={setUpdateCheck}
           onRestoreTabs={setRestoreTabs}
           workspaceRoot={workspaceRoot}
           onWorkspaceRoot={setWorkspaceRoot}
@@ -2358,6 +2390,10 @@ function Workbench() {
             {systemMessage}
           </span>
         )}
+        {/* News about the app itself, which is why it sits with the editor's
+            facts rather than with the repo's: it is not about what is in front.
+            Draws nothing until there is a release worth naming. */}
+        <UpdateStatus enabled={updateCheck} onRegister={registerUpdateActions} />
         {/* The editor's own facts, only while there is an editor in front. */}
         <EditorFacts />
         <span>{repos.length} repos</span>

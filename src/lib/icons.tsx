@@ -156,6 +156,17 @@ export function FetchIcon(props: IconProps) {
   );
 }
 
+/** Download: an arrow into a tray. The update chip and its sheet's action. */
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8 2v7.4" />
+      <path d="M4.8 6.6 8 9.8l3.2-3.2" />
+      <path d="M2.8 11.4v1.4a.8.8 0 0 0 .8.8h8.8a.8.8 0 0 0 .8-.8v-1.4" />
+    </Icon>
+  );
+}
+
 /** Merge: a side branch joining the trunk from above. */
 export function MergeIcon(props: IconProps) {
   return (

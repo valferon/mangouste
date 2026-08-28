@@ -58,6 +58,7 @@ export const ID = {
 
   shortcuts: "help.shortcuts",
   documentation: "help.documentation",
+  checkUpdates: "help.checkUpdates",
   reportIssue: "help.reportIssue",
   about: "help.about",
 } as const;
@@ -192,6 +193,7 @@ export function buildBarMenus(commands: Rows): BarMenu[] {
         entry(commands, ID.documentation),
         entry(commands, ID.reportIssue),
         "separator",
+        entry(commands, ID.checkUpdates),
         entry(commands, ID.about),
       ],
     },
