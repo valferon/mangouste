@@ -8,11 +8,9 @@ import {
   gitDiffFile,
   gitDiscard,
   gitFetch,
-  gitLog,
   gitMerge,
   gitPull,
   gitPush,
-  gitShow,
   gitStage,
   gitStatus,
   gitUnstage,
@@ -21,7 +19,6 @@ import {
 import {
   BranchIcon,
   CheckIcon,
-  CommitIcon,
   DiscardIcon,
   FetchIcon,
   MergeIcon,
@@ -35,7 +32,7 @@ import {
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
-import type { BranchList, Commit, FileStatus, RepoStatus } from "../lib/types";
+import type { BranchList, FileStatus, RepoStatus } from "../lib/types";
 
 interface GitPaneProps {
   cwd: string;
@@ -47,7 +44,7 @@ interface GitPaneProps {
    *
    * The pane re-reads after each of its own operations, so this covers the ones
    * it cannot see — a pull from the status bar — where the alternative is a
-   * history list describing a HEAD that has moved on.
+   * change list describing a worktree that has moved on.
    */
   refreshToken?: number;
   /**
@@ -61,8 +58,6 @@ interface GitPaneProps {
   visible?: boolean;
 }
 
-const COMMIT_PAGE = 150;
-
 /**
  * How often an open Source Control pane re-reads the repo.
  *
@@ -73,23 +68,11 @@ const COMMIT_PAGE = 150;
  */
 const VISIBLE_REFRESH_MS = 10_000;
 
-/** Which sections are open. History stays open; the change lists follow VSCode. */
-type SectionKey = "staged" | "changes" | "history";
+/** Which sections are open. Both follow VSCode and start expanded. */
+type SectionKey = "staged" | "changes";
 
 /** What the branch popover is about to do with the branch you pick. */
 type BranchMode = "checkout" | "merge";
-
-/** Compact relative age, matching the density of the VSCode SCM view. */
-function relativeAge(unixSeconds: number): string {
-  const seconds = Math.max(0, Date.now() / 1000 - unixSeconds);
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
-  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
-  if (seconds < 2629800) return `${Math.floor(seconds / 604800)}w`;
-  if (seconds < 31557600) return `${Math.floor(seconds / 2629800)}mo`;
-  return `${Math.floor(seconds / 31557600)}y`;
-}
 
 /** A porcelain code with no index letter and a `?` is an untracked path. */
 function isUntracked(file: FileStatus): boolean {
@@ -98,16 +81,18 @@ function isUntracked(file: FileStatus): boolean {
 
 /**
  * Working-tree status, staging, commit, sync and branch operations for the
- * active repo, plus its commit history.
+ * active repo.
  *
  * Laid out like the VSCode SCM view: the commit box on top, then staged and
- * unstaged changes as separate collapsible groups, then history. Every mutating
+ * unstaged changes as separate collapsible groups. Every mutating
  * call goes through `run`, which serialises the operations, surfaces git's own
  * error text and re-reads status afterwards — git is the single source of truth
  * here, so nothing is optimistically applied to local state.
  *
- * History is a flat list rather than a rendered lane graph; the `parents` and
- * `refs` fields are already carried through from Rust for when that lands.
+ * What landed, and when, is not here at all: that is Git History, one button
+ * down the activity rail. A second commit list in a 300px column, showing the
+ * same shas that view shows with its graph, was two places to look for one
+ * answer — and it pushed the change lists this pane exists for off the top.
  */
 export const GitPane = memo(function GitPane({
   cwd,
@@ -118,8 +103,6 @@ export const GitPane = memo(function GitPane({
 }: GitPaneProps) {
   const menu = useMenu();
   const [status, setStatus] = useState<RepoStatus | null>(null);
-  const [commits, setCommits] = useState<Commit[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Last successful git output worth showing, e.g. what a push did. */
   const [note, setNote] = useState<string | null>(null);
@@ -128,7 +111,6 @@ export const GitPane = memo(function GitPane({
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     staged: false,
     changes: false,
-    history: false,
   });
   const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [branches, setBranches] = useState<BranchList | null>(null);
@@ -141,19 +123,14 @@ export const GitPane = memo(function GitPane({
     if (!cwd) return;
     const generation = (refreshGeneration.current += 1);
     try {
-      const [nextStatus, nextCommits] = await Promise.all([
-        gitStatus(cwd),
-        gitLog(cwd, COMMIT_PAGE, 0, true),
-      ]);
+      const nextStatus = await gitStatus(cwd);
       if (generation !== refreshGeneration.current) return;
       setStatus(nextStatus);
-      setCommits(nextCommits);
       setError(null);
     } catch (e) {
       if (generation !== refreshGeneration.current) return;
       setError(String(e));
       setStatus(null);
-      setCommits([]);
     }
   }, [cwd]);
 
@@ -231,19 +208,6 @@ export const GitPane = memo(function GitPane({
         onShowDiff(file.path, patch || `${file.code} ${file.path}\n\n(no textual diff)`);
       } catch (e) {
         onShowDiff(file.path, String(e));
-      }
-    },
-    [cwd, onShowDiff],
-  );
-
-  const openCommit = useCallback(
-    async (commit: Commit) => {
-      setSelected(commit.sha);
-      try {
-        const patch = await gitShow(cwd, commit.sha);
-        onShowDiff(`${commit.shortSha} ${commit.subject}`, patch);
-      } catch (e) {
-        onShowDiff(commit.shortSha, String(e));
       }
     },
     [cwd, onShowDiff],
@@ -377,24 +341,6 @@ export const GitPane = memo(function GitPane({
     [cwd, openFileDiff, onOpenFile, busy, stage, unstage, discard, repoEntries],
   );
 
-  const commitMenu = useCallback(
-    (commit: Commit): MenuEntry[] => [
-      { header: `${commit.shortSha} ${commit.subject}` },
-      { label: "View Changes", run: () => void openCommit(commit) },
-      "separator",
-      { label: "Copy Commit Hash", run: () => void copyText(commit.sha) },
-      { label: "Copy Short Hash", run: () => void copyText(commit.shortSha) },
-      { label: "Copy Subject", run: () => void copyText(commit.subject) },
-      {
-        label: "Copy Author",
-        run: () => void copyText(`${commit.author} <${commit.authorEmail}>`),
-      },
-      "separator",
-      ...repoEntries(),
-    ],
-    [openCommit, repoEntries],
-  );
-
   /** Right-click on a group header: the bulk operations for that group. */
   const sectionMenu = useCallback(
     (key: SectionKey): MenuEntry[] => [
@@ -414,7 +360,7 @@ export const GitPane = memo(function GitPane({
         disabled: busy !== null || changedFiles.length === 0,
         run: () => discard(changedFiles),
       },
-      key !== "history" && "separator",
+      "separator",
       {
         label: collapsed[key] ? "Expand" : "Collapse",
         run: () => setCollapsed((current) => ({ ...current, [key]: !current[key] })),
@@ -730,32 +676,6 @@ export const GitPane = memo(function GitPane({
 
         {status && status.files.length === 0 && (
           <div className="empty-note">No changes.</div>
-        )}
-
-        {sectionHeader("history", "History", null)}
-        {!collapsed.history &&
-          commits.map((commit) => (
-            <div
-              key={commit.sha}
-              className="commit-row"
-              data-selected={selected === commit.sha}
-              onClick={() => void openCommit(commit)}
-              onContextMenu={(event) => menu.openContextMenu(event, commitMenu(commit))}
-              title={`${commit.sha}\n${commit.author} <${commit.authorEmail}>`}
-            >
-              <CommitIcon className="commit-node" />
-              <span className="sha">{commit.shortSha}</span>
-              {commit.refs.slice(0, 2).map((ref) => (
-                <span key={ref} className="ref-chip" data-head={ref.startsWith("HEAD")}>
-                  {ref.replace("HEAD -> ", "")}
-                </span>
-              ))}
-              <span className="subject">{commit.subject}</span>
-              <span className="when">{relativeAge(commit.timestamp)}</span>
-            </div>
-          ))}
-        {!collapsed.history && commits.length === 0 && (
-          <div className="empty-note">No commits.</div>
         )}
       </div>
     </div>

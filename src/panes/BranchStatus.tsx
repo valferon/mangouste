@@ -1,9 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { copyText } from "../lib/editing";
-import { BranchIcon, FetchIcon } from "../lib/icons";
-import { gitDirty, gitFetch, gitPull, gitTracking } from "../lib/ipc";
+import { BranchIcon, FetchIcon, PlusIcon } from "../lib/icons";
+import {
+  gitBranchList,
+  gitCheckout,
+  gitCreateBranch,
+  gitDirty,
+  gitFetch,
+  gitPull,
+  gitTracking,
+} from "../lib/ipc";
 import { useMenu } from "../lib/menu";
+import type { BranchList } from "../lib/types";
 import {
   branchLabel,
   canFastForward,
@@ -48,6 +57,30 @@ const FETCH_MS = 5 * 60_000;
  */
 const DIRTY_MS = 10_000;
 
+/**
+ * What the chip last said about each repo, kept for the life of the window.
+ *
+ * A repo switch used to blank the chip and wait for a fresh `gitTracking`: the
+ * branch name vanished from the status bar and came back a moment later, which
+ * on the way back to a repo you were in a minute ago is a flicker with nothing
+ * behind it. Seeded from here instead, the switch shows the branch that repo had
+ * while the read that confirms it is still in flight.
+ *
+ * Module-level rather than state, because the component is one instance whose
+ * `cwd` changes — there is nowhere else for a per-repo memory to live.
+ */
+const lastSeen = new Map<string, { tracking: Tracking; dirty: boolean }>();
+
+/**
+ * When each repo's remote was last asked, so a switch does not re-fetch.
+ *
+ * The network check announces on the repo opening, which made every visit to a
+ * repo — including flicking between two of them — spawn a `git fetch`. One per
+ * repo per `FETCH_MS` is what the interval already promises; this holds the
+ * promise across switches.
+ */
+const lastFetched = new Map<string, number>();
+
 interface BranchStatusProps {
   /** The repo the strip is showing. Empty outside a repo. */
   cwd: string;
@@ -77,13 +110,19 @@ interface BranchStatusProps {
  */
 export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusProps) {
   const menu = useMenu();
-  const [tracking, setTracking] = useState<Tracking | null>(null);
-  const [busy, setBusy] = useState<"fetch" | "pull" | null>(null);
+  const [tracking, setTracking] = useState<Tracking | null>(
+    () => lastSeen.get(cwd)?.tracking ?? null,
+  );
+  const [busy, setBusy] = useState<"fetch" | "pull" | "switch" | null>(null);
+  /** Whether the branch picker is open, and what it has to offer. */
+  const [picking, setPicking] = useState(false);
+  const [branches, setBranches] = useState<BranchList | null>(null);
+  const [filter, setFilter] = useState("");
   /** The news a dialog is currently asking about, with its own error and result. */
   const [prompt, setPrompt] = useState<UpstreamNews | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
   /** Whether anything is uncommitted: the `*` VSCode puts beside the branch. */
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirty] = useState(() => lastSeen.get(cwd)?.dirty ?? false);
 
   /**
    * News already put to the user, so the same commits are not raised twice.
@@ -107,11 +146,14 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
   const generation = useRef(0);
   useEffect(() => {
     generation.current += 1;
-    setTracking(null);
-    setDirty(false);
+    const seen = lastSeen.get(cwd);
+    setTracking(seen?.tracking ?? null);
+    setDirty(seen?.dirty ?? false);
     setBusy(null);
     setPrompt(null);
     setPromptError(null);
+    setPicking(false);
+    setBranches(null);
   }, [cwd]);
 
   /**
@@ -129,6 +171,7 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
         const next = await gitTracking(cwd);
         if (mine !== generation.current) return;
         setTracking(next);
+        lastSeen.set(cwd, { tracking: next, dirty: lastSeen.get(cwd)?.dirty ?? false });
         if (!announce) return;
         const news = upstreamNews(next);
         if (!news) return;
@@ -151,6 +194,9 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
     async (announce: boolean) => {
       if (!cwd) return;
       const mine = generation.current;
+      // Stamped before the call, not after: a fetch that takes ten seconds must
+      // not leave the door open for a second one behind it.
+      lastFetched.set(cwd, Date.now());
       setBusy("fetch");
       try {
         await gitFetch(cwd);
@@ -199,6 +245,72 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
     [cwd, onChanged, read],
   );
 
+  /**
+   * Open the picker and re-read the branch list.
+   *
+   * Read per open rather than kept: a fetch, a push from a session, a branch
+   * created in a terminal tab all change what the list should say, and a list
+   * from five minutes ago is a list missing the branch you came here for.
+   */
+  const openPicker = useCallback(() => {
+    if (!cwd) return;
+    setFilter("");
+    setBranches(null);
+    setPicking(true);
+    const mine = generation.current;
+    void gitBranchList(cwd)
+      .then((next) => {
+        if (mine === generation.current) setBranches(next);
+      })
+      .catch((e) => {
+        if (mine !== generation.current) return;
+        setPicking(false);
+        onNotice(String(e));
+      });
+  }, [cwd, onNotice]);
+
+  /**
+   * Switch to a branch, or create one.
+   *
+   * Nothing is discarded on the way: `git switch` refuses a checkout that would
+   * overwrite worktree changes, and its refusal is what the notice carries. The
+   * whole workbench re-reads afterwards — every pane showing this repo is now
+   * showing a different tree.
+   */
+  const move = useCallback(
+    async (what: "switch" | "create", name: string) => {
+      if (!cwd) return;
+      const mine = generation.current;
+      setPicking(false);
+      setBusy("switch");
+      try {
+        await (what === "create" ? gitCreateBranch(cwd, name) : gitCheckout(cwd, name));
+        if (mine !== generation.current) return;
+        onChanged();
+      } catch (e) {
+        if (mine === generation.current) onNotice(String(e));
+      } finally {
+        if (mine === generation.current) setBusy(null);
+      }
+      await read(false);
+    },
+    [cwd, onChanged, onNotice, read],
+  );
+
+  /** Local branches first, then remote-tracking ones, filtered as you type. */
+  const rows = useMemo(() => {
+    if (!branches) return [];
+    const query = filter.trim().toLowerCase();
+    const all = [
+      ...branches.local.map((name) => ({ name, remote: false })),
+      ...branches.remote.map((name) => ({ name, remote: true })),
+    ];
+    return query ? all.filter((row) => row.name.toLowerCase().includes(query)) : all;
+  }, [branches, filter]);
+
+  /** Offered only when what was typed is not already a branch. */
+  const creatable = filter.trim().length > 0 && !rows.some((row) => row.name === filter.trim());
+
   // Refs on disk, polled. Cheap enough to run whenever the window is on screen,
   // and pointless when it is not.
   useEffect(() => {
@@ -223,6 +335,8 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
     const look = () => {
       void gitDirty(cwd)
         .then((next) => {
+          const seen = lastSeen.get(cwd);
+          if (seen) lastSeen.set(cwd, { ...seen, dirty: next });
           if (mine === generation.current) setDirty(next);
         })
         .catch(() => {});
@@ -246,7 +360,10 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
    */
   useEffect(() => {
     if (!cwd || !watch) return;
-    void check(true);
+    // "Once when the repo opens" means once per repo, not once per visit: coming
+    // back to a repo whose remote was asked a moment ago has nothing to learn,
+    // and the child process it spawned was part of what made a switch drag.
+    if (Date.now() - (lastFetched.get(cwd) ?? 0) >= FETCH_MS) void check(true);
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void check(false);
     }, FETCH_MS);
@@ -277,33 +394,60 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
   return (
     <>
       {/* Branch first and leftmost, as VSCode puts it — this is the item the eye
-          goes to, and everything after it is context for it. */}
-      <span
-        className="status-branch"
-        title={trackingTitle(tracking)}
-        onContextMenu={(event) =>
-          menu.openContextMenu(event, [
-            { label: "Copy Branch", run: () => void copyText(label.text) },
-            {
-              label: busy === "fetch" ? "Fetching…" : "Fetch Now",
-              disabled: busy !== null,
-              run: () => void check(false),
-            },
-            news && {
-              label: `Pull (${describeNews(news)})`,
-              disabled: busy !== null || !ready,
-              run: () => void pull(onNotice),
-            },
-          ])
-        }
-      >
-        <BranchIcon />
-        <span className="status-branch-name">{label.text}</span>
-        {/* Uncommitted work, in one character, exactly where VSCode puts it. */}
-        {dirty && (
-          <span className="status-branch-dirty" title="Uncommitted changes">
-            *
-          </span>
+          goes to, and everything after it is context for it. A button, and one
+          click switches branch: the chip is where the question "which branch am
+          I on" is asked, and "put me on another one" is the same question. */}
+      <span className="status-branch-slot">
+        <button
+          className="status-branch"
+          disabled={busy === "switch"}
+          title={
+            busy === "switch" ? "Switching branch…" : `${trackingTitle(tracking)}\nSwitch branch`
+          }
+          onClick={() => (picking ? setPicking(false) : openPicker())}
+          onContextMenu={(event) =>
+            menu.openContextMenu(event, [
+              {
+                label: "Switch Branch…",
+                disabled: busy !== null,
+                run: openPicker,
+              },
+              { label: "Copy Branch", run: () => void copyText(label.text) },
+              {
+                label: busy === "fetch" ? "Fetching…" : "Fetch Now",
+                disabled: busy !== null,
+                run: () => void check(false),
+              },
+              news && {
+                label: `Pull (${describeNews(news)})`,
+                disabled: busy !== null || !ready,
+                run: () => void pull(onNotice),
+              },
+            ])
+          }
+        >
+          <BranchIcon />
+          <span className="status-branch-name">{label.text}</span>
+          {/* Uncommitted work, in one character, exactly where VSCode puts it. */}
+          {dirty && (
+            <span className="status-branch-dirty" title="Uncommitted changes">
+              *
+            </span>
+          )}
+        </button>
+
+        {picking && (
+          <BranchPicker
+            rows={rows}
+            current={branches?.current ?? null}
+            loading={branches === null}
+            filter={filter}
+            creatable={creatable}
+            onFilter={setFilter}
+            onPick={(name) => void move("switch", name)}
+            onCreate={(name) => void move("create", name)}
+            onClose={() => setPicking(false)}
+          />
         )}
       </span>
 
@@ -336,6 +480,112 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
           onClose={() => setPrompt(null)}
         />
       )}
+    </>
+  );
+}
+
+interface BranchRow {
+  name: string;
+  remote: boolean;
+}
+
+interface BranchPickerProps {
+  rows: BranchRow[];
+  /** The branch HEAD is on, ticked in the list. */
+  current: string | null;
+  /** True until the list has arrived, which is a round trip to git. */
+  loading: boolean;
+  filter: string;
+  creatable: boolean;
+  onFilter: (value: string) => void;
+  onPick: (name: string) => void;
+  onCreate: (name: string) => void;
+  onClose: () => void;
+}
+
+/**
+ * The branch list, above the chip that opened it.
+ *
+ * A popover rather than the context menu the chip also has: branch lists run to
+ * dozens of entries on a repo anyone works in, and a menu with no filter is a
+ * scroll. Same shape as the Source Control pane's picker — filter on top,
+ * scrolling list under it, typing a name that does not exist offers to create
+ * it — because it is the same job, asked from somewhere else.
+ */
+function BranchPicker({
+  rows,
+  current,
+  loading,
+  filter,
+  creatable,
+  onFilter,
+  onPick,
+  onCreate,
+  onClose,
+}: BranchPickerProps) {
+  // On the window rather than on the input: the click that opened this left
+  // focus on the chip, and Escape has to close it from there too.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onClose]);
+
+  /** Enter takes the first match, or creates what was typed when there is none. */
+  const submit = () => {
+    if (rows.length > 0) return onPick(rows[0].name);
+    if (creatable) onCreate(filter.trim());
+  };
+
+  return (
+    <>
+      {/* Invisible, and only there to catch the click that dismisses. Mousedown
+          rather than click, so a press outside closes before it lands on
+          whatever is under it. */}
+      <div
+        className="popover-scrim"
+        onMouseDown={(event) => event.button === 0 && onClose()}
+        onContextMenu={onClose}
+      />
+      <div className="branch-popover">
+        <input
+          className="branch-filter"
+          autoFocus
+          placeholder="Switch to or create…"
+          value={filter}
+          onChange={(event) => onFilter(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") submit();
+          }}
+        />
+        <div className="branch-list">
+          {creatable && (
+            <div className="row" onClick={() => onCreate(filter.trim())}>
+              <PlusIcon />
+              <span className="label">Create branch “{filter.trim()}”</span>
+            </div>
+          )}
+          {rows.map((row) => (
+            <div
+              key={`${row.remote ? "r" : "l"}:${row.name}`}
+              className="row"
+              data-selected={row.name === current}
+              onClick={() => onPick(row.name)}
+            >
+              <BranchIcon />
+              <span className="label">{row.name}</span>
+              {row.remote && <span className="badge">remote</span>}
+            </div>
+          ))}
+          {rows.length === 0 && !creatable && (
+            <div className="empty-note">{loading ? "Reading branches…" : "No matching branch."}</div>
+          )}
+        </div>
+      </div>
     </>
   );
 }

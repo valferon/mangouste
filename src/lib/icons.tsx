@@ -190,6 +190,28 @@ export function CommitIcon(props: IconProps) {
   );
 }
 
+/** History: a clock with its hands set, over the arrow of a rewind. */
+export function HistoryIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2.7 8a5.3 5.3 0 1 0 1.6-3.8" />
+      <path d="M2.6 2.2v2.6h2.6" />
+      <path d="M8 5.2V8l2 1.4" />
+    </Icon>
+  );
+}
+
+/** Open wider: a box with an arrow leaving its corner. */
+export function ExpandIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7.5 2.5H2.5v11h11v-5" />
+      <path d="M9.5 2.5h4v4" />
+      <path d="M13.5 2.5L8 8" />
+    </Icon>
+  );
+}
+
 /** Refresh, replacing the ⟳ character in pane actions. */
 export function RefreshIcon(props: IconProps) {
   return (

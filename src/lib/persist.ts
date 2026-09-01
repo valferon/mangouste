@@ -66,6 +66,8 @@ export const KEYS = {
     restoreTabs: "mangouste.restoreTabs",
     sessionSurface: "mangouste.sessionSurface",
     upstreamWatch: "mangouste.upstreamWatch",
+    /** Whether file editors show the git blame column. */
+    blame: "mangouste.blame",
     feedback: "mangouste.feedback",
     updateCheck: "mangouste.updateCheck",
   },

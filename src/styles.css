@@ -452,55 +452,6 @@ body {
 
 /* ---------- git ---------- */
 
-.commit-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 3px 10px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.commit-row:hover {
-  background: var(--bg-hover);
-}
-
-.commit-row[data-selected="true"] {
-  background: var(--bg-active);
-}
-
-/* `align-self` because the row is baseline-aligned and an SVG has no
-   meaningful baseline of its own. */
-.commit-row .commit-node {
-  align-self: center;
-  font-size: 11px;
-  color: var(--fg-dim);
-}
-
-.commit-row:hover .commit-node,
-.commit-row[data-selected="true"] .commit-node {
-  color: var(--amber);
-}
-
-.commit-row .sha {
-  font-family: var(--font-mono);
-  color: var(--amber);
-  flex: 0 0 auto;
-}
-
-.commit-row .subject {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.commit-row .when {
-  flex: 0 0 auto;
-  color: var(--fg-dim);
-  font-size: 11px;
-}
-
 .ref-chip {
   font-size: 10px;
   padding: 0 4px;
@@ -693,6 +644,392 @@ button.branch-chip:hover:not(:disabled) {
 button.branch-chip:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+/* ---------- history tab: graph, commit list, commit detail ---------- */
+
+/* Lane colours. An alias table and not a palette: every value is one of the
+   theme's own accents, so a light theme draws its graph in its own colours and
+   nothing here has to be regenerated when themes.css is. Eight, because a
+   ninth concurrent lane is rarer than two lanes a colour apart being confused
+   for each other. */
+.history-pane {
+  --graph-1: var(--blue);
+  --graph-2: var(--green);
+  --graph-3: var(--orange);
+  --graph-4: var(--purple);
+  --graph-5: var(--cyan);
+  --graph-6: var(--red);
+  --graph-7: var(--amber);
+  --graph-8: var(--fg-dim);
+
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.history-filters {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-filter {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: center;
+}
+
+/* Message is the box that gets typed in; author and path are lookups. */
+.history-filter:first-child {
+  flex: 2 1 0;
+}
+
+.history-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 20px 2px 6px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.history-input:focus {
+  border-color: var(--accent);
+}
+
+.history-clear {
+  position: absolute;
+  right: 2px;
+  padding: 1px 3px;
+}
+
+.history-branch {
+  flex: 0 1 auto;
+  max-width: 200px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+/* The list scrolls, the detail scrolls, and the pane itself never does: two
+   independent columns are the whole point of the layout. */
+.history-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.history-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  outline: none;
+}
+
+.history-detail {
+  flex: 0 0 340px;
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid var(--border);
+  padding: 8px 10px;
+}
+
+/* Fixed height, and it must stay in step with `ROW_HEIGHT` in HistoryPane: the
+   graph cell is an SVG drawn to exactly this box, and a row that grew would
+   leave every lane line short of the row below it. */
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 10px 0 8px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.history-row:hover {
+  background: var(--bg-hover);
+}
+
+.history-row[data-selected="true"] {
+  background: var(--bg-active);
+}
+
+.history-graph {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.graph-edge {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.graph-node {
+  fill: var(--bg);
+  stroke-width: 2;
+}
+
+.history-row .subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-row .sha {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  color: var(--amber);
+}
+
+/* Author and date are fixed columns rather than free-flowing text: a list
+   whose right edge moves with every subject length is a list you cannot scan
+   down. */
+.history-row .history-author {
+  flex: 0 0 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+}
+
+.history-row .when {
+  flex: 0 0 92px;
+  text-align: right;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.history-more {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px;
+}
+
+.history-more:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.history-error {
+  color: var(--red);
+  white-space: pre-wrap;
+}
+
+.history-detail-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.history-detail-head .sha {
+  font-family: var(--font-mono);
+  color: var(--amber);
+}
+
+.history-detail-head .toggle-button {
+  margin-left: auto;
+  border-color: var(--border);
+}
+
+.history-message {
+  margin-bottom: 10px;
+}
+
+.history-subject {
+  color: var(--fg-bright);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.history-body-text {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.history-people {
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.7;
+  margin-bottom: 10px;
+  word-break: break-word;
+}
+
+.history-label {
+  display: inline-block;
+  width: 68px;
+  color: var(--fg-dim);
+  opacity: 0.75;
+}
+
+.history-files-head {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-bottom: 4px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.history-file:hover {
+  background: var(--bg-hover);
+}
+
+.history-file .status-code {
+  width: 14px;
+  flex: 0 0 14px;
+}
+
+/* A deletion is not an amber "changed" — the column is the fastest read in the
+   list and it should not need the path to say which kind of change it is. */
+.history-file .status-code[data-status="A"] {
+  color: var(--green);
+}
+
+.history-file .status-code[data-status="D"] {
+  color: var(--red);
+}
+
+.history-file .status-code[data-status="R"],
+.history-file .status-code[data-status="C"] {
+  color: var(--blue);
+}
+
+.history-file-name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-file-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.history-counts,
+.history-binary {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.history-binary {
+  color: var(--fg-dim);
+}
+
+.history-counts .added {
+  color: var(--green);
+}
+
+.history-counts .removed {
+  color: var(--red);
+  margin-left: 4px;
+}
+
+/* ---------- history, at rail width ---------- */
+
+/* ~300px of sidebar cannot hold two columns, so the detail goes under the list
+   rather than beside it, and the boxes that were a row become a grid. What the
+   two layouts share is every row and every rule above; only the arrangement
+   and the author column differ. */
+.history-pane[data-layout="sidebar"] .history-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 6px;
+}
+
+.history-pane[data-layout="sidebar"] .history-filter:first-child {
+  grid-column: 1 / -1;
+}
+
+.history-pane[data-layout="sidebar"] .history-branch {
+  grid-column: 1 / -1;
+  max-width: none;
+}
+
+.history-pane[data-layout="sidebar"] .history-body {
+  flex-direction: column;
+}
+
+.history-pane[data-layout="sidebar"] .history-detail {
+  /* Never more than half the pane: the list is what the view is for, and a
+     commit with forty files must not push it off the top. */
+  flex: 0 1 auto;
+  max-height: 50%;
+  border-left: none;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+.history-pane[data-layout="sidebar"] .history-row {
+  padding-right: 6px;
+  gap: 6px;
+}
+
+.history-pane[data-layout="sidebar"] .history-row .when {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+/* The sha is what identifies a row; at this width the subject is what reads.
+   Both stay — the author is the column that goes, in the component. */
+.history-pane[data-layout="sidebar"] .history-row .sha {
+  font-size: 11px;
+}
+
+.history-pane[data-layout="sidebar"] .history-label {
+  width: 58px;
 }
 
 /* ---------- find and replace ---------- */
@@ -2025,6 +2362,75 @@ select {
   line-height: 1.5;
 }
 
+/* Who last touched each line. Left of the line numbers, and a third scroller
+   driven from the textarea's scrollTop for the same reason the gutter is one.
+   Font metrics and line-height must match the gutter and the code exactly: one
+   row per line, so a half-pixel of drift compounds down a long file. */
+.editor-blame {
+  flex: 0 0 auto;
+  width: 20ch;
+  padding: 10px 8px 10px 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  user-select: none;
+  background: var(--bg-elevated);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  border-right: 1px solid var(--border);
+}
+
+/* An unsaved edit moves lines under names that describe the file on disk. The
+   column stays — the names are still right about the blocks around them — but it
+   says it is no longer aligned. */
+.editor-blame[data-stale="true"] {
+  opacity: 0.55;
+}
+
+/* One line box per file line. `overflow: hidden` truncates a long name rather
+   than wrapping it, which would put this column out of step with the code. */
+.blame-line {
+  display: flex;
+  gap: 6px;
+  height: 1.5em;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.blame-line:hover {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+
+.blame-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Pinned right, so the ages line up down the column and the names truncate. */
+.blame-age {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A line that exists only in the worktree: the accent it gets everywhere else
+   uncommitted work is marked. */
+.blame-line[data-uncommitted="true"] {
+  color: var(--amber);
+  cursor: default;
+}
+
+/* git's refusal, in the bar. Truncated, with the whole of it in the hover. */
+.editor-blame-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40ch;
+  color: var(--fg-dim);
+}
+
 /* Holds the two stacked layers: the highlighted copy and the textarea over it. */
 .editor-code {
   position: relative;
@@ -2178,11 +2584,70 @@ select {
 /* Everything here sits on the accent bar, so it is drawn in `--accent-fg` and
    separated by translucency rather than by borders in a colour that would have
    to be picked per theme. */
+/* A button: it is the switch-branch control as well as the label. Styled off
+   the bar rather than as a button — the accent background is the surface, so
+   only the hover says it is pressable. */
 .status-branch {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 1px 5px;
+  margin: 0 -5px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--accent-fg);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.status-branch:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-fg) 22%, transparent);
+}
+
+.status-branch:disabled {
   cursor: default;
+  opacity: 0.6;
+}
+
+/* Anchors the picker to the chip. Only as wide as the chip, so `bottom: 100%`
+   puts the popover directly above it. */
+.status-branch-slot {
+  position: relative;
+  /* Above the dismiss scrim, so the chip stays clickable while the picker is
+     open and a second click on it closes what the first opened. Menus sit at
+     1000 and are unaffected. */
+  z-index: 56;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The branch list, above the status bar. Reuses the Source Control picker's
+   filter and rows; only the framing is different, because here it floats. */
+.branch-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: -5px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, 80vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px var(--shadow);
+  color: var(--fg);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+/* Catches the click that dismisses a popover. Transparent on purpose: a scrim
+   that dims the workbench turns a one-click list into a modal. */
+.popover-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
 }
 
 .status-branch-name {

@@ -55,6 +55,7 @@ export type Tab =
   | ChatTab
   | { id: string; kind: "file"; label: string; path: string; cwd: string }
   | { id: string; kind: "diff"; label: string; patch: string; cwd: string }
+  | { id: string; kind: "history"; label: string; cwd: string }
   | { id: string; kind: "dashboard"; label: string };
 
 /** The repo a tab belongs to, or null for the window-level dashboard. */
@@ -97,6 +98,9 @@ export type StoredTab =
       surface?: SessionSurface;
     }
   | { kind: "file"; cwd: string; path: string }
+  /** A history tab is its repo and nothing else: everything it shows is read
+   *  back from git on open, so there is no derived state to go stale. */
+  | { kind: "history"; cwd: string }
   | { kind: "dashboard" };
 
 /** The storable projection of a live tab, or null for what must not come back. */
@@ -118,6 +122,8 @@ export function toStoredTab(tab: Tab): StoredTab | null {
       };
     case "file":
       return { kind: "file", cwd: tab.cwd, path: tab.path };
+    case "history":
+      return { kind: "history", cwd: tab.cwd };
     case "dashboard":
       return { kind: "dashboard" };
     case "diff":
@@ -157,6 +163,8 @@ export function isStoredTab(value: unknown): value is StoredTab {
       // fails here and is dropped rather than restored into a strip that has
       // no repo to show it under. One relaunch, one strip of file tabs.
       return typeof value.cwd === "string" && typeof value.path === "string";
+    case "history":
+      return typeof value.cwd === "string";
     case "dashboard":
       return true;
     default:
@@ -186,6 +194,8 @@ export function storedTabId(stored: StoredTab): string {
       return `chat|${stored.cwd}|${stored.sessionId}`;
     case "file":
       return `file:${stored.path}`;
+    case "history":
+      return `history|${stored.cwd}`;
     case "dashboard":
       return "dashboard";
   }
@@ -213,6 +223,13 @@ export function restoreTab(stored: StoredTab): Tab {
         id: storedTabId(stored),
         label: stored.path.split("/").pop() ?? stored.path,
         path: stored.path,
+        cwd: stored.cwd,
+      };
+    case "history":
+      return {
+        kind: "history",
+        id: storedTabId(stored),
+        label: "History",
         cwd: stored.cwd,
       };
     case "dashboard":

@@ -17,6 +17,7 @@ import {
   type TerminalDock,
 } from "./panes/TerminalPanel";
 import { TerminalPane } from "./panes/TerminalPane";
+import { HistoryPane } from "./panes/HistoryPane";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
@@ -35,7 +36,6 @@ import { PaneBoundary } from "./panes/PaneBoundary";
 import {
   claudeKill,
   discoverRepos,
-  gitRoot,
   homeDir,
   openExternal,
   openWindow,
@@ -47,6 +47,7 @@ import { copyText } from "./lib/editing";
 import {
   FilesIcon,
   FindReplaceIcon,
+  HistoryIcon,
   MongooseLogo,
   PencilIcon,
   SourceControlIcon,
@@ -54,6 +55,12 @@ import {
 import { claimedByShell, runChord, type Command } from "./lib/commands";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
+import {
+  knownRepoRoot,
+  rememberRepoRoot,
+  repoRoot,
+  warmRepoRoots,
+} from "./lib/repoRoot";
 import {
   KEYS,
   readBoolean,
@@ -112,10 +119,10 @@ const SESSION_SURFACE_KEY = KEYS.prefs.sessionSurface;
 const FEEDBACK_KEY = KEYS.prefs.feedback;
 
 /** The left sidebar shows one of these at a time. */
-type SidebarView = "explorer" | "search" | "git";
+type SidebarView = "explorer" | "search" | "git" | "history";
 
 /** Every view the rail can show, for the stored-value guard. */
-const SIDEBAR_VIEWS: SidebarView[] = ["explorer", "search", "git"];
+const SIDEBAR_VIEWS: SidebarView[] = ["explorer", "search", "git", "history"];
 
 /**
  * The activity rail, in order. `hint` is the chord shown in the tooltip, and
@@ -150,6 +157,13 @@ const ACTIVITY_ITEMS: {
     label: "Source Control",
     hint: CHORD.sourceControl,
     Glyph: SourceControlIcon,
+  },
+  {
+    view: "history",
+    id: ID.history,
+    label: "Git History",
+    hint: CHORD.gitHistory,
+    Glyph: HistoryIcon,
   },
 ];
 
@@ -737,7 +751,14 @@ function Workbench() {
     if (!workspaceRoot) return;
     writeString(WORKSPACE_KEY, workspaceRoot);
     void discoverRepos(workspaceRoot)
-      .then((found) => setRepos(found.filter((repo) => repo.isGit)))
+      .then((found) => {
+        const git = found.filter((repo) => repo.isGit);
+        // A directory holding a `.git` is its own worktree root, so the picker's
+        // rows never need a `rev-parse` when clicked and a switch lands on the
+        // click's own tick.
+        for (const repo of git) rememberRepoRoot(repo.path, repo.path);
+        setRepos(git);
+      })
       .catch(() => setRepos([]));
   }, [workspaceRoot]);
 
@@ -751,7 +772,13 @@ function Workbench() {
     if (activeRepo) writeString(ACTIVE_REPO_KEY, activeRepo);
   }, [activeRepo]);
 
-  const handleGroups = useCallback((groups: ProjectGroup[]) => setSessionGroups(groups), []);
+  const handleGroups = useCallback((groups: ProjectGroup[]) => {
+    setSessionGroups(groups);
+    // Resolve the roots the sidebar's rows would ask for while nobody is
+    // waiting on them. A scan runs on a poll and the cache skips paths it
+    // already holds, so this is one `rev-parse` per project ever, not per scan.
+    warmRepoRoots(groups.flatMap((group) => [group.cwd, ...group.sessions.map((s) => s.cwd ?? "")]));
+  }, []);
 
   /**
    * Record the uuid a tab's process reported.
@@ -873,6 +900,19 @@ function Workbench() {
     () =>
       tabs.filter(
         (tab): tab is Extract<Tab, { kind: "file" }> => tab.kind === "file",
+      ),
+    [tabs],
+  );
+
+  /**
+   * And the same again for history: a loaded page, a typed filter and the
+   * commit that was selected are all worth more than the memory a hidden pane
+   * costs, and re-reading them is a `git log` over the whole repo.
+   */
+  const historyTabs = useMemo(
+    () =>
+      tabs.filter(
+        (tab): tab is Extract<Tab, { kind: "history" }> => tab.kind === "history",
       ),
     [tabs],
   );
@@ -1119,6 +1159,23 @@ function Workbench() {
   }, []);
 
   /**
+   * Focus this repo's history tab, opening it if it has none.
+   *
+   * One per repo, keyed the way `restoreTab` keys it: opening history twice
+   * from two places is the same tab, not a second copy of a `git log`.
+   */
+  const openHistory = useCallback((cwd: string) => {
+    if (cwd === "") return;
+    const id = `history|${cwd}`;
+    setTabs((current) =>
+      current.some((tab) => tab.id === id)
+        ? current
+        : [...current, { id, kind: "history", label: "History", cwd }],
+    );
+    setActiveTab(id);
+  }, []);
+
+  /**
    * A diff for `cwd`. The repo is in the id, not just the tab: a diff is titled
    * by a repo-relative path or a short sha, so `src/App.tsx` in two repos would
    * otherwise be one tab whose patch is whichever repo asked last.
@@ -1298,9 +1355,7 @@ function Workbench() {
     async (session: SessionMeta) => {
       // A session belongs to the directory it was started in; follow it there so
       // the file tree and git panes stay in sync with the chat.
-      const cwd = session.cwd
-        ? (await gitRoot(session.cwd).catch(() => null)) ?? session.cwd
-        : activeRepo;
+      const cwd = session.cwd ? await repoRoot(session.cwd) : activeRepo;
       setActiveRepo(cwd);
       // Opening is idempotent: a session already up is focused, not respawned,
       // so two processes can never append to one transcript.
@@ -1311,7 +1366,7 @@ function Workbench() {
 
   const startNewSession = useCallback(
     async (cwd: string) => {
-      const root = (await gitRoot(cwd).catch(() => null)) ?? cwd;
+      const root = await repoRoot(cwd);
       setActiveRepo(root);
       openNewChatTab(root);
     },
@@ -1320,15 +1375,27 @@ function Workbench() {
 
   // Switching repos from the picker also detaches the chat from its old session.
   const selectRepo = useCallback(
-    async (path: string) => {
+    (path: string) => {
       // The sidebar passes a session's raw cwd and quick-open passes a repo root,
       // so both are normalised before comparing — a bare string compare misses
       // the sidebar path and tears down the chat you are currently using.
-      const root = (await gitRoot(path).catch(() => null)) ?? path;
-      if (root === activeRepo) return;
-      // Tabs are per repo and stay mounted, so switching repos no longer tears
-      // down a chat: the effect below just brings that repo's tabs forward.
-      setActiveRepo(root);
+      //
+      // Synchronous whenever the root is already known, which is every
+      // discovered repo and every scanned project: awaiting a `rev-parse` here
+      // put an IPC hop and a child process between the click and the switch,
+      // and the whole workbench sat on the old repo until it answered. An
+      // unknown path — a directory just opened from the file dialog — still
+      // waits, once, and is remembered.
+      const known = knownRepoRoot(path);
+      if (known !== null) {
+        // Tabs are per repo and stay mounted, so switching repos no longer tears
+        // down a chat: the effect below just brings that repo's tabs forward.
+        if (known !== activeRepo) setActiveRepo(known);
+        return;
+      }
+      void repoRoot(path).then((root) => {
+        if (root !== activeRepo) setActiveRepo(root);
+      });
     },
     [activeRepo],
   );
@@ -1916,6 +1983,28 @@ function Workbench() {
               </PaneBoundary>
             )}
           </div>
+          {/* A rail view of its own rather than a fourth section under Source
+              Control: what is staged and what a commit did are two questions,
+              and the one that scrolls back through the year must not push the
+              staging list off the top of the pane to do it. */}
+          <div
+            className="sidebar-view"
+            style={{ display: sidebarView === "history" ? "flex" : "none" }}
+          >
+            {activeRepo && (
+              <PaneBoundary label="git history">
+                <HistoryPane
+                  cwd={activeRepo}
+                  layout="sidebar"
+                  refreshToken={gitRefresh}
+                  visible={sidebarView === "history"}
+                  onShowDiff={showDiffHere}
+                  onOpenFile={openFileHere}
+                  onOpenInTab={() => openHistory(activeRepo)}
+                />
+              </PaneBoundary>
+            )}
+          </div>
         </div>
 
         {!leftCollapsed && <Resizer orientation="vertical" onDelta={resizeLeft} />}
@@ -2179,6 +2268,30 @@ function Workbench() {
                       onDirtyChange={handleFileDirty}
                       onRegisterSave={registerFileSave}
                       onRegisterFormat={registerFileFormat}
+                      onShowDiff={showDiffHere}
+                    />
+                  </PaneBoundary>
+                </div>
+              ))}
+              {/* Mounted like the file tabs, and hidden the same way: a page of
+                  history is a repo-wide `git log`, and `visible` is what stops
+                  a hidden one from re-running it. */}
+              {historyTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  style={{
+                    display: tab.id === activeTab ? "flex" : "none",
+                    flex: 1,
+                    minHeight: 0,
+                  }}
+                >
+                  <PaneBoundary label="history">
+                    <HistoryPane
+                      cwd={tab.cwd}
+                      visible={tab.id === activeTab}
+                      refreshToken={gitRefresh}
+                      onShowDiff={showDiffHere}
+                      onOpenFile={openFileHere}
                     />
                   </PaneBoundary>
                 </div>

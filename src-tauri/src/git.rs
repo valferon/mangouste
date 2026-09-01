@@ -76,6 +76,38 @@ fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// What a history query is narrowed to. Every field is optional, and the ones
+/// that are set are AND-ed together.
+///
+/// One struct rather than four more positional parameters: Tauri passes a
+/// command its arguments by name, so a fifth filter added later is a field here
+/// and not a signature every caller has to be re-read against.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilter {
+    /// Substring of the author name or email.
+    pub author: Option<String>,
+    /// Substring of the commit message.
+    pub text: Option<String>,
+    /// Only commits that touched this path.
+    pub path: Option<String>,
+    /// Walk from this ref instead of from every ref.
+    pub branch: Option<String>,
+}
+
+/// A filter field with something in it, or None. The pane sends the empty
+/// string for a field the user has cleared, and `--author=` matches every
+/// commit rather than none — so blank has to mean absent here, not "match on
+/// nothing".
+fn filled(value: &Option<String>) -> Option<&str> {
+    let text = value.as_deref()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// Commit history, newest first. `--date-order` keeps parallel branches interleaved
 /// by time, which is what a graph view wants.
 ///
@@ -87,46 +119,87 @@ pub fn git_log(
     limit: Option<usize>,
     skip: Option<usize>,
     all_branches: Option<bool>,
+    filter: Option<LogFilter>,
 ) -> Result<Vec<Commit>, String> {
-    let limit = limit.unwrap_or(200).to_string();
-    let skip = skip.unwrap_or(0).to_string();
+    let filter = filter.unwrap_or_default();
     let format = format!(
         "--pretty=format:%H{sep}%h{sep}%an{sep}%ae{sep}%at{sep}%P{sep}%D{sep}%s",
         sep = FIELD_SEPARATOR
     );
 
-    let mut args = vec!["log", "--date-order", "-n", &limit, "--skip", &skip, &format];
-    if all_branches.unwrap_or(true) {
-        args.push("--all");
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        "--date-order".into(),
+        "-n".into(),
+        limit.unwrap_or(200).to_string(),
+        "--skip".into(),
+        skip.unwrap_or(0).to_string(),
+        format,
+    ];
+
+    // `--fixed-strings` and `--regexp-ignore-case` apply to `--author` and
+    // `--grep` alike: without them a name with a `.` or a `+` in it is a regex,
+    // and typing one into a filter box is not asking for one.
+    if filled(&filter.author).is_some() || filled(&filter.text).is_some() {
+        args.push("--fixed-strings".into());
+        args.push("--regexp-ignore-case".into());
+    }
+    if let Some(author) = filled(&filter.author) {
+        args.push(format!("--author={author}"));
+    }
+    if let Some(text) = filled(&filter.text) {
+        args.push(format!("--grep={text}"));
     }
 
-    let stdout = git(&cwd, &args)?;
+    // A branch narrows the walk to one starting point, which is the opposite of
+    // `--all`; asking for both would widen it straight back out again.
+    match filled(&filter.branch) {
+        Some(branch) => {
+            checked_ref(branch, "branch")?;
+            args.push("--end-of-options".into());
+            args.push(branch.to_string());
+        }
+        None if all_branches.unwrap_or(true) => args.push("--all".into()),
+        None => {}
+    }
+
+    // Last, and after `--`, so a path beginning with a dash stays a path.
+    if let Some(path) = filled(&filter.path) {
+        args.push("--".into());
+        args.push(path.to_string());
+    }
+
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stdout = git(&cwd, &borrowed)?;
     let commits = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(FIELD_SEPARATOR).collect();
-            if fields.len() < 8 {
-                return None;
-            }
-            Some(Commit {
-                sha: fields[0].to_string(),
-                short_sha: fields[1].to_string(),
-                author: fields[2].to_string(),
-                author_email: fields[3].to_string(),
-                timestamp: fields[4].parse().unwrap_or(0),
-                parents: fields[5].split_whitespace().map(str::to_string).collect(),
-                refs: fields[6]
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|r| !r.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                subject: fields[7].to_string(),
-            })
-        })
+        .filter_map(parse_commit)
         .collect();
     Ok(commits)
+}
+
+/// One `git log` record, or None when the line is not one.
+fn parse_commit(line: &str) -> Option<Commit> {
+    let fields: Vec<&str> = line.split(FIELD_SEPARATOR).collect();
+    if fields.len() < 8 {
+        return None;
+    }
+    Some(Commit {
+        sha: fields[0].to_string(),
+        short_sha: fields[1].to_string(),
+        author: fields[2].to_string(),
+        author_email: fields[3].to_string(),
+        timestamp: fields[4].parse().unwrap_or(0),
+        parents: fields[5].split_whitespace().map(str::to_string).collect(),
+        refs: fields[6]
+            .split(',')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .collect(),
+        subject: fields[7].to_string(),
+    })
 }
 
 /// Working tree status plus branch tracking info.
@@ -364,17 +437,55 @@ fn git_patch(cwd: &str, args: &[&str], allow_diff_exit: bool) -> Result<String, 
     Ok(patch)
 }
 
-/// Full patch for one commit, capped at `PATCH_BUDGET_BYTES`.
-#[tauri::command(async)]
-pub fn git_show(cwd: String, sha: String) -> Result<String, String> {
-    // The sha comes from the frontend: validate it and terminate option
-    // parsing so a crafted value like `--output=/path` cannot become a flag.
+/// The sha came from the frontend: validate it, and pair every use with
+/// `--end-of-options`, so a crafted value like `--output=/path` can neither
+/// reach git nor become a flag if it did.
+fn checked_sha(sha: &str) -> Result<(), String> {
     if sha.len() < 4 || sha.len() > 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("not a commit sha: {sha}"));
     }
+    Ok(())
+}
+
+/// Full patch for one commit, capped at `PATCH_BUDGET_BYTES`.
+#[tauri::command(async)]
+pub fn git_show(cwd: String, sha: String) -> Result<String, String> {
+    checked_sha(&sha)?;
     git_patch(
         &cwd,
         &["show", "--stat", "--patch", "--no-color", "--end-of-options", &sha],
+        false,
+    )
+}
+
+/// Patch for one path inside one commit, which is what clicking a file in the
+/// history pane asks for. `git show <sha>` on a 40-file commit is a megabyte of
+/// patch to read one hunk out of.
+#[tauri::command(async)]
+pub fn git_show_file(cwd: String, sha: String, path: String) -> Result<String, String> {
+    checked_sha(&sha)?;
+    if path.is_empty() {
+        return Err("empty path".to_string());
+    }
+    git_patch(
+        &cwd,
+        &[
+            "show",
+            "--no-color",
+            "--format=",
+            "-M",
+            // A merge shows nothing by default — its combined diff is empty
+            // unless the merge had conflicts — so a file changed on the branch
+            // that was merged would list here and then open blank. Diffing
+            // against the first parent is what a history view means by "what
+            // this commit did".
+            "-m",
+            "--first-parent",
+            "--end-of-options",
+            &sha,
+            "--",
+            &path,
+        ],
         false,
     )
 }
@@ -403,6 +514,151 @@ pub fn git_diff_file(cwd: String, path: String, staged: Option<bool>) -> Result<
         &["diff", "--no-color", "--no-index", "--", "/dev/null", &path],
         true,
     )
+}
+
+/// One changed file inside a commit.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFile {
+    /// Raw status letter, e.g. `M`, `A`, `D`, `R100`.
+    pub status: String,
+    /// Post-image path, which is the one to ask for a patch by.
+    pub path: String,
+    /// Pre-image path, present only for a rename or a copy.
+    pub original_path: Option<String>,
+    /// None for a binary file, which git counts as `-` rather than as 0.
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+}
+
+/// Everything the history pane's right-hand side shows for one commit.
+///
+/// One command rather than three: selecting a row in a list is a keyboard
+/// repeat away from selecting forty of them, and each extra round trip is
+/// another git process per row travelled through.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub commit: Commit,
+    /// The message below the subject line, trailing blank lines trimmed.
+    pub body: String,
+    pub committer: String,
+    pub committer_email: String,
+    pub commit_timestamp: i64,
+    pub files: Vec<CommitFile>,
+}
+
+/// Split `git show --raw --numstat -z` into one record per changed file.
+///
+/// The two formats come out of a single git call, raw section first: `-z` makes
+/// every field NUL-terminated, so a path with a newline or a quote in it needs
+/// no unquoting and cannot be mistaken for the start of the next record. A raw
+/// record opens with `:`, a numstat one with a count, which is what tells the
+/// sections apart without counting them.
+fn parse_commit_files(out: &str) -> Vec<CommitFile> {
+    let tokens: Vec<&str> = out.split('\0').filter(|t| !t.is_empty()).collect();
+    let mut files: Vec<CommitFile> = Vec::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let token = tokens[index];
+        if let Some(meta) = token.strip_prefix(':') {
+            // `:<oldmode> <newmode> <oldsha> <newsha> <status>`, then the path,
+            // then a second path when the status is a rename or a copy.
+            let status = meta.split_whitespace().last().unwrap_or("").to_string();
+            let renamed = status.starts_with('R') || status.starts_with('C');
+            let paths = if renamed { 2 } else { 1 };
+            if index + paths >= tokens.len() {
+                break;
+            }
+            let (original_path, path) = if renamed {
+                (Some(tokens[index + 1].to_string()), tokens[index + 2].to_string())
+            } else {
+                (None, tokens[index + 1].to_string())
+            };
+            files.push(CommitFile {
+                status,
+                path,
+                original_path,
+                additions: None,
+                deletions: None,
+            });
+            index += paths + 1;
+            continue;
+        }
+
+        // `<adds>\t<dels>\t<path>`, or `<adds>\t<dels>\t` followed by the two
+        // paths of a rename as their own tokens.
+        let mut parts = token.splitn(3, '\t');
+        let adds = parts.next().unwrap_or("");
+        let dels = parts.next().unwrap_or("");
+        let inline = parts.next().unwrap_or("");
+        let mut consumed = 1;
+        let path = if inline.is_empty() {
+            if index + 2 >= tokens.len() {
+                break;
+            }
+            consumed = 3;
+            tokens[index + 2].to_string()
+        } else {
+            inline.to_string()
+        };
+        if let Some(file) = files.iter_mut().find(|f| f.path == path) {
+            file.additions = adds.parse().ok();
+            file.deletions = dels.parse().ok();
+        }
+        index += consumed;
+    }
+
+    files
+}
+
+/// Message, committer and changed files for one commit.
+#[tauri::command(async)]
+pub fn git_commit_detail(cwd: String, sha: String) -> Result<CommitDetail, String> {
+    checked_sha(&sha)?;
+    let format = format!(
+        "--pretty=format:%H{sep}%h{sep}%an{sep}%ae{sep}%at{sep}%P{sep}%D{sep}%s{sep}%cn{sep}%ce{sep}%ct{sep}%b",
+        sep = FIELD_SEPARATOR
+    );
+    let header = git(
+        &cwd,
+        &["log", "-1", &format, "--end-of-options", &sha],
+    )?;
+
+    // `splitn` and not `split`: the body is last precisely because it is the one
+    // field that can hold anything, separator bytes included.
+    let fields: Vec<&str> = header.splitn(12, FIELD_SEPARATOR).collect();
+    if fields.len() < 12 {
+        return Err(format!("no such commit: {sha}"));
+    }
+    let commit = parse_commit(&fields[..8].join(&FIELD_SEPARATOR.to_string()))
+        .ok_or_else(|| format!("no such commit: {sha}"))?;
+
+    let files = parse_commit_files(&git(
+        &cwd,
+        &[
+            "show",
+            "--format=",
+            "--raw",
+            "--numstat",
+            "-M",
+            "-m",
+            "--first-parent",
+            "-z",
+            "--end-of-options",
+            &sha,
+        ],
+    )?);
+
+    Ok(CommitDetail {
+        commit,
+        body: fields[11].trim_end().to_string(),
+        committer: fields[8].to_string(),
+        committer_email: fields[9].to_string(),
+        commit_timestamp: fields[10].parse().unwrap_or(0),
+        files,
+    })
 }
 
 /// Local and remote branches, current branch first.
@@ -747,6 +1003,140 @@ pub fn git_discard(cwd: String, tracked: Vec<String>, untracked: Vec<String>) ->
     Ok(())
 }
 
+/* ---------- blame ---------- */
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameCommit {
+    pub sha: String,
+    pub short_sha: String,
+    pub author: String,
+    pub author_email: String,
+    pub timestamp: i64,
+    pub summary: String,
+}
+
+/// One file's blame, as a commit table plus one index per line.
+///
+/// Indices rather than a sha on every line: a long file blames to a handful of
+/// commits, and repeating a 40-character sha per line makes the payload for a
+/// 5000-line file an order of magnitude bigger than the file itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Blame {
+    pub commits: Vec<BlameCommit>,
+    /// Index into `commits`, one per line of the worktree file, in order.
+    pub lines: Vec<usize>,
+}
+
+/**
+ * Ceiling on blamed lines.
+ *
+ * The frontend puts one DOM node per line with no virtualisation, so blame on a
+ * generated file — a lockfile, a snapshot — would otherwise be tens of thousands
+ * of nodes for a column nobody reads to the bottom of. Past this the column runs
+ * out, which is visible rather than silent, and costs nothing.
+ */
+const MAX_BLAME_LINES: usize = 20_000;
+
+/// Whether a token is an object name: 40 hex characters for sha1, 64 for sha256.
+fn is_object_name(token: &str) -> bool {
+    token.len() >= 40 && token.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Who last touched each line of a file, for the editor's blame column.
+///
+/// Takes a path rather than a repo and a relative path: the caller is an open
+/// editor, which knows the absolute path of the file it is showing and nothing
+/// about which repo root it belongs to. git resolves the repo from the directory
+/// the command runs in, which is the file's own.
+///
+/// Blames the worktree file, so uncommitted lines come back under the all-zero
+/// sha that git gives them — the frontend shows those as uncommitted rather than
+/// hiding them, since "this line is mine and unsaved" is the useful answer.
+#[tauri::command(async)]
+pub fn git_blame(path: String) -> Result<Blame, String> {
+    let dir = std::path::Path::new(&path)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| "no directory to run git in".to_string())?;
+
+    // `--porcelain` repeats a commit's details only the first time it appears,
+    // which is what makes the commit table below cheap to build.
+    let stdout = git(&dir, &["blame", "--porcelain", "--", &path])?;
+
+    let mut commits: Vec<BlameCommit> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut lines: Vec<usize> = Vec::new();
+    // Which commit the record being read belongs to, until its content line.
+    let mut current: Option<usize> = None;
+
+    for raw in stdout.lines() {
+        // The line's own text, which closes the record it belongs to. Tab is the
+        // only prefix git uses for content, so this cannot collide with a header.
+        if raw.starts_with('\t') {
+            if let Some(at) = current.take() {
+                lines.push(at);
+                if lines.len() >= MAX_BLAME_LINES {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        let mut fields = raw.splitn(2, ' ');
+        let first = fields.next().unwrap_or("");
+        let rest = fields.next().unwrap_or("");
+
+        // A header is `<sha> <orig-line> <final-line> [<lines-in-group>]`. Both
+        // halves are checked, because `previous <sha> <file>` also carries an
+        // object name and must not be read as the start of a new record.
+        let numbered = rest
+            .split(' ')
+            .next()
+            .is_some_and(|n| !n.is_empty() && n.parse::<u32>().is_ok());
+        if is_object_name(first) && numbered {
+            let at = match seen.get(first) {
+                Some(&at) => at,
+                None => {
+                    commits.push(BlameCommit {
+                        sha: first.to_string(),
+                        short_sha: first.chars().take(8).collect(),
+                        author: String::new(),
+                        author_email: String::new(),
+                        timestamp: 0,
+                        summary: String::new(),
+                    });
+                    seen.insert(first.to_string(), commits.len() - 1);
+                    commits.len() - 1
+                }
+            };
+            current = Some(at);
+            continue;
+        }
+
+        // Everything else is a header field for the record being read. Only the
+        // first record for a commit carries them, so nothing overwrites what is
+        // already there — a later group repeats the sha line and nothing else.
+        let Some(at) = current else { continue };
+        let commit = &mut commits[at];
+        match first {
+            "author" if commit.author.is_empty() => commit.author = rest.to_string(),
+            "author-mail" if commit.author_email.is_empty() => {
+                commit.author_email = rest.trim_matches(|c| c == '<' || c == '>').to_string();
+            }
+            "author-time" if commit.timestamp == 0 => {
+                commit.timestamp = rest.trim().parse().unwrap_or(0);
+            }
+            "summary" if commit.summary.is_empty() => commit.summary = rest.to_string(),
+            _ => {}
+        }
+    }
+
+    Ok(Blame { commits, lines })
+}
+
 #[cfg(test)]
 mod tracking_tests {
     use super::*;
@@ -902,9 +1292,201 @@ mod tracking_tests {
     }
 
     #[test]
+    fn blame_names_the_commit_behind_each_line() {
+        let dir = repo("blame");
+        std::fs::write(dir.join("f.txt"), "one\ntwo\n").expect("write");
+        run(&dir, &["add", "f.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "first"]);
+        std::fs::write(dir.join("f.txt"), "one\ntwo\nthree\n").expect("write");
+        run(&dir, &["add", "f.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "second"]);
+
+        let blame = git_blame(dir.join("f.txt").to_string_lossy().into_owned()).expect("blame");
+        assert_eq!(blame.lines.len(), 3);
+        // Two lines from the first commit, one from the second, and each commit
+        // carried once: the whole point of the index-per-line shape.
+        assert_eq!(blame.commits.len(), 2);
+        assert_eq!(blame.lines[0], blame.lines[1]);
+        assert_ne!(blame.lines[0], blame.lines[2]);
+        let first = &blame.commits[blame.lines[0]];
+        assert_eq!(first.summary, "first");
+        assert_eq!(first.author, "t");
+        assert_eq!(first.author_email, "t@t");
+        assert_eq!(first.short_sha.len(), 8);
+        assert!(first.sha.starts_with(&first.short_sha));
+        assert!(first.timestamp > 0);
+        assert_eq!(blame.commits[blame.lines[2]].summary, "second");
+    }
+
+    #[test]
+    fn an_unsaved_line_blames_to_the_all_zero_sha() {
+        // git's own marker for "not committed yet", which the editor shows as
+        // uncommitted rather than hiding — it is the line you just typed.
+        let dir = repo("blame-dirty");
+        std::fs::write(dir.join("f.txt"), "one\n").expect("write");
+        run(&dir, &["add", "f.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "first"]);
+        std::fs::write(dir.join("f.txt"), "one\nmine\n").expect("write");
+
+        let blame = git_blame(dir.join("f.txt").to_string_lossy().into_owned()).expect("blame");
+        assert_eq!(blame.lines.len(), 2);
+        let mine = &blame.commits[blame.lines[1]];
+        assert!(mine.sha.chars().all(|c| c == '0'), "{}", mine.sha);
+    }
+
+    #[test]
+    fn a_path_git_cannot_blame_fails_with_gits_own_words() {
+        let dir = repo("blame-untracked");
+        std::fs::write(dir.join("f.txt"), "one\n").expect("write");
+        run(&dir, &["add", "f.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "first"]);
+        std::fs::write(dir.join("new.txt"), "hello\n").expect("write");
+
+        let error = git_blame(dir.join("new.txt").to_string_lossy().into_owned())
+            .expect_err("untracked");
+        assert!(error.contains("no such path"), "{error}");
+    }
+
+    #[test]
     fn an_unreadable_count_keeps_the_branch_it_came_with() {
         assert_eq!(parse_counts("2\t3\n"), (2, 3));
         assert_eq!(parse_counts(""), (0, 0));
         assert_eq!(parse_counts("wat"), (0, 0));
+    }
+
+    #[test]
+    fn a_renamed_file_keeps_both_of_its_names() {
+        // Raw section then numstat section, exactly as `-z` emits them: a
+        // rename spends three tokens in each, and a binary file counts `-`.
+        let out = concat!(
+            ":100644 100644 aaa bbb R096\0old.txt\0new.txt\0",
+            ":100644 100644 ccc ddd M\0keep.rs\0",
+            ":100644 100644 eee fff M\0logo.png\0",
+            "3\t1\t\0old.txt\0new.txt\0",
+            "9\t2\tkeep.rs\0",
+            "-\t-\tlogo.png\0",
+        );
+        let files = parse_commit_files(out);
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(files[0].original_path.as_deref(), Some("old.txt"));
+        assert_eq!(files[0].additions, Some(3));
+        assert_eq!(files[1].additions, Some(9));
+        assert_eq!(files[1].deletions, Some(2));
+        // A binary file has no line counts at all, which is not the same
+        // number as zero and must not render as one.
+        assert_eq!(files[2].additions, None);
+    }
+
+    #[test]
+    fn a_commits_detail_carries_its_body_and_its_files() {
+        let dir = repo("detail");
+        commit(&dir, "first");
+        std::fs::write(dir.join("g.txt"), "new\n").expect("write");
+        run(&dir, &["add", "g.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "second", "-m", "why it was done"]);
+        let sha = run(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let detail = git_commit_detail(dir.to_string_lossy().into_owned(), sha.clone())
+            .expect("detail");
+
+        assert_eq!(detail.commit.sha, sha);
+        assert_eq!(detail.commit.subject, "second");
+        assert_eq!(detail.body, "why it was done");
+        assert_eq!(detail.committer_email, "t@t");
+        let paths: Vec<&str> = detail.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["g.txt"]);
+        assert_eq!(detail.files[0].status, "A");
+        assert_eq!(detail.files[0].additions, Some(1));
+    }
+
+    #[test]
+    fn a_sha_that_is_not_one_never_reaches_git() {
+        let dir = repo("sha-guard");
+        commit(&dir, "first");
+
+        let error = git_commit_detail(dir.to_string_lossy().into_owned(), "--output=/x".into())
+            .expect_err("rejected");
+        assert!(error.contains("not a commit sha"), "{error}");
+        let error = git_show_file(
+            dir.to_string_lossy().into_owned(),
+            "HEAD".into(),
+            "f.txt".into(),
+        )
+        .expect_err("rejected");
+        assert!(error.contains("not a commit sha"), "{error}");
+    }
+
+    #[test]
+    fn a_message_filter_matches_as_text_and_not_as_a_regex() {
+        let dir = repo("log-filter");
+        commit(&dir, "plain");
+        commit(&dir, "fix(a.b): thing");
+
+        let matched = git_log(
+            dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            Some(true),
+            Some(LogFilter { text: Some("fix(a.b)".into()), ..LogFilter::default() }),
+        )
+        .expect("log");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].subject, "fix(a.b): thing");
+
+        // `.` is a literal here. As a regex it would have matched `axb` too,
+        // and a filter box that quietly accepts regexes is a filter box that
+        // quietly drops commits.
+        let none = git_log(
+            dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            Some(true),
+            Some(LogFilter { text: Some("fix(axb)".into()), ..LogFilter::default() }),
+        )
+        .expect("log");
+        assert!(none.is_empty(), "{none:?}");
+    }
+
+    #[test]
+    fn a_blank_filter_field_is_not_a_filter() {
+        let dir = repo("log-blank");
+        commit(&dir, "first");
+        commit(&dir, "second");
+
+        let all = git_log(
+            dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            Some(true),
+            Some(LogFilter {
+                author: Some("  ".into()),
+                text: Some("".into()),
+                ..LogFilter::default()
+            }),
+        )
+        .expect("log");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn a_path_filter_keeps_only_the_commits_that_touched_it() {
+        let dir = repo("log-path");
+        commit(&dir, "first");
+        std::fs::write(dir.join("other.txt"), "x\n").expect("write");
+        run(&dir, &["add", "other.txt"]);
+        run(&dir, &["commit", "--quiet", "-m", "other"]);
+
+        let touched = git_log(
+            dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            Some(true),
+            Some(LogFilter { path: Some("other.txt".into()), ..LogFilter::default() }),
+        )
+        .expect("log");
+        assert_eq!(touched.len(), 1);
+        assert_eq!(touched[0].subject, "other");
     }
 }

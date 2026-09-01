@@ -6,16 +6,36 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
+import {
+  blameAge,
+  blameAuthor,
+  blameRows,
+  blameShown,
+  blameTitle,
+  blameVersion,
+  isUncommitted,
+  setBlameShown,
+  subscribeBlame,
+} from "../lib/blame";
 import { copyText } from "../lib/editing";
 import { highlightCode, highlightDiff, languageForPath } from "../lib/highlight";
 import { diffFileHeaderPath, diffHeaderPath, diffLineClass } from "../lib/diff";
 import { clearEditorFacts, factsFor, publishEditorFacts } from "../lib/editorFacts";
-import { formatText, readTextFileMeta, revealPath, writeTextFile } from "../lib/ipc";
+import {
+  formatText,
+  gitBlame,
+  gitShow,
+  readTextFileMeta,
+  revealPath,
+  writeTextFile,
+} from "../lib/ipc";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
+import type { Blame, BlameCommit } from "../lib/types";
 
 /**
  * Ceiling on rendered diff lines. One DOM node per line with no virtualisation,
@@ -430,6 +450,13 @@ interface FileViewProps {
    * changes makes the second one move anything.
    */
   reveal?: { line: number; column: number; nonce: number };
+  /**
+   * Opens a patch in a diff tab, for a commit picked out of the blame column.
+   *
+   * Optional: without it the column still names who wrote each line, it just
+   * cannot show what else that commit touched.
+   */
+  onShowDiff?: (title: string, patch: string) => void;
 }
 
 /**
@@ -461,6 +488,7 @@ export const FileView = memo(function FileView({
   onRegisterSave,
   onRegisterFormat,
   reveal,
+  onShowDiff,
 }: FileViewProps) {
   const menu = useMenu();
   /** What is on disk, as far as this pane knows. */
@@ -471,6 +499,16 @@ export const FileView = memo(function FileView({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const highlightRef = useRef<HTMLPreElement | null>(null);
+  const blameRef = useRef<HTMLDivElement | null>(null);
+
+  /** Who last touched each line, and why the column may have nothing to say. */
+  const [blame, setBlame] = useState<Blame | null>(null);
+  const [blameError, setBlameError] = useState<string | null>(null);
+  // The switch is shared by every mounted editor — see `lib/blame.ts`. The
+  // version is the snapshot and the value is read alongside it, as in
+  // `editorFacts`.
+  useSyncExternalStore(subscribeBlame, blameVersion, blameVersion);
+  const blameOn = blameShown();
 
   const dirty = saved !== null && draft !== saved.text;
 
@@ -678,6 +716,7 @@ export const FileView = memo(function FileView({
     field.scrollTop = top;
     if (gutterRef.current) gutterRef.current.scrollTop = top;
     if (highlightRef.current) highlightRef.current.scrollTop = top;
+    if (blameRef.current) blameRef.current.scrollTop = top;
   }, [reveal, saved]);
 
   // Reload when the window regains focus and nothing local would be lost:
@@ -757,6 +796,12 @@ export const FileView = memo(function FileView({
         run: () => void load(),
       },
       "separator",
+      {
+        label: "Show Blame",
+        checked: blameOn,
+        run: () => setBlameShown(!blameOn),
+      },
+      "separator",
       "editing",
       "separator",
       { label: "Copy Path", run: () => void copyText(path) },
@@ -768,10 +813,123 @@ export const FileView = memo(function FileView({
         run: () => void revealPath(parentDir(path)),
       },
     ],
-    [dirty, state.kind, save, format, load, path],
+    [dirty, state.kind, save, format, load, path, blameOn],
   );
 
   const language = useMemo(() => languageForPath(path), [path]);
+
+  /*
+   * Read blame while the column is showing, and re-read it after every write.
+   *
+   * Keyed on the saved file's mtime, which is what a save and a reload both
+   * move: `git blame` describes the file on disk, so the answer is only stale
+   * once those bytes change. A draft nobody has saved does not invalidate it —
+   * it just shifts which line each answer belongs to, which is what the column
+   * says by dimming rather than by re-reading something git cannot see.
+   */
+  const savedAt = saved?.modifiedMs ?? null;
+  useEffect(() => {
+    if (!blameOn || savedAt === null) {
+      setBlame(null);
+      setBlameError(null);
+      return;
+    }
+    let cancelled = false;
+    void gitBlame(path)
+      .then((next) => {
+        if (cancelled) return;
+        setBlame(next);
+        setBlameError(null);
+      })
+      .catch((e) => {
+        // Not a repo, an untracked file, no git at all. git's own words, in the
+        // bar rather than over the file: none of them stops you editing it.
+        if (cancelled) return;
+        setBlame(null);
+        setBlameError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [blameOn, path, savedAt]);
+
+  /** Open what else a blamed commit touched, in a diff tab. */
+  const openBlameCommit = useCallback(
+    (commit: BlameCommit) => {
+      if (!onShowDiff || isUncommitted(commit.sha)) return;
+      void gitShow(parentDir(path), commit.sha)
+        .then((patch) => onShowDiff(`${commit.shortSha} ${commit.summary}`, patch))
+        .catch((e) => setBlameError(String(e)));
+    },
+    [onShowDiff, path],
+  );
+
+  /*
+   * The menu api, behind a ref.
+   *
+   * Its identity changes whenever any menu opens or closes, and the rows below
+   * are memoised on their handlers — depending on it directly would rebuild one
+   * node per line of the file every time a context menu anywhere is dismissed.
+   */
+  const menuRef = useRef(menu);
+  useEffect(() => {
+    menuRef.current = menu;
+  }, [menu]);
+
+  const blameMenu = useCallback(
+    (commit: BlameCommit): MenuEntry[] => {
+      const uncommitted = isUncommitted(commit.sha);
+      return [
+        { header: uncommitted ? "Not committed yet" : `${commit.shortSha} ${commit.summary}` },
+        !uncommitted && {
+          label: "View Commit Changes",
+          disabled: !onShowDiff,
+          run: () => openBlameCommit(commit),
+        },
+        !uncommitted && "separator",
+        !uncommitted && { label: "Copy Commit Hash", run: () => void copyText(commit.sha) },
+        !uncommitted && { label: "Copy Short Hash", run: () => void copyText(commit.shortSha) },
+        !uncommitted && { label: "Copy Summary", run: () => void copyText(commit.summary) },
+        !uncommitted && {
+          label: "Copy Author",
+          run: () => void copyText(`${commit.author} <${commit.authorEmail}>`),
+        },
+        "separator",
+        { label: "Hide Blame", run: () => setBlameShown(false) },
+      ];
+    },
+    [onShowDiff, openBlameCommit],
+  );
+
+  /*
+   * The column's rows, built once per blame rather than once per keystroke.
+   *
+   * Memoised for the same reason the highlighter is: this is one node per line
+   * of the file, and typing must not rebuild them. The elements come back
+   * identical between renders, so React skips the subtree entirely.
+   */
+  const blameNodes = useMemo(() => {
+    if (blame === null) return null;
+    return blameRows(blame).map((row, index) => (
+      <div
+        key={index}
+        className="blame-line"
+        data-uncommitted={isUncommitted(row.commit.sha)}
+        title={blameTitle(row.commit)}
+        onClick={() => openBlameCommit(row.commit)}
+        onContextMenu={(event) => menuRef.current.openContextMenu(event, blameMenu(row.commit))}
+      >
+        {/* Only the first line of a run is labelled: the blank rows under it are
+            what make a commit's lines read as one block. */}
+        {row.first && (
+          <>
+            <span className="blame-author">{blameAuthor(row.commit)}</span>
+            <span className="blame-age">{blameAge(row.commit.timestamp)}</span>
+          </>
+        )}
+      </div>
+    ));
+  }, [blame, blameMenu, openBlameCommit]);
 
   /**
    * Publish the caret row for the status bar.
@@ -838,7 +996,22 @@ export const FileView = memo(function FileView({
           {path}
         </span>
         {status}
+        {/* git's own refusal, kept short in the bar and whole in the hover: an
+            untracked file has no history, and that is not an editing error. */}
+        {blameOn && blameError !== null && (
+          <span className="editor-blame-note" title={blameError}>
+            {blameError}
+          </span>
+        )}
         <div className="actions">
+          <button
+            className="toggle-button"
+            data-active={blameOn}
+            onClick={() => setBlameShown(!blameOn)}
+            title="Who last touched each line, from git blame"
+          >
+            Blame
+          </button>
           <button
             className="toggle-button"
             onClick={() => void format()}
@@ -877,6 +1050,25 @@ export const FileView = memo(function FileView({
         </div>
       )}
       <div className="editor-body">
+        {/* Left of the line numbers, as `git gui blame` puts it, and its own
+            scroller driven from the textarea — the same arrangement the gutter
+            uses, and for the same reason. Dimmed while the buffer is dirty:
+            blame describes the file on disk, so an unsaved insertion above a
+            line means these names are one or more rows out. */}
+        {blameOn && blameNodes !== null && (
+          <div
+            className="editor-blame"
+            ref={blameRef}
+            data-stale={dirty}
+            title={
+              dirty
+                ? "Blame is from the file on disk — unsaved edits shift which line each name belongs to"
+                : undefined
+            }
+          >
+            {blameNodes}
+          </div>
+        )}
         <div className="editor-gutter" ref={gutterRef} aria-hidden>
           {gutter}
         </div>
@@ -911,6 +1103,8 @@ export const FileView = memo(function FileView({
               const { scrollTop, scrollLeft } = event.currentTarget;
               const gutterElement = gutterRef.current;
               if (gutterElement) gutterElement.scrollTop = scrollTop;
+              const blameElement = blameRef.current;
+              if (blameElement) blameElement.scrollTop = scrollTop;
               const highlightElement = highlightRef.current;
               if (highlightElement) {
                 highlightElement.scrollTop = scrollTop;

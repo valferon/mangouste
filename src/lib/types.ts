@@ -212,6 +212,41 @@ export interface Commit {
   subject: string;
 }
 
+/** One changed file inside a commit, as `gitCommitDetail` reports it. */
+export interface CommitFile {
+  /** Raw git status letter: `M`, `A`, `D`, `R096`, … */
+  status: string;
+  /** Post-image path — the one to ask `gitShowFile` for. */
+  path: string;
+  /** Pre-image path, present only for a rename or a copy. */
+  originalPath: string | null;
+  /** Null for a binary file, which git counts as `-` and not as zero. */
+  additions: number | null;
+  deletions: number | null;
+}
+
+/** Everything the history pane shows on the right for one selected commit. */
+export interface CommitDetail {
+  commit: Commit;
+  /** The message below the subject line, trailing blank lines trimmed. */
+  body: string;
+  committer: string;
+  committerEmail: string;
+  commitTimestamp: number;
+  files: CommitFile[];
+}
+
+/**
+ * What a history query is narrowed to. Blank fields are not filters: the pane
+ * sends whatever is in its boxes, and the Rust side treats empty as absent.
+ */
+export interface LogFilter {
+  author?: string;
+  text?: string;
+  path?: string;
+  branch?: string;
+}
+
 export interface FileStatus {
   code: string;
   path: string;
@@ -226,6 +261,30 @@ export interface RepoStatus {
   ahead: number;
   behind: number;
   files: FileStatus[];
+}
+
+export interface BlameCommit {
+  sha: string;
+  /** First 8 characters of `sha`, which is what the column shows. */
+  shortSha: string;
+  author: string;
+  authorEmail: string;
+  /** Author time, in seconds — git's own unit for it. */
+  timestamp: number;
+  summary: string;
+}
+
+/**
+ * One file's blame: a commit table plus an index into it per line.
+ *
+ * Indices rather than a sha per line, for the reason the Rust side gives — a
+ * long file blames to a handful of commits, and a 40-character sha on every
+ * line would dwarf the file itself.
+ */
+export interface Blame {
+  commits: BlameCommit[];
+  /** One index per line of the file on disk, in order. */
+  lines: number[];
 }
 
 export interface BranchList {

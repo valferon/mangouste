@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
+  Blame,
   BranchList,
   ChatStatus,
   ClaudeUsage,
@@ -11,9 +12,11 @@ import type {
   PermissionRequest,
   ClaudeFrame,
   Commit,
+  CommitDetail,
   DirEntryInfo,
   FileText,
   Formatted,
+  LogFilter,
   ProjectGroup,
   Release,
   ReplaceOutcome,
@@ -290,8 +293,13 @@ export const replaceMatches = (
 
 /* ---------- git ---------- */
 
-export const gitLog = (cwd: string, limit?: number, skip?: number, allBranches = true) =>
-  invoke<Commit[]>("git_log", { cwd, limit, skip, allBranches });
+export const gitLog = (
+  cwd: string,
+  limit?: number,
+  skip?: number,
+  allBranches = true,
+  filter?: LogFilter,
+) => invoke<Commit[]>("git_log", { cwd, limit, skip, allBranches, filter });
 export const gitStatus = (cwd: string) => invoke<RepoStatus>("git_status", { cwd });
 /**
  * Branch and upstream counts without the worktree scan a status does.
@@ -308,10 +316,31 @@ export const gitTracking = (cwd: string) => invoke<RepoStatus>("git_tracking", {
  */
 export const gitDirty = (cwd: string) => invoke<boolean>("git_dirty", { cwd });
 export const gitShow = (cwd: string, sha: string) => invoke<string>("git_show", { cwd, sha });
+/**
+ * One file's patch out of one commit.
+ *
+ * The history pane asks for this rather than slicing `gitShow`'s output: a
+ * commit that touches forty files is a megabyte of patch to read one hunk from,
+ * and the slicing would have to re-parse what git already knows.
+ */
+export const gitShowFile = (cwd: string, sha: string, path: string) =>
+  invoke<string>("git_show_file", { cwd, sha, path });
+/** Message, committer and changed-file list for one commit. */
+export const gitCommitDetail = (cwd: string, sha: string) =>
+  invoke<CommitDetail>("git_commit_detail", { cwd, sha });
 export const gitDiffFile = (cwd: string, path: string, staged = false) =>
   invoke<string>("git_diff_file", { cwd, path, staged });
 export const gitBranches = (cwd: string) => invoke<string[]>("git_branches", { cwd });
 export const gitRoot = (cwd: string) => invoke<string | null>("git_root", { cwd });
+/**
+ * Who last touched each line of a file, for the editor's blame column.
+ *
+ * Takes the file's own path and no repo: an open editor knows the former and
+ * nothing about the latter, and git resolves the repo from the file's directory.
+ * Rejects a path git has no history for — an untracked file — with git's words.
+ */
+export const gitBlame = (path: string) => invoke<Blame>("git_blame", { path });
+
 export const gitStage = (cwd: string, paths: string[]) =>
   invoke<void>("git_stage", { cwd, paths });
 export const gitUnstage = (cwd: string, paths: string[]) =>

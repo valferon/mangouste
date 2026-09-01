@@ -28,6 +28,13 @@ const fileTab: Tab = {
   cwd: "/repos/mangouste",
 };
 
+const historyTab: Tab = {
+  kind: "history",
+  id: "history|/repos/mangouste",
+  label: "History",
+  cwd: "/repos/mangouste",
+};
+
 const dashboardTab: Tab = { kind: "dashboard", id: "dashboard", label: "Dashboard" };
 
 describe("toStoredTab", () => {
@@ -111,6 +118,14 @@ describe("toStoredTab -> restoreTab", () => {
     expect(restoreTab(stored as StoredTab)).toEqual(fileTab);
   });
 
+  it("round trips a history tab", () => {
+    // Unlike a diff, a history tab stores nothing derived: it is a repo, and
+    // the log behind it is re-read on open.
+    const stored = toStoredTab(historyTab);
+    expect(stored).not.toBeNull();
+    expect(restoreTab(stored as StoredTab)).toEqual(historyTab);
+  });
+
   it("round trips the dashboard", () => {
     const stored = toStoredTab(dashboardTab);
     expect(stored).not.toBeNull();
@@ -130,6 +145,11 @@ describe("storedTabId", () => {
   it("mints the file id App would", () => {
     const stored = toStoredTab(fileTab) as StoredTab;
     expect(storedTabId(stored)).toBe("file:/repos/mangouste/src/App.tsx");
+  });
+
+  it("mints the history id App would", () => {
+    const stored = toStoredTab(historyTab) as StoredTab;
+    expect(storedTabId(stored)).toBe("history|/repos/mangouste");
   });
 
   it("mints the dashboard's fixed id", () => {
@@ -202,6 +222,16 @@ describe("isStoredTab", () => {
     expect(isStoredTab(7)).toBe(false);
     expect(isStoredTab(null)).toBe(false);
     expect(isStoredTab(["chat"])).toBe(false);
+  });
+});
+
+describe("isStoredTab, history", () => {
+  it("takes a history entry with a repo", () => {
+    expect(isStoredTab({ kind: "history", cwd: "/repos/mangouste" })).toBe(true);
+  });
+
+  it("drops one without", () => {
+    expect(isStoredTab({ kind: "history" })).toBe(false);
   });
 });
 

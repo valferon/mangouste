@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "../lib/editing";
 import { listDir, revealPath } from "../lib/ipc";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -41,11 +41,32 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
     [showHidden],
   );
 
-  // Reload from scratch whenever the repo or the hidden-file filter changes.
+  /** What is expanded, for the reload below, which must not re-run per toggle. */
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+
+  // The hidden-file filter changes what every directory contains, so its cache
+  // cannot survive the toggle.
   useEffect(() => {
     setChildren({});
     setExpanded(new Set());
-    if (root) void load(root);
+  }, [showHidden]);
+
+  /*
+   * A repo switch keeps the cache and re-reads over the top of it.
+   *
+   * Every key here is an absolute path, so one repo's rows cannot be mistaken
+   * for another's, and coming back to a repo shows the tree — expansions and all
+   * — that it had rather than a "Loading…" the switch has to wait out. What was
+   * open is re-read too: a directory that changed while you were away would
+   * otherwise sit stale until someone collapsed it.
+   */
+  useEffect(() => {
+    if (!root) return;
+    void load(root);
+    for (const path of expandedRef.current) {
+      if (path !== root && path.startsWith(`${root}/`)) void load(path);
+    }
   }, [root, load]);
 
   const toggle = useCallback(

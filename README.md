@@ -15,7 +15,7 @@ process, watching the same sessions.
 │ E │ Explorer     │ Chat │ file.ts │ a1b2c3 …       │ Current session  │
 │ F │  file tree   ├─────────────────────────────────┤  model · branch  │
 │ G │  src/        │                                 │  context · spend │
-│   │  README.md   │  stream-json chat with          │                  │
+│ H │  README.md   │  stream-json chat with          │                  │
 │   │              │  the claude CLI                 │ Sessions  3 live │
 │   │              │                                 │  ● playground    │
 │   │              ├─────────────────────────────────┤  ○ web-app       │
@@ -26,10 +26,12 @@ process, watching the same sessions.
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`E`, `F` and `G` are the activity rail: one left view at a time, switched with
-`Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+G`, and the button for the open
-view collapses it. All three stay mounted — glancing at the tree must not throw
-away a half-typed commit message, or the results of a sweep that took seconds.
+`E`, `F`, `G` and `H` are the activity rail — Explorer, Find, Source Control,
+Git History: one left view at a time, switched with `Ctrl+Shift+E` /
+`Ctrl+Shift+F` / `Ctrl+Shift+G` / `Ctrl+Shift+H`, and the button for the open
+view collapses it. All four stay mounted — glancing at the tree must not throw
+away a half-typed commit message, the results of a sweep that took seconds, or
+a page of history scrolled back through the year.
 
 ## What it is for
 
@@ -672,6 +674,26 @@ answers the same question in more detail, but only while it is the pane you have
 open, and "which branch am I on" is a question asked while looking at something
 else.
 
+**The chip is also the switch.** Clicking it opens the branch list above the bar:
+a filter box, local branches first and remote-tracking ones after, the current
+one ticked, and a name that matches nothing offering to create it. The same
+picker Source Control has, opened from the place the branch is already showing,
+because "which branch am I on" and "put me on another one" are one question
+asked twice. A popover rather than the menu the chip also carries on right-click:
+a repo anyone works in has dozens of branches, and a menu with no filter is a
+scroll.
+
+Nothing is discarded on the way. The checkout is `git switch`, never `git
+checkout` — `checkout <name>` also takes paths, so a branch name that happens to
+match a file would silently throw that file's changes away instead of moving HEAD
+— and a switch that would overwrite worktree changes is refused by git, in git's
+own words, in the notice at the right of the bar. Picking `origin/main` when a
+local `main` exists switches to the local one; picking a remote branch that has
+no local counterpart creates it with its upstream already set. Which of the three
+it is comes from looking the refs up rather than from the shape of the name, since
+a local branch is very often called `feature/x` and guessing there produces a
+silently wrong answer rather than an error.
+
 Clicking the sync item does the useful, safe half of a sync in each state: pull
 what is waiting, explain why it cannot be pulled, or — with nothing to take — go
 and ask the remote what it has. Not VSCode's sync, which also pushes. Pushing
@@ -735,6 +757,139 @@ here would.
 Failures of the background fetch are silent, and that is the point: offline, no
 credential helper, a lock held by your own `git` — none of them is worth a dialog
 you did not open, and the next tick tries again.
+
+## Who last touched each line
+
+`Blame` in the editor's toolbar — or Show Blame in its right-click menu — puts a
+column left of the line numbers: the author and a one-unit age on the first line
+of every run, and nothing on the lines under it. Only the first line of a run is
+labelled, because a block of twenty lines from one commit repeating one name
+twenty times is noise, and the gaps are what make the blocks read as blocks. The
+whole story — full sha, subject, author, timestamp — is in the hover, and clicking
+a line opens what else that commit touched as a diff tab.
+
+`git blame --porcelain` for the file, run in the file's own directory: an open
+editor knows the absolute path of what it is showing and nothing about which repo
+root it belongs to, and git resolves that from where the command runs. Porcelain
+repeats a commit's details only the first time it appears, which is what makes the
+payload a commit table plus one index per line rather than a 40-character sha on
+every line — on a 5000-line file that shape is the difference between a few KB
+and something bigger than the file.
+
+**Blame describes the file on disk, not the buffer.** So it is re-read on the
+mtime a save moves, and an unsaved edit dims the column instead of re-reading:
+git cannot see a draft, and an insertion above a line means every name below it is
+a row or more out of place. Dimmed and still there rather than hidden — the names
+are still right about the blocks around them, and the hover says why they no
+longer line up.
+
+Lines you have not committed come back from git under an all-zero sha, and they
+are labelled `Uncommitted` in the same amber the status bar marks uncommitted work
+with, rather than left blank: "this line is yours and unsaved" is the most useful
+thing the column can say about it. A file git has no history for — an untracked
+one — fails, and git's own refusal goes in the editor bar, where it is a note
+rather than an error: it does not stop you editing the file.
+
+The column is one DOM node per line with no virtualisation, like the gutter beside
+it, so the Rust side stops at 20 000 lines — past that the column runs out, which
+is visible and cheap, where tens of thousands of nodes for a generated file would
+not be. It is a third scroller driven from the textarea's own `scrollTop`, for the
+same reason the gutter is one: a column with a scrollbar of its own drifts out of
+step with the text it describes. And the on/off switch lives in a module store
+rather than in `App` or in each editor, because file editors stay mounted while
+hidden — a per-editor flag would leave the tab behind still showing a column that
+was turned off in the tab in front.
+
+## The whole history, at the width the graph needs
+
+`Git History` is its own view on the activity rail — `Ctrl+Shift+H`, one button
+below Source Control — and not a fourth section inside it. Two questions, two
+places: what is staged and what a change did to the working tree is Source
+Control; what landed, when, on which branch and in which commit is here. A
+history scrolled back through the year would otherwise push the staging list
+off the top of the pane every time it was used.
+
+Source Control has no commit list of its own any more. It had one — the last
+150 commits, one line each, at the bottom of the pane — and once this view
+existed it was the same shas twice, one of them without the graph, taking room
+from the change lists that pane is for.
+
+It has two shapes. At rail width the filter boxes wrap, the author column goes,
+dates shorten to `2h` / `3d`, and the commit detail sits under the list. The ⧉
+button on its header opens the same history as a full-width tab, which is two
+columns:
+
+```
+┌ History ───────────────────────────────────────────────────────────────────┐
+│ [Message……] [Author…] [Path…]              [All branches ▾]  ⟳             │
+├──────────────────────────────────────────────┬─────────────────────────────┤
+│ ●  main origin/main  feat: the history …     │ f3866d8  main origin/main   │
+│ ├●  chore: release v0.1.15         val   2h  │                 Whole patch │
+│ ●│  fix: a merge's second parent …  ana  5h  │ feat: the history tab draws │
+│ ●│  tag: v0.1.14  feat: a commit's … val  1d │ its own graph               │
+│ │●  refactor: lane assignment …     val  1d  │                             │
+│ ●╯  fix: the filter box treated …   ana  2d  │ Author   val <val@…>  11:48 │
+│                                              ├─────────────────────────────┤
+│                              [Load 200 more] │ 7 FILES CHANGED             │
+│                                              │  M App.tsx        src +55 -3│
+│                                              │  A HistoryPane.tsx …  +486  │
+└──────────────────────────────────────────────┴─────────────────────────────┘
+```
+
+**The graph is drawn from what `git log` already said.** Every commit carries its
+parents, so the lanes are a single left-to-right pass over the loaded page:
+`layoutGraph` in `src/lib/graph.ts` allocates a lane per line of development,
+frees it when the line ends, and emits the segments between two rows as three
+kinds — one that passes the row by, one that ends at its commit, one that leaves
+it. That split is what lets a merge draw its second parent as a curve out of the
+node instead of a line through it. Pure and separately tested, because the
+awkward shapes — an octopus merge, two branches converging, a parent below the
+bottom of the loaded page — are cheap to write down as a list of commits in a
+test and expensive to reproduce by clicking.
+
+Lane colours are the theme's own accents aliased as `--graph-1 … --graph-8`, not
+a palette of their own: a light theme draws its graph in its light colours, and
+nothing has to be regenerated when `themes.css` is.
+
+**A commit's files are a second read, not part of the first.** Selecting a row
+runs one `git_commit_detail` — message body, committer, and the changed files
+with their `+`/`−` counts from a single `git show --raw --numstat -z`. A page of
+200 commits is 200 `git show`s if the log carries the files with it, to render a
+list nobody has clicked in yet. Clicking one of those files opens *that file's*
+patch (`git show <sha> -- <path>`), which is the thing the sidebar could never
+do: `git show` on a release commit is a megabyte of patch to read one hunk out
+of. `Whole patch` is still there for when the commit is the unit you want.
+
+Merges are diffed against their first parent throughout (`-m --first-parent`).
+Git's default for a merge is the combined diff, which is empty unless the merge
+had conflicts — so a file changed on the branch that was merged would list and
+then open blank.
+
+**The filters are `git log`'s own.** Message, author and path go to `--grep`,
+`--author` and a pathspec; the branch picker replaces `--all` with one starting
+point. Anything typed is matched as text and never as a regex — `--fixed-strings`
+and `--regexp-ignore-case` — because `fix(a.b)` pasted from a subject line should
+find that subject line, and a filter box that quietly accepts regexes is a filter
+box that quietly drops commits. A blank box is not a filter: `--author=` matches
+everything rather than nothing, so empty has to mean absent before it reaches
+git.
+
+Both shapes are the same component, told which one to be. A prop rather than a
+container query, because the two differ in *what they show* and not only in how
+it is arranged — the rail view drops a column the tab keeps.
+
+Hidden, neither runs any git. Both stay mounted while hidden — the rail view
+like the other three, the tab like a file tab — because a loaded page, a typed
+filter and the selected commit are worth more than the memory they cost, and
+each re-reads on the first frame it is visible again if anything it was asked
+changed meanwhile. One tab per repo, keyed `history|<cwd>`, and it comes back on
+relaunch: unlike a diff tab there is nothing derived to store, only which repo
+it was.
+
+Reads only. Nothing here rewrites history or moves a ref — no revert, no
+cherry-pick, no checking out a commit. Those belong next to the working tree
+they would disturb, which is Source Control, one button up the rail, with the
+change lists in view.
 
 ## Knowing there is a newer mangouste
 
@@ -1021,7 +1176,8 @@ backend.
 
 ## Not implemented yet
 
-- Commit lane graph — `parents` and `refs` are plumbed through, nothing draws them
+- Reverting, cherry-picking or checking out a commit from Git History. It reads;
+  Source Control writes — see The whole history above
 - Streaming text. `stream_event` deltas drive the spinner and the "preparing
   tool" state, but prose still appears when the turn settles, not as it arrives
 - Quick-open over file names. The palette ranks repos and sessions; `search_files`
