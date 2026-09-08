@@ -11,13 +11,15 @@ import { Markdown } from "./Markdown";
 /**
  * How often the releases endpoint is asked whether there is a newer tag.
  *
- * Six hours, and once on launch. A desktop app is not a page that gets a fresh
- * build every hour — the news being checked for lands a handful of times a
- * month — so anything faster is spending someone's anonymous GitHub quota (60
- * requests an hour per IP, shared with everything else on that address) to be
- * told the same thing.
+ * An hour, and once on launch. This was six hours on the argument that releases
+ * land a handful of times a month so nothing faster could learn anything new —
+ * true of the average tick and wrong about the one that matters: the release
+ * that goes out while the app is already open, where six hours is how long the
+ * chip stays absent from a window sitting in front of somebody. An hour is one
+ * request in sixty of the anonymous GitHub quota (60 an hour per IP, shared with
+ * everything else on that address), which is not a budget worth saving.
  */
-const CHECK_MS = 6 * 60 * 60_000;
+const CHECK_MS = 60 * 60_000;
 
 /**
  * How long after launch the first check waits.
@@ -27,6 +29,17 @@ const CHECK_MS = 6 * 60 * 60_000;
  * window. The news is hours old at best; it can wait twenty seconds.
  */
 const FIRST_CHECK_MS = 20_000;
+
+/**
+ * The floor between two unprompted checks.
+ *
+ * Coming back to the window is the other moment worth checking on — it is
+ * exactly when the release cut in a browser or a terminal a minute ago becomes
+ * findable — but focus is a thing that happens dozens of times an hour, and the
+ * quota is per IP, not per app. So the timer and the focus both go through this:
+ * whichever asks second within the window is told the answer is still fresh.
+ */
+const MIN_GAP_MS = 15 * 60_000;
 
 const DISMISSED_KEY = KEYS.release.updateDismissed;
 const LAST_RUN_KEY = KEYS.release.lastRunVersion;
@@ -79,6 +92,15 @@ export function UpdateStatus({ enabled, onRegister }: UpdateStatusProps) {
   const [sheet, setSheet] = useState<Sheet | null>(null);
   /** Versions waved away, mirrored in localStorage so a restart honours them. */
   const dismissed = useRef(readString(DISMISSED_KEY));
+  /**
+   * When a check — of either kind — last went out.
+   *
+   * Seeded with the mount rather than with `0`, because the launch check is
+   * twenty seconds away and clicking into the window before it lands is the
+   * normal thing to do: an unseeded stamp would turn that click into a second
+   * request for the answer already on its way.
+   */
+  const lastCheck = useRef(Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +123,9 @@ export function UpdateStatus({ enabled, onRegister }: UpdateStatusProps) {
    * somebody is waiting on that one.
    */
   const checkQuietly = useCallback(async (version: string) => {
+    // Stamped before the request, not after: two of these starting together
+    // would both see the old stamp and both go out.
+    lastCheck.current = Date.now();
     try {
       const release = await fetchRelease();
       setAvailable(shouldAnnounce(release, version, dismissed.current) ? release : null);
@@ -112,6 +137,9 @@ export function UpdateStatus({ enabled, onRegister }: UpdateStatusProps) {
   /** Help ▸ Check for Updates. Reports what it finds either way. */
   const checkNow = useCallback(async () => {
     const version = current || (await getVersion().catch(() => ""));
+    // Counts as a check, so returning to the window straight afterwards does
+    // not immediately ask the same question again.
+    lastCheck.current = Date.now();
     setSheet({ kind: "checking" });
     try {
       const release = await fetchRelease();
@@ -163,9 +191,29 @@ export function UpdateStatus({ enabled, onRegister }: UpdateStatusProps) {
     if (!enabled || !current) return;
     const first = window.setTimeout(() => void checkQuietly(current), FIRST_CHECK_MS);
     const timer = window.setInterval(() => void checkQuietly(current), CHECK_MS);
+    /**
+     * Coming back to the window, when the last check is old enough to be worth
+     * redoing.
+     *
+     * The launch check answers "was there news before I started", and the timer
+     * answers it again later; neither covers the case this exists for, which is
+     * the release published in a browser or a terminal while this window sat
+     * behind them. `focus` alone would miss a window that was never unfocused —
+     * a second display, or another app taking the keyboard without taking the
+     * screen — so the page's own visibility is listened for as well.
+     */
+    const onReturn = () => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastCheck.current < MIN_GAP_MS) return;
+      void checkQuietly(current);
+    };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
     return () => {
       window.clearTimeout(first);
       window.clearInterval(timer);
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
     };
   }, [enabled, current, checkQuietly]);
 
