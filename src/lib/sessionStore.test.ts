@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanFlags, cleanMarks } from "./sessionStore";
+import { cleanFlags, cleanMarks, pinnedFirst } from "./sessionStore";
 
 /**
  * These two guards stand between `localStorage` and every status dot in the
@@ -46,5 +46,36 @@ describe("cleanFlags", () => {
   it("drops anything that is not a boolean", () => {
     // Truthy strings are the trap: "false" would archive a row forever.
     expect(cleanFlags({ a: true, b: "false", c: 1, d: null })).toEqual({ a: true });
+  });
+});
+
+/**
+ * Pinning is the promise that a row stays where you can see it, so the two
+ * properties worth holding are that pins come first and that nothing else moves.
+ */
+describe("pinnedFirst", () => {
+  const rows = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  const pinnedIds = (ids: string[]) => (id: string) => ids.includes(id);
+
+  it("hoists pinned rows, keeping the scan order within each half", () => {
+    expect(pinnedFirst(rows, pinnedIds(["c", "b"])).map((r) => r.id)).toEqual([
+      "b",
+      "c",
+      "a",
+      "d",
+    ]);
+  });
+
+  it("returns the same array when nothing is pinned, so React sees no change", () => {
+    expect(pinnedFirst(rows, pinnedIds([]))).toBe(rows);
+  });
+
+  it("leaves an all-pinned list in its original order", () => {
+    expect(pinnedFirst(rows, pinnedIds(["a", "b", "c", "d"])).map((r) => r.id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
   });
 });

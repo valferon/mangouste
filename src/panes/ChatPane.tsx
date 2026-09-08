@@ -24,6 +24,7 @@ import {
   onClaudeStderr,
   onClaudeToolActivity,
   readSessionTranscript,
+  readSessionWindow,
   searchFiles,
 } from "../lib/ipc";
 import {
@@ -58,6 +59,7 @@ import { ControlPanel } from "./ControlPanels";
 import { Markdown } from "./Markdown";
 import { DiffView, ToolDiff, toolDiffLines } from "./Viewer";
 import { highlightCode, highlightLines, languageForPath, TOOL_HIGHLIGHT_MAX } from "../lib/highlight";
+import { revealer } from "../lib/reveal";
 import {
   classifyOutput,
   parseNumberedLines,
@@ -115,6 +117,11 @@ interface ChatPaneProps {
   resume: string | null;
   /** Transcript path backing `resume`, used to render history. */
   resumeFile: string | null;
+  /**
+   * Where in the transcript to open, when something asked for a specific moment
+   * rather than for the session as a whole. Null means the tail, as always.
+   */
+  anchor: ChatAnchor | null;
   onSessionId: (sessionId: string) => void;
   onOpenFile: (path: string) => void;
   /**
@@ -247,6 +254,43 @@ const MODELS = [MODEL_DEFAULT, "fable", "opus", "sonnet", "haiku"] as const;
 /// Conversational entries loaded when resuming. Transcripts reach thousands of
 /// records, and only the recent tail is worth rendering.
 const HISTORY_LIMIT = 400;
+
+/**
+ * Records rendered either side of an anchored record, and the step a "load
+ * earlier" click adds.
+ *
+ * Smaller than `HISTORY_LIMIT` per side on purpose: an anchored view exists to
+ * put one turn on screen with enough around it to read, and every extra record
+ * is one more row between the match and the top of the viewport.
+ */
+const WINDOW_RECORDS = 150;
+
+/**
+ * Where in a transcript a pane was asked to open.
+ *
+ * Minted by whatever made the request (a transcript search hit, today) rather
+ * than by the pane, so asking twice for the same offset — clicking the same
+ * match again after scrolling away — re-jumps instead of being deduplicated
+ * into nothing. That is what `token` is for; the pane only ever compares it.
+ */
+export interface ChatAnchor {
+  /** The session this request is for; a pane ignores anyone else's. */
+  sessionId: string;
+  /** Byte offset of the record to open on, or null for the live tail. */
+  offset: number | null;
+  token: number;
+}
+
+/** An anchored view of the log, and what is missing either side of it. */
+interface AnchoredView {
+  offset: number;
+  before: number;
+  after: number;
+  /** Item key the log is scrolled to and marks, from `hydrate`. */
+  key: string | null;
+  atStart: boolean;
+  atEnd: boolean;
+}
 
 /**
  * Hard cap on rendered items.
@@ -890,10 +934,21 @@ const ToolBlock = memo(function ToolBlock({
   onOpenFile: (path: string) => void;
   level: FeedbackLevel;
 }) {
-  const [open, setOpen] = useState(() => opensTools(level));
-  // Same as the thinking fold: the dial wins over an earlier click, so raising
-  // the level opens the rows you were already looking at.
-  useEffect(() => setOpen(opensTools(level)), [level]);
+  // Closed until the reveal queue gets to it, even at `verbose`. Same as the
+  // thinking fold in that the dial wins over an earlier click, so raising the
+  // level opens the rows you were already looking at — but opened a few per
+  // frame, newest first, rather than all in one render. A live row waits one
+  // frame at most; a 400-row history fills in above the fold over a second or
+  // so with the app still answering. Lowering the level closes at once, which
+  // is cheap.
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!opensTools(level)) {
+      setOpen(false);
+      return;
+    }
+    return revealer.add(() => setOpen(true));
+  }, [level]);
   // Blocks are appended once and never mutated, so this survives re-renders
   // caused by a result arriving — the stringify/regex work runs once per block.
   const summary = useMemo(() => toolSummary(block.name, block.input), [block]);
@@ -981,9 +1036,20 @@ const ToolBlock = memo(function ToolBlock({
 function hydrate(
   records: ClaudeFrame[],
   generation: number,
+  /**
+   * Index of the record the view should open on, from a search hit.
+   *
+   * Reported back as the key of the item it produced, because records and items
+   * are not one to one: a tool-result echo renders nothing, an assistant record
+   * renders one row per block. When the anchored record itself renders nothing,
+   * the first item after it stands in — it is the next thing you can actually
+   * see, and it is one line from what matched.
+   */
+  anchorAt?: number,
 ): {
   items: ChatItem[];
   toolResults: Record<string, { text: string; isError: boolean }>;
+  anchorKey: string | null;
 } {
   const items: ChatItem[] = [];
   const toolResults: Record<string, { text: string; isError: boolean }> = {};
@@ -991,7 +1057,7 @@ function hydrate(
   let key = 0;
   const historyKey = () => `h${generation}-${key++}`;
 
-  for (const record of records) {
+  const fold = (record: ClaudeFrame) => {
     const blocks = blocksOf(record);
     if (record.type === "assistant") {
       // Thinking is written to disk as a signature and an empty string, so a
@@ -1004,9 +1070,9 @@ function hydrate(
           : block,
       );
       if (restored.length > 0) items.push({ kind: "assistant", key: historyKey(), blocks: restored });
-      continue;
+      return;
     }
-    if (record.type !== "user") continue;
+    if (record.type !== "user") return;
 
     const results = blocks.filter(isToolResult);
     if (results.length > 0) {
@@ -1016,13 +1082,27 @@ function hydrate(
           isError: Boolean(result.is_error),
         };
       }
-      continue; // Tool-result echo, not something the human typed.
+      return; // Tool-result echo, not something the human typed.
     }
     const text = blocks.filter(isText).map((b) => b.text).join("");
     if (text.trim()) items.push({ kind: "user", key: historyKey(), text });
-  }
+  };
 
-  return { items, toolResults };
+  let anchorKey: string | null = null;
+  let wanted = anchorAt !== undefined;
+  for (const [index, record] of records.entries()) {
+    const before = items.length;
+    fold(record);
+    if (wanted && index >= (anchorAt as number) && items.length > before) {
+      anchorKey = items[before].key;
+      wanted = false;
+    }
+  }
+  // The anchor was at the very end, or everything from it on renders nothing:
+  // the last visible row is the closest place to put you.
+  if (wanted && items.length > 0) anchorKey = items[items.length - 1].key;
+
+  return { items, toolResults, anchorKey };
 }
 
 /**
@@ -1360,6 +1440,7 @@ function PermissionCard({
 const Timeline = memo(function Timeline({
   entries,
   toolResults,
+  anchorKey,
   onOpenFile,
   onDecide,
   panelContext,
@@ -1368,6 +1449,14 @@ const Timeline = memo(function Timeline({
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
+  /**
+   * Item key to mark as what a search was looking for, or null.
+   *
+   * One item can produce several rows — an assistant record renders one per
+   * block — and all of them are marked: the record is what matched, and marking
+   * only its first block would leave the sentence you searched for unpainted.
+   */
+  anchorKey: string | null;
   onOpenFile: (path: string) => void;
   onDecide: (
     request: PermissionRequest,
@@ -1390,6 +1479,12 @@ const Timeline = memo(function Timeline({
           key={entry.key}
           className="timeline-row"
           data-kind={entry.kind}
+          data-anchor={
+            anchorKey !== null &&
+            (entry.key === anchorKey || entry.key.startsWith(`${anchorKey}-`))
+              ? "true"
+              : undefined
+          }
           onContextMenu={(event) => {
             const text = entryText(entry);
             menu.openContextMenu(event, [
@@ -1508,6 +1603,7 @@ export const ChatPane = memo(function ChatPane({
   cold,
   resume,
   resumeFile,
+  anchor,
   onSessionId,
   onOpenFile,
   onSystemMessage,
@@ -1525,6 +1621,16 @@ export const ChatPane = memo(function ChatPane({
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
     {},
   );
+  /**
+   * The log is showing a window around one record rather than the tail.
+   *
+   * Null is the normal case and the one every other part of this pane assumes:
+   * new frames append to the end of what is on screen, and the end of what is on
+   * screen is the end of the conversation. While this is set that stops being
+   * true, which is why the banner it draws is not decoration — it is the only
+   * thing telling you that the rows below are not the newest ones.
+   */
+  const [anchored, setAnchored] = useState<AnchoredView | null>(null);
   const [draft, setDraft] = useState("");
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   const [attachments, setAttachments] = useState<PendingImage[]>([]);
@@ -1658,6 +1764,24 @@ export const ChatPane = memo(function ChatPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stickyRef = useRef(true);
+  /**
+   * Pin the log to its tail, or let it go.
+   *
+   * The browser's scroll anchoring is switched off while pinned. Anchoring holds
+   * whichever row sits at the top of the viewport still when rows around it
+   * grow; with the log at its tail that means every card `verbose` opens below
+   * that row pushes the bottom away, and the scroll event the adjustment raises
+   * reads as the user scrolling up, which unpins before the observer below can
+   * re-pin. Reading history is the opposite case, and there anchoring is
+   * exactly what keeps the row being read in place while the rows above it
+   * open — so it comes back the moment the log is unpinned.
+   */
+  const setSticky = useCallback((sticky: boolean) => {
+    stickyRef.current = sticky;
+    const log = logRef.current;
+    // Empty string defers to the stylesheet, which is where `none` lives.
+    if (log) log.style.overflowAnchor = sticky ? "" : "auto";
+  }, []);
   const sequenceRef = useRef(0);
   const nextKey = () => `item-${sequenceRef.current++}`;
 
@@ -1672,12 +1796,20 @@ export const ChatPane = memo(function ChatPane({
    */
   const resumeRef = useRef(resume);
   const resumeFileRef = useRef(resumeFile);
+  /** Read at spawn time, so a pane warming up honours a request made while cold. */
+  const anchorRef = useRef(anchor);
+  /** Mirror of `anchored`, for the effects that must not depend on it. */
+  const anchoredRef = useRef<AnchoredView | null>(null);
+  /** Token of the request already served; requests are applied once each. */
+  const appliedAnchorRef = useRef(0);
   /** Latest callbacks, so the frame handler and its subscriptions stay stable. */
   const onSessionIdRef = useRef(onSessionId);
   const onSystemMessageRef = useRef(onSystemMessage);
   useEffect(() => {
     resumeRef.current = resume;
     resumeFileRef.current = resumeFile;
+    anchorRef.current = anchor;
+    anchoredRef.current = anchored;
     onSessionIdRef.current = onSessionId;
     onSystemMessageRef.current = onSystemMessage;
   });
@@ -1724,6 +1856,89 @@ export const ChatPane = memo(function ChatPane({
   useEffect(() => {
     logDebug(chatId, "phase", phase);
   }, [chatId, phase]);
+
+  /**
+   * Render stored transcript history into the log.
+   *
+   * Two shapes, because there are two questions. `view` null reads the tail —
+   * "show me this session" — and *prepends* it, so a frame that arrived while
+   * the read was in flight stays where it landed. `view` set reads a window
+   * around one record — "show me this moment in it" — and replaces the log,
+   * because a window has a defined end and appending the tail to it would claim
+   * the two were contiguous when there may be a thousand records between them.
+   *
+   * The replacing form drops anything that streamed in before it. That is worth
+   * saying out loud rather than working around: the rows are still on disk, and
+   * the banner's "latest" re-reads them. Working around it would mean tracking
+   * provenance per item, and the case is a search hit clicked while the same
+   * session happens to be mid-turn.
+   */
+  const loadHistory = useCallback(
+    async (
+      generation: number,
+      view: { offset: number; before: number; after: number } | null,
+      /**
+       * Replace the log rather than prepend to it. Always true for a window, and
+       * true for the tail only when leaving one.
+       *
+       * Passed in rather than read from `anchoredRef` here, because "here" is
+       * after an await: by then a `setAnchored` from the same click has almost
+       * certainly rendered, and "almost certainly" is not a basis for deciding
+       * whether to throw away the rows on screen.
+       */
+      replace = false,
+    ) => {
+      const path = resumeFileRef.current;
+      if (!path) return;
+      try {
+        if (view === null) {
+          const records = await readSessionTranscript(path, HISTORY_LIMIT);
+          if (generation !== startGenerationRef.current) return;
+          const { items: history, toolResults: results } = hydrate(records, generation);
+          if (replace) {
+            // Leaving a window: back to the tail, and back to following it.
+            setSticky(true);
+            setAnchored(null);
+            setItems(history);
+            setToolResults(results);
+            return;
+          }
+          if (history.length === 0) return;
+          setItems((current) => [...history, ...current]);
+          setToolResults((current) => ({ ...results, ...current }));
+          return;
+        }
+        const window = await readSessionWindow(path, view.offset, view.before, view.after);
+        // A window always replaces: it has a defined end, and appending the tail
+        // to it would claim the two were contiguous.
+        if (generation !== startGenerationRef.current) return;
+        const {
+          items: history,
+          toolResults: results,
+          anchorKey,
+        } = hydrate(window.entries, generation, window.anchor);
+        // Before the commit, or the resize observer re-pins to the bottom on the
+        // same frame the window lands and the scroll below fights it.
+        setSticky(false);
+        setItems(history);
+        setToolResults(results);
+        setAnchored({
+          offset: view.offset,
+          before: view.before,
+          after: view.after,
+          key: anchorKey,
+          atStart: window.atStart,
+          atEnd: window.atEnd,
+        });
+      } catch (e) {
+        if (generation !== startGenerationRef.current) return;
+        // Surfaced rather than swallowed: a silent catch here is what made the
+        // blank-on-resume bug invisible.
+        onSystemMessageRef.current(`Could not load transcript history: ${e}`);
+      }
+    },
+    [setSticky],
+  );
 
   /** An undecided prompt is the one state that needs a human right now. */
   const awaitingPermission = useMemo(
@@ -1815,22 +2030,23 @@ export const ChatPane = memo(function ChatPane({
     // Render the stored transcript first so a resumed session is not a blank
     // pane while the process boots. This needs the transcript PATH — passing the
     // session uuid here silently resolved to a non-existent relative file.
+    //
+    // A request that arrived while this pane was cold is honoured here rather
+    // than dropped: clicking a search match on a restored tab is exactly the
+    // case where the pane has never been shown and the spawn is the first read.
+    const request = anchorRef.current;
+    setAnchored(null);
     if (resumeFilePath) {
-      void readSessionTranscript(resumeFilePath, HISTORY_LIMIT)
-        .then((records) => {
-          // A newer start() already owns this pane; drop these results.
-          if (generation !== startGenerationRef.current) return;
-          const { items: history, toolResults: historyResults } = hydrate(records, generation);
-          if (history.length === 0) return;
-          setItems((current) => [...history, ...current]);
-          setToolResults((current) => ({ ...historyResults, ...current }));
-        })
-        .catch((e) => {
-          if (generation !== startGenerationRef.current) return;
-          // Surfaced rather than swallowed: a silent catch here is what made the
-          // blank-on-resume bug invisible.
-          onSystemMessageRef.current(`Could not load transcript history: ${e}`);
+      if (request && request.offset !== null) {
+        appliedAnchorRef.current = request.token;
+        void loadHistory(generation, {
+          offset: request.offset,
+          before: WINDOW_RECORDS,
+          after: WINDOW_RECORDS,
         });
+      } else {
+        void loadHistory(generation, null);
+      }
     }
 
     setPhase(resumeTarget ? "attaching" : "starting claude");
@@ -1910,7 +2126,7 @@ export const ChatPane = memo(function ChatPane({
     // live process — the mode arms the next restart, and the resume write-back
     // (null -> uuid, from this pane's own onSessionId) is already attached.
     },
-    [chatId, cwd, appendItem],
+    [chatId, cwd, appendItem, loadHistory],
   );
 
   const start = useCallback(() => spawn("attach"), [spawn]);
@@ -2319,7 +2535,7 @@ export const ChatPane = memo(function ChatPane({
           void permissionRespond(request.id, "allow");
           return;
         }
-        stickyRef.current = true;
+        setSticky(true);
         setPhase(
           request.toolName === QUESTION_TOOL
             ? "awaiting your answer"
@@ -2351,7 +2567,7 @@ export const ChatPane = memo(function ChatPane({
     return () => {
       for (const subscription of subscriptions) void subscription.then((fn) => fn());
     };
-  }, [chatId, handleFrame, appendItem, isCurrent]);
+  }, [chatId, handleFrame, appendItem, isCurrent, setSticky]);
 
   /* ---------- scrolling ---------- */
 
@@ -2360,18 +2576,20 @@ export const ChatPane = memo(function ChatPane({
     if (!element) return;
     const distanceFromBottom =
       element.scrollHeight - element.scrollTop - element.clientHeight;
-    stickyRef.current = distanceFromBottom < STICKY_THRESHOLD_PX;
-  }, []);
+    const sticky = distanceFromBottom < STICKY_THRESHOLD_PX;
+    if (sticky !== stickyRef.current) setSticky(sticky);
+  }, [setSticky]);
 
   /*
    * Re-pin on measured height, not on state.
    *
    * Keying this off `items` missed everything that grows the log without adding
    * to it: a tool result landing in a card that `verbose` holds open, the dial
-   * flipping to `verbose` and opening every card at once (a post-paint effect,
-   * so it lands after any effect here has run), an attachment thumbnail
-   * decoding, the composer growing into the log's space. The observer sees all
-   * of them as the same thing, and fires before paint, so there is no flash.
+   * flipping to `verbose` and the reveal queue opening cards frame after frame
+   * (each its own commit, long after any effect here has run), an attachment
+   * thumbnail decoding, the composer growing into the log's space. The observer
+   * sees all of them as the same thing, and fires before paint, so there is no
+   * flash.
    *
    * A hidden pane measures zero; being shown again is a resize too, which is
    * what re-pins turns that streamed in while another tab was up.
@@ -2387,6 +2605,49 @@ export const ChatPane = memo(function ChatPane({
     observer.observe(log);
     return () => observer.disconnect();
   }, []);
+
+  /*
+   * Serve a request to open somewhere specific — a search hit, today.
+   *
+   * Once per token, and never while the pane is cold: a cold pane has rendered
+   * nothing and its spawn reads `anchorRef` itself, so doing it here as well
+   * would read the same window twice. Whichever of the two gets there first
+   * marks the token, and the other skips.
+   */
+  useEffect(() => {
+    if (!anchor || anchor.token === appliedAnchorRef.current || cold) return;
+    appliedAnchorRef.current = anchor.token;
+    if (anchor.offset === null) {
+      // "Show me the session" only means something while a window is up: the
+      // tail is what an unanchored log already shows, and re-reading it would
+      // throw away whatever has streamed in since.
+      if (!anchoredRef.current) return;
+      void loadHistory(startGenerationRef.current, null, true);
+      return;
+    }
+    void loadHistory(startGenerationRef.current, {
+      offset: anchor.offset,
+      before: WINDOW_RECORDS,
+      after: WINDOW_RECORDS,
+    });
+  }, [anchor, cold, loadHistory]);
+
+  /*
+   * Put the anchored row on screen, once per window.
+   *
+   * In a frame rather than in the commit that created it: the row is in the DOM
+   * by then, and `block: "center"` leaves room above for the reveal queue to go
+   * on opening cards without pushing the row back off the top of the viewport.
+   */
+  useEffect(() => {
+    if (!anchored?.key) return;
+    const frame = window.requestAnimationFrame(() => {
+      bodyRef.current?.querySelector('[data-anchor="true"]')?.scrollIntoView({
+        block: "center",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [anchored]);
 
   // Coming to the front means you want to type: a new session, or a tab switch
   // back to this one, should not need a click in the composer first.
@@ -2499,7 +2760,7 @@ export const ChatPane = memo(function ChatPane({
     if (parsed && native) {
       setDraft("");
       setCaret(0);
-      stickyRef.current = true;
+      setSticky(true);
       appendItem({ kind: "user", key: nextKey(), text });
       appendItem({ kind: "panel", key: nextKey(), command: native, args: parsed.args });
       logDebug(chatId, "send", `/${native} · answered in-app`);
@@ -2509,7 +2770,7 @@ export const ChatPane = memo(function ChatPane({
     setDraft("");
     setCaret(0);
     setAttachments([]);
-    stickyRef.current = true;
+    setSticky(true);
     appendItem({
       kind: "user",
       key: nextKey(),
@@ -2548,7 +2809,7 @@ export const ChatPane = memo(function ChatPane({
       setPhase("send failed");
       onSystemMessage(`send failed: ${e}`);
     }
-  }, [draft, attachments, alive, chatId, appendItem]);
+  }, [draft, attachments, alive, chatId, appendItem, setSticky]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -2825,6 +3086,65 @@ export const ChatPane = memo(function ChatPane({
 
   return (
     <div className="chat">
+      {/* Outside the scroller on purpose: it is the only thing saying that the
+          rows below are not the newest ones, so it has to stay put while you
+          read them. */}
+      {anchored && (
+        <div className="anchor-banner">
+          <span className="anchor-note">
+            {anchored.atStart ? "from the start of the session" : "part-way in"}
+            {anchored.atEnd ? " · up to the live end" : ""}
+          </span>
+          <button
+            className="toggle-button"
+            disabled={anchored.atStart || running}
+            title={
+              running
+                ? "A turn is streaming into this pane; wait for it to finish."
+                : "Read further back from here"
+            }
+            onClick={() =>
+              void loadHistory(startGenerationRef.current, {
+                offset: anchored.offset,
+                before: anchored.before + WINDOW_RECORDS,
+                after: anchored.after,
+              })
+            }
+          >
+            ↑ earlier
+          </button>
+          <button
+            className="toggle-button"
+            disabled={anchored.atEnd || running}
+            title={
+              running
+                ? "A turn is streaming into this pane; wait for it to finish."
+                : "Read further forward from here"
+            }
+            onClick={() =>
+              void loadHistory(startGenerationRef.current, {
+                offset: anchored.offset,
+                before: anchored.before,
+                after: anchored.after + WINDOW_RECORDS,
+              })
+            }
+          >
+            later ↓
+          </button>
+          <button
+            className="toggle-button"
+            disabled={running}
+            title={
+              running
+                ? "A turn is streaming into this pane; wait for it to finish."
+                : "Back to the end of the conversation"
+            }
+            onClick={() => void loadHistory(startGenerationRef.current, null, true)}
+          >
+            latest
+          </button>
+        </div>
+      )}
       <div
         className="chat-log selectable"
         ref={logRef}
@@ -2837,6 +3157,7 @@ export const ChatPane = memo(function ChatPane({
           <Timeline
             entries={timeline}
             toolResults={toolResults}
+            anchorKey={anchored?.key ?? null}
             onOpenFile={onOpenFile}
             onDecide={decide}
             panelContext={panelContext}

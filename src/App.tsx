@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Resizer, usePersistentSize } from "./layout/Split";
-import { ChatPane } from "./panes/ChatPane";
+import { ChatPane, type ChatAnchor } from "./panes/ChatPane";
 import { Dashboard } from "./panes/Dashboard";
 import { FileTree } from "./panes/FileTree";
 import { BranchStatus } from "./panes/BranchStatus";
@@ -1351,12 +1351,34 @@ function Workbench() {
 
   /* ---------- session switching ---------- */
 
+  /**
+   * Where the chat pane for a session should open.
+   *
+   * App-level rather than a tab field because opening a session is idempotent:
+   * `openSessionTab` focuses a session already up instead of adding a second
+   * tab, so a request carried in the tab record would be ignored for exactly
+   * the sessions you are most likely to jump around inside. As a prop it
+   * reaches the mounted pane either way, and the token makes the same request
+   * twice into two requests.
+   */
+  const [chatAnchor, setChatAnchor] = useState<ChatAnchor | null>(null);
+  const anchorTokenRef = useRef(0);
+
   const resumeSessionFromSidebar = useCallback(
-    async (session: SessionMeta) => {
+    async (session: SessionMeta, anchor?: number) => {
       // A session belongs to the directory it was started in; follow it there so
       // the file tree and git panes stay in sync with the chat.
       const cwd = session.cwd ? await repoRoot(session.cwd) : activeRepo;
       setActiveRepo(cwd);
+      // Where in the transcript to open, published before the tab so a pane
+      // that mounts for this click already has it. Set on every open, not only
+      // an anchored one: opening a session plainly means "show me the session",
+      // which is how a pane parked on an old search hit gets back to the end.
+      setChatAnchor({
+        sessionId: session.id,
+        offset: anchor ?? null,
+        token: (anchorTokenRef.current += 1),
+      });
       // Opening is idempotent: a session already up is focused, not respawned,
       // so two processes can never append to one transcript.
       openSessionTab(cwd, session.id, session.file);
@@ -1448,7 +1470,7 @@ function Workbench() {
      panes are not re-rendered by fresh inline arrows on every App render. */
   const handleSelectRepo = useCallback((path: string) => void selectRepo(path), [selectRepo]);
   const handleResume = useCallback(
-    (session: SessionMeta) => void resumeSessionFromSidebar(session),
+    (session: SessionMeta, anchor?: number) => void resumeSessionFromSidebar(session, anchor),
     [resumeSessionFromSidebar],
   );
   const handleNewSession = useCallback(
@@ -2231,6 +2253,9 @@ function Workbench() {
                       cold={coldTabs.has(tab.id)}
                       resume={tab.sessionId}
                       resumeFile={tab.resumeFile}
+                      // A request names its session, so the pane for a different
+                      // one ignores it instead of jumping.
+                      anchor={chatAnchor?.sessionId === tab.sessionId ? chatAnchor : null}
                       onSessionId={sessionIdHandlerFor(tab.id)}
                       onOpenFile={openFileHere}
                       onSystemMessage={setSystemMessage}
@@ -2356,6 +2381,7 @@ function Workbench() {
             onSelectRepo={handleSelectRepo}
             onResume={handleResume}
             onNewSession={handleNewSession}
+            onOpenFile={openFileHere}
           />
           </PaneBoundary>
         </div>

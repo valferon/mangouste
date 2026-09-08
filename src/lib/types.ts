@@ -97,11 +97,90 @@ export interface SessionHit {
   dirName: string;
   /** Conversational records that contained at least one term. */
   matchCount: number;
-  /** Matching text, trimmed to a window around the first term. */
-  snippet: string;
-  /** `user` | `assistant` — who said the snippet. */
+  /** Every distinct match found, first few only, oldest first. */
+  snippets: SnippetHit[];
+}
+
+/**
+ * One matching record, and where in the transcript to find it again.
+ *
+ * `offset` is what makes a hit navigable rather than merely informative: it is
+ * the byte offset of the record's line, which `readSessionWindow` turns back
+ * into the conversation around it.
+ */
+export interface SnippetHit {
+  offset: number;
+  /** `user` | `assistant` — who said it. */
   role: string;
-  snippets: string[];
+  /** The matching text, windowed around the first term. */
+  text: string;
+}
+
+/**
+ * A slice of a transcript around one record. Mirrors `SessionWindow` in
+ * `src-tauri/src/sessions.rs`.
+ */
+export interface SessionWindow {
+  entries: ClaudeFrame[];
+  /** Index into `entries` of the anchored record, or `entries.length`. */
+  anchor: number;
+  /** Nothing earlier exists, so there is nothing left to load above. */
+  atStart: boolean;
+  /** This window already reaches the live tail. */
+  atEnd: boolean;
+}
+
+/* ---------- session recap ---------- */
+
+/**
+ * What one session actually did. Mirrors `SessionRecap` in
+ * `src-tauri/src/recap.rs`, which mines it from the transcript's tool calls.
+ */
+export interface SessionRecap {
+  file: string;
+  /** The first thing that was asked — the session's statement of intent. */
+  firstPrompt: string | null;
+  /** The last thing that was asked — where it was left off. */
+  lastPrompt: string | null;
+  prompts: number;
+  files: RecapFile[];
+  /** Distinct files changed, before the display cap `files` was cut to. */
+  fileCount: number;
+  /** Newest last, and the tail of the list when there were more than the cap. */
+  commits: RecapCommit[];
+  commitCount: number;
+  /** Branches the session ran on, in the order it first saw them. */
+  branches: string[];
+  tools: NameCount[];
+  toolCalls: number;
+  agents: RecapAgent[];
+  /** Subagent calls in total, which is more than `agents.length`. */
+  agentCount: number;
+  /** Bytes folded on this call. Zero means the cache answered unchanged. */
+  bytesRead: number;
+  scanMs: number;
+  /** The transcript was longer than the scan cap, so this is a prefix of it. */
+  truncated: boolean;
+}
+
+export interface RecapFile {
+  path: string;
+  changes: number;
+  /** A `Write` landed on it, so the session may have created it outright. */
+  written: boolean;
+}
+
+export interface RecapCommit {
+  sha: string;
+  /** What git printed in the brackets: a branch name, or `detached HEAD`. */
+  branch: string;
+  subject: string;
+}
+
+export interface RecapAgent {
+  agentType: string;
+  description: string;
+  count: number;
 }
 
 export interface DirEntryInfo {

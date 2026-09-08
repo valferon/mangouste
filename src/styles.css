@@ -1258,6 +1258,20 @@ mark.search-new {
   background: var(--bg-hover);
 }
 
+/* Pinned: the standing exception to every filter, marked in the one colour the
+   status palette does not use. Purple keeps "I decided to keep this" from
+   reading as "this is doing something" — a pin is your opinion, not a state the
+   transcript reports. Deliberately placed above hover and below the two live
+   tints and the selection: a running session still announces itself first. */
+.session-row[data-pinned="true"] {
+  background: color-mix(in srgb, var(--purple) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--purple);
+}
+
+.session-row[data-pinned="true"]:hover {
+  background: color-mix(in srgb, var(--purple) 13%, var(--bg-hover));
+}
+
 .session-row[data-selected="true"] {
   background: var(--bg-active);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -1328,6 +1342,16 @@ mark.search-new {
   text-align: center;
   font-size: 9px;
   color: var(--fg-dim);
+}
+
+/* The pin itself, in the rail and in the dashboard table. Filled and purple, so
+   it reads at a glance in a column of hollow status rings. */
+.pin-marker {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--purple);
 }
 
 /* Collapsed fan-out still says how many are working. */
@@ -1417,11 +1441,28 @@ mark.search-new {
   background: var(--bg-hover);
 }
 
+/* Fixed width, and held even on the rows that print nothing in it: the count
+   belongs to the session, not to each match, so the snippets under one row have
+   to line up with each other rather than each starting wherever its own count
+   ended. */
 .match-row .match-count {
-  flex: 0 0 auto;
+  flex: 0 0 22px;
+  text-align: right;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--cyan);
+}
+
+/* Who said it, by the same colours the transcript uses: a match in your own
+   words and a match in the answer are different kinds of evidence, and telling
+   them apart is most of what makes a result list scannable. */
+.match-row[data-role="assistant"] .match-text {
+  color: color-mix(in srgb, var(--fg) 82%, var(--bg));
+}
+
+.match-row[data-role="user"] .match-text {
+  color: var(--fg);
+  font-style: normal;
 }
 
 /* One line, clipped: a snippet that wrapped would push the rest of the results
@@ -1433,6 +1474,124 @@ mark.search-new {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-style: italic;
+}
+
+/* ---------- session recap ---------- */
+
+/* What a session did, under its row. Indented with the fan-out children because
+   it belongs to the row above, but boxed rather than listed: the rail is a list
+   of sessions, and an unboxed dozen lines of detail inside it reads as twelve
+   more sessions. */
+.recap {
+  margin: 2px 6px 6px calc(var(--rail-indent) + var(--rail-step));
+  padding: 4px 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.recap-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 6px 2px 8px;
+}
+
+.recap-headline {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-bright);
+  font-weight: 600;
+}
+
+.recap-note {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+/* A labelled fact: the label is a fixed column so the values line up down the
+   block, which is what lets you read only the values. */
+.recap-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 6px 1px 8px;
+  min-width: 0;
+}
+
+.recap-line .recap-label {
+  flex: 0 0 34px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--fg-dim);
+}
+
+.recap-section {
+  padding: 4px 6px 1px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--fg-dim);
+}
+
+/* One commit, file or fan-out. Clipped to one line for the reason the match rows
+   are: a wrapped path pushes the next one off the fold. */
+.recap-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 6px 1px 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.recap-row:hover {
+  background: var(--bg-hover);
+}
+
+.recap-row .recap-glyph {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+}
+
+.recap-row[data-written="true"] .recap-glyph {
+  color: var(--green);
+}
+
+/* Amber, as git prints a sha, but mixed toward the foreground: the light
+   palette's amber is a #949800 olive that reads at about 3:1 on white, and this
+   is 10px monospace — the one place in the block where bare amber would fail. */
+.recap-sha {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--amber) 62%, var(--fg));
+}
+
+.recap-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.recap-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.recap .dim {
+  color: var(--fg-dim);
 }
 
 /* ---------- subagents ---------- */
@@ -1757,6 +1916,34 @@ mark.search-new {
   min-height: 0;
   overflow-y: auto;
   padding: 12px 16px 20px;
+  /* Pinned to the tail by default, and the pin does its own scrolling: the
+     browser's anchoring would fight it whenever rows above grow. ChatPane
+     switches this back to `auto` while the user is reading history. */
+  overflow-anchor: none;
+}
+
+/* The strip that says the log is not showing the end of the conversation.
+   Above the scroller, not inside it: it is the only thing correcting the
+   assumption that the bottom row is the newest one, so it has to stay put while
+   you scroll through what it is describing. */
+.anchor-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel));
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.anchor-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
 }
 
 .chat-message {
@@ -4097,6 +4284,15 @@ select {
   min-width: 0;
 }
 
+/* The turn a search was looking for. A tinted band and an accent edge rather
+   than a `mark` on the text: the row is the answer, and the words inside it were
+   already painted in the sidebar result that got you here. */
+.timeline-row[data-anchor="true"] {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+  border-radius: 3px;
+}
+
 .timeline-row::before {
   content: "";
   position: absolute;
@@ -4408,6 +4604,12 @@ select {
 /* Archived rows read as history, exactly as they do in the rail. */
 .dash-row[data-archived="true"] {
   opacity: 0.55;
+}
+
+/* And pinned rows carry the rail's purple edge, since they are hoisted above
+   the sort here for the same reason they are hoisted there. */
+.dash-row[data-pinned="true"] {
+  box-shadow: inset 2px 0 0 var(--purple);
 }
 
 .dash-row[data-nested="true"] {
@@ -5039,17 +5241,33 @@ select {
 
 /* ---------- update sheet ---------- */
 
+/* A column, so the notes can be told to take whatever height is left rather
+   than a guessed fraction of the viewport. The cap is the scrim's own top
+   padding plus a bottom margin: the sheet starts 90px down, and a sheet taller
+   than what is under that point hangs off the end of a short window. */
 .update {
   width: min(640px, 94vw);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 120px);
 }
 
-/* The release body. Capped and scrolled rather than left to grow: a release
-   with a long changelog must not push its own Download button off-screen. The
-   rule above it separates somebody else's prose from the sheet's own. */
+/* The release body. Scrolled rather than left to grow, so a long changelog
+   cannot push its own Download button off-screen — but sized by what the window
+   actually has, because the old `46vh` cap left a 600px-tall window showing
+   four lines of notes above a footer the rest of them ran under. `min-height`
+   is the flexbox one: without it a scroll container refuses to shrink below its
+   content and the cap above never applies. The rule on top separates somebody
+   else's prose from the sheet's own. */
 .update-notes {
-  max-height: min(46vh, 420px);
+  flex: 1;
+  min-height: 0;
   margin: 10px 14px 0;
-  padding-top: 10px;
+  /* The right padding is the scrollbar's lane. WebKitGTK draws an overlay bar,
+     so without one it sits on the last word of every wrapped line; the box keeps
+     its symmetric margin so the rule above still lines up with the sheet's other
+     content. The bottom padding keeps the last line off the footer's rule. */
+  padding: 10px 10px 12px 0;
   border-top: 1px solid var(--border);
   overflow: auto;
 }
@@ -5058,6 +5276,13 @@ select {
    own first-child margin is the wrong shape here. */
 .update-notes .markdown > :first-child {
   margin-top: 0;
+}
+
+/* Everything in the sheet that is not the notes keeps its own height: in a
+   flex column the default is to shrink, and a squashed header is not a saving
+   worth making when the notes below it are the thing that scrolls. */
+.update > *:not(.update-notes) {
+  flex: none;
 }
 
 /* `.setting-hint` is indented to clear the Settings pane's label column. This
@@ -5111,6 +5336,15 @@ select {
 
 .about-actions {
   padding-top: 12px;
+}
+
+/* The footer of a scrolling sheet has to read as a footer. Without the rule the
+   half-line the notes are clipped at sits directly against the buttons and the
+   whole sheet looks like overlapping text rather than something with more to
+   scroll. */
+.update .about-actions {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .about-actions .toggle-button {

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onSessionsChanged, statsSummary } from "../lib/ipc";
 import { daysInRange, rangeLabel, RANGES, type Range } from "../lib/dayRange";
-import { ArchiveIcon, RefreshIcon, RepoIcon, StatusGlyph } from "../lib/icons";
+import { ArchiveIcon, PinIcon, RefreshIcon, RepoIcon, StatusGlyph } from "../lib/icons";
 import { copyText } from "../lib/editing";
 import { revealPath } from "../lib/ipc";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -350,7 +350,8 @@ export const Dashboard = memo(function Dashboard({
     const needle = query.trim().toLowerCase();
     const rows = stats.sessions.filter((row) => {
       if (repoFilter && row.projectDir !== repoFilter) return false;
-      if (!showArchived && flags.isArchived(row.id)) return false;
+      // A pinned row is never filtered out of a list, here as in the rail.
+      if (!showArchived && flags.isArchived(row.id) && !flags.isPinned(row.id)) return false;
       if (!needle) return true;
       const meta = metaById.get(row.id);
       const haystack = `${meta?.title ?? ""} ${row.id} ${row.cwd ?? ""} ${row.model ?? ""}`;
@@ -358,6 +359,10 @@ export const Dashboard = memo(function Dashboard({
     });
     const sorted = [...rows];
     sorted.sort((a, b) => {
+      // Above every sort key, because the table is cut at `sessionLimit` and a
+      // row you explicitly kept must not fall off the bottom of it.
+      const pin = Number(flags.isPinned(b.id)) - Number(flags.isPinned(a.id));
+      if (pin !== 0) return pin;
       switch (sortKey) {
         case "cost":
           return b.tokens.costUsd - a.tokens.costUsd;
@@ -436,10 +441,15 @@ export const Dashboard = memo(function Dashboard({
   const sessionMenu = useCallback(
     (row: SessionStats, title: string): MenuEntry[] => {
       const archived = flags.isArchived(row.id);
+      const pinned = flags.isPinned(row.id);
       return [
         { header: title },
         { label: "Open Session", run: () => openSession(row) },
         row.cwd && { label: "Switch to this Repo", run: () => onSelectRepo(row.cwd ?? "") },
+        {
+          label: pinned ? "Unpin" : "Pin to Top",
+          run: () => flags.setPinned(row.id, !pinned),
+        },
         {
           label: archived ? "Unarchive" : "Archive",
           run: () => flags.setArchived(row.id, !archived),
@@ -761,12 +771,14 @@ export const Dashboard = memo(function Dashboard({
               const meta = metaById.get(row.id);
               const status = meta ? flags.effectiveStatus(meta) : "idle";
               const archived = flags.isArchived(row.id);
+              const pinned = flags.isPinned(row.id);
               return (
                 <div
                   key={row.id}
                   className="dash-row"
                   data-clickable="true"
                   data-archived={archived || undefined}
+                  data-pinned={pinned || undefined}
                   title={`${row.id}\n${row.cwd ?? row.projectDir}\n${compact(
                     row.tokens.cacheRead,
                   )} cache read · ${compact(row.tokens.cacheWrite)} written`}
@@ -782,6 +794,11 @@ export const Dashboard = memo(function Dashboard({
                     <StatusGlyph status={status} />
                   </span>
                   <span className="cell-name">
+                    {pinned && (
+                      <span className="pin-marker" title="Pinned">
+                        <PinIcon />
+                      </span>
+                    )}
                     {meta?.title ?? `session ${row.id.slice(0, 8)}`}
                   </span>
                   <span className="cell-name dim">

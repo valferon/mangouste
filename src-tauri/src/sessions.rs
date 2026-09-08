@@ -289,7 +289,7 @@ fn parsed_lines(chunk: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
+pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(str::to_string)
 }
 
@@ -621,7 +621,7 @@ fn classify(
 }
 
 /// Every text payload of a user message (string content or text blocks).
-fn text_payloads(message: &serde_json::Value) -> Vec<&str> {
+pub(crate) fn text_payloads(message: &serde_json::Value) -> Vec<&str> {
     match message.get("content") {
         Some(serde_json::Value::String(text)) => vec![text.as_str()],
         Some(serde_json::Value::Array(blocks)) => blocks
@@ -664,13 +664,13 @@ fn is_synthetic_text(text: &str) -> bool {
 ///
 /// Requires at least one text payload and that EVERY payload be synthetic: an
 /// `ide_selection` block bundled with a typed prompt is still a real prompt.
-fn is_synthetic_echo(message: &serde_json::Value) -> bool {
+pub(crate) fn is_synthetic_echo(message: &serde_json::Value) -> bool {
     let texts = text_payloads(message);
     !texts.is_empty() && texts.iter().all(|t| is_synthetic_text(t))
 }
 
 /// True when a user record is the synthetic ESC interrupt marker.
-fn is_interrupt_marker(message: &serde_json::Value) -> bool {
+pub(crate) fn is_interrupt_marker(message: &serde_json::Value) -> bool {
     let starts = |text: &str| text.trim_start().starts_with(INTERRUPT_PREFIX);
     match message.get("content") {
         Some(serde_json::Value::String(text)) => starts(text),
@@ -1096,45 +1096,107 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
 /// to find the lines, which is what a caller asked for exactly `count` entries
 /// needs.
 fn read_last_lines(path: &Path, count: usize, max_bytes: Option<u64>) -> std::io::Result<String> {
-    const CHUNK: u64 = 64 * 1024;
-    /// Extra lines beyond `count`, absorbing ones `parsed_lines` will drop.
-    const SLACK: usize = 64;
+    let size = File::open(path)?.metadata()?.len();
+    Ok(read_lines_before(path, size, count, max_bytes)?.0)
+}
 
+/// Bytes read per chunk when walking a transcript for whole lines.
+const LINE_WALK_CHUNK: u64 = 64 * 1024;
+
+/// Extra lines beyond the wanted count, absorbing ones `parsed_lines` drops.
+const LINE_WALK_SLACK: usize = 64;
+
+/// Text covering the last `count` whole lines that end at or before `end`, found
+/// by scanning backwards in chunks so a multi-MB transcript is neither read nor
+/// parsed in full. The flag is true when the walk reached byte 0 — which is what
+/// tells a caller there is nothing earlier left to load.
+///
+/// `max_bytes` caps the walk for callers whose files may be made of records long
+/// enough that a line count is no bound at all; it then returns whatever whole
+/// lines fell inside the cap, possibly none. `None` walks back as far as it must
+/// to find the lines, which is what a caller asking for exactly `count` entries
+/// needs.
+fn read_lines_before(
+    path: &Path,
+    end: u64,
+    count: usize,
+    max_bytes: Option<u64>,
+) -> std::io::Result<(String, bool)> {
     let mut file = File::open(path)?;
-    let size = file.metadata()?.len();
-    let wanted = count.saturating_add(SLACK);
+    let wanted = count.saturating_add(LINE_WALK_SLACK);
     // Earliest offset the walk may read from; `None` means the whole file.
-    let floor = size.saturating_sub(max_bytes.unwrap_or(u64::MAX));
-    let mut end = size;
+    let floor = end.saturating_sub(max_bytes.unwrap_or(u64::MAX));
+    let mut cursor = end;
     let mut newlines = 0usize;
     // Newest chunk first, joined once at the end. Prepending each chunk to a
     // running buffer instead re-copies everything collected so far, so a long
     // walk spends quadratically more on memcpy than on the read it is there for.
     let mut chunks: Vec<Vec<u8>> = Vec::new();
 
-    while end > floor && newlines <= wanted {
-        let start = end.saturating_sub(CHUNK).max(floor);
-        let mut buf = vec![0u8; (end - start) as usize];
+    while cursor > floor && newlines <= wanted {
+        let start = cursor.saturating_sub(LINE_WALK_CHUNK).max(floor);
+        let mut buf = vec![0u8; (cursor - start) as usize];
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut buf)?;
         newlines += buf.iter().filter(|&&b| b == b'\n').count();
         chunks.push(buf);
-        end = start;
+        cursor = start;
     }
 
-    let mut collected: Vec<u8> = Vec::with_capacity((size - end) as usize);
+    let mut collected: Vec<u8> = Vec::with_capacity((end - cursor) as usize);
     for chunk in chunks.iter().rev() {
         collected.extend_from_slice(chunk);
     }
     let text = String::from_utf8_lossy(&collected).into_owned();
     // A chunk boundary almost certainly lands mid-line; drop that fragment.
-    if end > 0 {
+    if cursor > 0 {
         return Ok(match text.find('\n') {
-            Some(i) => text[i + 1..].to_string(),
-            None => String::new(),
+            Some(index) => (text[index + 1..].to_string(), false),
+            None => (String::new(), false),
         });
     }
-    Ok(text)
+    Ok((text, true))
+}
+
+/// Text covering the first `count` whole lines at or after `start`, and whether
+/// the walk reached the end of the file.
+///
+/// The mirror image of `read_lines_before`, and needed for the same reason: a
+/// window around a search hit is bounded on both sides, and reading forward to
+/// EOF from a match near the top of a 27MB transcript would hand the renderer
+/// the entire session.
+fn read_lines_from(path: &Path, start: u64, count: usize) -> std::io::Result<(String, bool)> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    if start >= size {
+        return Ok((String::new(), true));
+    }
+    file.seek(SeekFrom::Start(start))?;
+    let wanted = count.saturating_add(LINE_WALK_SLACK);
+    let mut collected: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; LINE_WALK_CHUNK as usize];
+    let mut newlines = 0usize;
+    let mut at_end = false;
+
+    while newlines <= wanted {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            at_end = true;
+            break;
+        }
+        newlines += buf[..read].iter().filter(|&&b| b == b'\n').count();
+        collected.extend_from_slice(&buf[..read]);
+    }
+
+    let text = String::from_utf8_lossy(&collected).into_owned();
+    if at_end {
+        return Ok((text, true));
+    }
+    // Stopped mid-file, so the last line in the buffer is a fragment.
+    Ok(match text.rfind('\n') {
+        Some(index) => (text[..=index].to_string(), false),
+        None => (String::new(), false),
+    })
 }
 
 /// Read one session transcript in full, newest entries last.
@@ -1160,6 +1222,82 @@ pub fn read_session_transcript(
         }
     }
     Ok(entries)
+}
+
+/// Records hydrated either side of an anchor when the caller does not say.
+const WINDOW_RECORDS: usize = 200;
+
+/// Ceiling on one window read, so a bug in the caller cannot ask for a whole
+/// 27MB transcript in one commit.
+const WINDOW_RECORDS_MAX: usize = 4_000;
+
+/// A slice of a transcript around one record, with room to say what is missing.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionWindow {
+    pub entries: Vec<serde_json::Value>,
+    /// Index into `entries` of the record the offset addressed, or `entries.len()`
+    /// when the offset was past the end of the file.
+    pub anchor: usize,
+    /// Nothing earlier than this window exists — the "load earlier" control has
+    /// nothing left to fetch.
+    pub at_start: bool,
+    /// Nothing later exists, so this window already reaches the live tail.
+    pub at_end: bool,
+}
+
+/// Read the conversation around one byte offset — the other half of a search hit.
+///
+/// The tail read above answers "show me this session"; this answers "show me
+/// this *moment* in this session", which is what a search result actually found.
+/// Without it a hit deeper than the pane's history limit is unreachable: the
+/// only thing the app could do with the match it just showed you was to open the
+/// end of the file and leave you scrolling.
+///
+/// An offset is trusted but not required to be valid. Transcripts are appended
+/// to while a result sits on screen, and the file can be replaced wholesale by a
+/// resume that rewrites it, so an offset past the end reads as "the tail" and one
+/// that lands mid-line costs the one record it splits — `parsed_lines` drops the
+/// fragment and the window either side of it still renders.
+#[tauri::command(async)]
+pub fn read_session_window(
+    file: String,
+    offset: u64,
+    before: Option<usize>,
+    after: Option<usize>,
+) -> Result<SessionWindow, String> {
+    let path = PathBuf::from(&file);
+    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    let before = before.unwrap_or(WINDOW_RECORDS).min(WINDOW_RECORDS_MAX);
+    let after = after.unwrap_or(WINDOW_RECORDS).min(WINDOW_RECORDS_MAX);
+    let anchor_at = offset.min(size);
+
+    let (head_text, walked_to_start) =
+        read_lines_before(&path, anchor_at, before, None).map_err(|e| e.to_string())?;
+    // `after + 1`: the anchor record is the first line of the forward read, so
+    // asking for N after it means N + 1 lines.
+    let (tail_text, walked_to_end) =
+        read_lines_from(&path, anchor_at, after + 1).map_err(|e| e.to_string())?;
+
+    let mut entries = parsed_lines(&head_text);
+    let mut at_start = walked_to_start;
+    // The walk overshoots by `LINE_WALK_SLACK` lines by design; trimming them is
+    // also what decides `at_start`, since anything trimmed is something earlier.
+    if entries.len() > before {
+        entries.drain(..entries.len() - before);
+        at_start = false;
+    }
+    let anchor = entries.len();
+
+    let mut tail = parsed_lines(&tail_text);
+    let mut at_end = walked_to_end;
+    if tail.len() > after + 1 {
+        tail.truncate(after + 1);
+        at_end = false;
+    }
+    entries.append(&mut tail);
+
+    Ok(SessionWindow { entries, anchor, at_start, at_end })
 }
 
 /* ---------- transcript content search ---------- */
@@ -1189,9 +1327,10 @@ const SEARCH_FILE_CAP_BYTES: u64 = 32 * 1024 * 1024;
 /// snippet is worth.
 const SEARCH_PARSE_LINE_CAP: usize = 256 * 1024;
 
-/// Snippets kept per session. Only the first is shown; the rest are for the
-/// tooltip, and the count stops the parse work growing with a chatty match.
-const SEARCH_SNIPPETS_PER_SESSION: usize = 3;
+/// Snippets kept per session. Every one of them is a row you can click, so this
+/// is a list length rather than a tooltip budget — and it still bounds the parse
+/// work, which is what stops a chatty match costing more than a rare one.
+const SEARCH_SNIPPETS_PER_SESSION: usize = 5;
 
 /// Characters of context kept either side of the matched term.
 const SNIPPET_CONTEXT_CHARS: usize = 90;
@@ -1200,6 +1339,30 @@ const SNIPPET_CONTEXT_CHARS: usize = 90;
 /// than pre-chunked: transcripts differ in size by three orders of magnitude, so
 /// a static split leaves one thread holding every big file.
 const SEARCH_THREADS: usize = 8;
+
+/// One matching record, and where in the file to find it again.
+///
+/// The offset is the load-bearing field: a search that can only say *which*
+/// session said something leaves you at the tail of a transcript hunting for it,
+/// which for anything said more than `HISTORY_LIMIT` records ago means hunting
+/// in a file the app will not show you. `read_session_window` takes this offset
+/// and hydrates the conversation around it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetHit {
+    /// Byte offset of this record's line in the transcript.
+    ///
+    /// A byte offset rather than a record index because the two cannot be made
+    /// to agree cheaply: the sweep deliberately refuses to parse most lines, so
+    /// it cannot know which of them `parsed_lines` would have dropped, and an
+    /// index counted over raw lines would drift from one counted over records.
+    /// An offset needs no agreement — it is a `seek`.
+    pub offset: u64,
+    /// `user` | `assistant` — who said it.
+    pub role: String,
+    /// The matching text, windowed around the first term.
+    pub text: String,
+}
 
 /// One transcript that matched, with the evidence for it.
 #[derive(Debug, Clone, Serialize)]
@@ -1211,12 +1374,8 @@ pub struct SessionHit {
     pub dir_name: String,
     /// Conversational records that contained at least one term.
     pub match_count: usize,
-    /// Matching text, trimmed to a window around the first term.
-    pub snippet: String,
-    /// `user` | `assistant` — who said the snippet.
-    pub role: String,
-    /// Every distinct snippet found, first N only. Feeds the row tooltip.
-    pub snippets: Vec<String>,
+    /// Every distinct snippet found, first N only, oldest first.
+    pub snippets: Vec<SnippetHit>,
 }
 
 /// How a multi-term query is combined.
@@ -1318,16 +1477,22 @@ fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) ->
     let mut line: Vec<u8> = Vec::new();
     let mut seen_terms = vec![false; terms.len()];
     let mut match_count = 0usize;
-    let mut snippets: Vec<String> = Vec::new();
-    let mut role = String::new();
+    let mut snippets: Vec<SnippetHit> = Vec::new();
+    // Bytes consumed as whole lines, which is the offset of the next one.
+    let mut offset = 0u64;
 
     loop {
         line.clear();
-        match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
+        let read = match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
             Ok(0) => break,
-            Ok(_) => {}
+            Ok(read) => read,
             Err(_) => break,
-        }
+        };
+        // Advanced before any of the `continue`s below, so a skipped line still
+        // moves the cursor: an offset that only counted matching lines would
+        // point at the wrong record in every file with more than one match.
+        let line_offset = offset;
+        offset += read as u64;
         // Stage one: is any term anywhere in the raw line? Almost every line
         // fails here, and failing here costs no allocation and no parse.
         if !terms.iter().any(|t| find_ci(&line, t.as_bytes()).is_some()) {
@@ -1365,12 +1530,16 @@ fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) ->
         match_count += 1;
         if snippets.len() < SEARCH_SNIPPETS_PER_SESSION {
             let joined = payloads.join(" ");
-            if let Some(snippet) = snippet_around(&joined, terms) {
-                if !snippets.contains(&snippet) {
-                    if snippets.is_empty() {
-                        role = str_field(&record, "type").unwrap_or_default();
-                    }
-                    snippets.push(snippet);
+            if let Some(text) = snippet_around(&joined, terms) {
+                // Deduplicated on text, not on offset: a phrase repeated
+                // verbatim across turns produces the same row several times,
+                // and the second one tells you nothing the first did not.
+                if !snippets.iter().any(|kept| kept.text == text) {
+                    snippets.push(SnippetHit {
+                        offset: line_offset,
+                        role: str_field(&record, "type").unwrap_or_default(),
+                        text,
+                    });
                 }
             }
         }
@@ -1388,8 +1557,6 @@ fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) ->
         file: path.to_string_lossy().to_string(),
         dir_name: dir_name.to_string(),
         match_count,
-        snippet: snippets.first().cloned().unwrap_or_default(),
-        role,
         snippets,
     })
 }
@@ -1489,6 +1656,43 @@ mod search_tests {
         assert_eq!(snippet.chars().count(), SNIPPET_CONTEXT_CHARS * 2 + 2);
     }
 
+    /// Follows a real hit back into a real transcript. Ignored by default — it
+    /// reads the corpus: `cargo test jumps_to_a_real_hit -- --ignored --nocapture`.
+    ///
+    /// The one thing the synthetic tests above cannot prove: that an offset
+    /// produced by the sweep, on a file written by the CLI rather than by a test,
+    /// resolves to the record that matched.
+    #[test]
+    #[ignore]
+    fn jumps_to_a_real_hit() {
+        let query = "transcript";
+        let hits = search_sessions(query.into(), None, Some(20)).expect("a sweep");
+        assert!(!hits.is_empty(), "nothing on this machine says {query}");
+        let mut checked = 0;
+        for hit in &hits {
+            for snippet in &hit.snippets {
+                let window =
+                    read_session_window(hit.file.clone(), snippet.offset, Some(3), Some(3))
+                        .expect("a window");
+                let anchored = &window.entries[window.anchor];
+                let said = text_payloads(anchored.get("message").expect("a message")).join(" ");
+                assert!(
+                    contains_ci(&said, query),
+                    "{}@{} anchored on a record that never said it",
+                    hit.id,
+                    snippet.offset
+                );
+                assert_eq!(
+                    str_field(anchored, "type").as_deref(),
+                    Some(snippet.role.as_str()),
+                    "the anchored record is not the one the hit described"
+                );
+                checked += 1;
+            }
+        }
+        eprintln!("{checked} offsets across {} transcripts resolved", hits.len());
+    }
+
     /// Sweeps the real corpus. Ignored by default — it reads every transcript on
     /// the machine, which is a benchmark, not a unit test:
     /// `cargo test searches_local_corpus -- --ignored --nocapture`.
@@ -1499,7 +1703,10 @@ mod search_tests {
         let hits = search_sessions("search box sidebar".into(), None, Some(5)).expect("a sweep");
         eprintln!("{} hits in {:?}", hits.len(), start.elapsed());
         for hit in &hits {
-            eprintln!("  {} x{} [{}] {}", hit.id, hit.match_count, hit.role, hit.snippet);
+            eprintln!("  {} x{}", hit.id, hit.match_count);
+            for snippet in &hit.snippets {
+                eprintln!("    @{} [{}] {}", snippet.offset, snippet.role, snippet.text);
+            }
         }
     }
 
@@ -1522,14 +1729,92 @@ mod search_tests {
         let terms = vec!["deadlocking".to_string()];
         let hit = search_one(&path, "-tmp", &terms, MatchMode::All).expect("a hit");
         assert_eq!(hit.match_count, 1, "only the spoken record counts");
-        assert!(hit.snippet.contains("deadlocking"));
-        assert_eq!(hit.role, "user");
+        assert_eq!(hit.snippets.len(), 1);
+        assert!(hit.snippets[0].text.contains("deadlocking"));
+        assert_eq!(hit.snippets[0].role, "user");
+        assert_eq!(hit.snippets[0].offset, 0, "the spoken record is the first line");
         assert_eq!(hit.id, "11111111-2222-3333-4444-555555555555");
 
         // AND across terms holds within a file; ANY is the escalation's rule.
         let both = vec!["migration".to_string(), "absent".to_string()];
         assert!(search_one(&path, "-tmp", &both, MatchMode::All).is_none());
         assert!(search_one(&path, "-tmp", &both, MatchMode::Any).is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The offset has to survive the lines the sweep refuses to parse, which is
+    /// most of them — this is the regression that would silently point every
+    /// "jump to match" at the wrong turn.
+    #[test]
+    fn snippet_offsets_address_the_matching_line() {
+        let dir = std::env::temp_dir().join("mangouste-search-offsets");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("22222222-2222-3333-4444-555555555555.jsonl");
+        let lines = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"unrelated preamble"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a big tool result nobody said"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"the sharding plan"}]}}"#,
+            r#"{"type":"attachment","attachment":{"kind":"noise"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the sharding plan, restated"}]}}"#,
+        ];
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write transcript");
+
+        let terms = vec!["sharding".to_string()];
+        let hit = search_one(&path, "-tmp", &terms, MatchMode::All).expect("a hit");
+        assert_eq!(hit.snippets.len(), 2);
+
+        // Each offset seeks to the start of the line it was found on.
+        let raw = std::fs::read_to_string(&path).expect("read back");
+        for snippet in &hit.snippets {
+            let from = &raw[snippet.offset as usize..];
+            let line = from.lines().next().expect("a line");
+            assert!(line.contains("sharding"), "offset {} landed on {line}", snippet.offset);
+        }
+        assert_eq!(hit.snippets[0].role, "user");
+        assert_eq!(hit.snippets[1].role, "assistant");
+
+        // And the window read hydrates the conversation around one of them.
+        let window = read_session_window(
+            path.to_string_lossy().to_string(),
+            hit.snippets[1].offset,
+            Some(2),
+            Some(0),
+        )
+        .expect("a window");
+        assert!(window.at_end, "the second match is the last line");
+        assert!(!window.at_start, "two records were skipped to reach it");
+        // The attachment record is dropped by `parsed_lines`' callers, not here:
+        // every parseable line comes back, and the anchor indexes into that.
+        assert_eq!(
+            window.entries[window.anchor]["message"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default(),
+            "the sharding plan, restated"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An offset past the end, or one the file has since outgrown, must return
+    /// something renderable rather than an error — transcripts are appended to
+    /// while a search result sits on screen.
+    #[test]
+    fn a_stale_offset_still_yields_a_window() {
+        let dir = std::env::temp_dir().join("mangouste-search-stale");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("33333333-2222-3333-4444-555555555555.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"one\"}}\n",
+        )
+        .expect("write transcript");
+
+        let window = read_session_window(path.to_string_lossy().to_string(), 9_999, None, None)
+            .expect("a window");
+        assert!(window.at_end);
+        assert_eq!(window.anchor, window.entries.len(), "nothing to anchor on");
+        assert_eq!(window.entries.len(), 1, "the record before it is still shown");
 
         std::fs::remove_file(&path).ok();
     }

@@ -74,6 +74,8 @@ export const KEYS = {
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
     sessionsArchived: "mangouste.sessionsArchived",
+    /** The opposite claim to `sessionsArchived`: rows that outrank every filter. */
+    sessionsPinned: "mangouste.sessionsPinned",
   },
   release: {
     /**

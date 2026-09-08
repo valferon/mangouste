@@ -3,7 +3,7 @@ import { KEYS, readJson, writeJson } from "./persist";
 import type { SessionMeta, SessionStatus } from "./types";
 
 /**
- * Per-session read/archive overlay, ported from the extension's `SeenStore`.
+ * Per-session read/archive/pin overlay, ported from the extension's `SeenStore`.
  *
  * The transcripts are the source of truth for everything the sessions pane shows
  * except these flags, which are opinions about a session rather than facts in
@@ -12,6 +12,7 @@ import type { SessionMeta, SessionStatus } from "./types";
  */
 const SEEN_KEY = KEYS.overlay.sessionsSeen;
 const ARCHIVED_KEY = KEYS.overlay.sessionsArchived;
+const PINNED_KEY = KEYS.overlay.sessionsPinned;
 
 /**
  * One session's read state.
@@ -74,6 +75,24 @@ export function cleanFlags(raw: Record<string, unknown>): Record<string, boolean
   return flags;
 }
 
+/**
+ * Pinned rows first, everything else in the order it arrived.
+ *
+ * Stable on purpose: within each half the scan's recency order is still the
+ * right one, and a pin is a statement about where a row sits in the list, not
+ * about how it ranks against the other pinned rows.
+ */
+export function pinnedFirst<T extends { id: string }>(
+  sessions: T[],
+  isPinned: (id: string) => boolean,
+): T[] {
+  const pinned: T[] = [];
+  const rest: T[] = [];
+  for (const session of sessions) (isPinned(session.id) ? pinned : rest).push(session);
+  // No allocation unless a pin actually moved something.
+  return pinned.length === 0 ? sessions : [...pinned, ...rest];
+}
+
 export interface SessionFlags {
   /**
    * The status to render: `finished` becomes `pendingReview` when you have not
@@ -97,6 +116,13 @@ export interface SessionFlags {
   isArchived: (id: string) => boolean;
   archivedCount: number;
   /**
+   * Kept in front of you: exempt from every standing filter, and sorted to the
+   * top of its group. The exact opposite claim to archiving, which is why the
+   * two cannot both be set on one session.
+   */
+  isPinned: (id: string) => boolean;
+  pinnedCount: number;
+  /**
    * Record that you have looked at this session at its current watermark.
    *
    * A `passive` mark comes from "its pane is open", not from a deliberate open,
@@ -111,6 +137,7 @@ export interface SessionFlags {
    */
   markAllSeen: (sessions: SessionMeta[]) => void;
   setArchived: (id: string, archived: boolean) => void;
+  setPinned: (id: string, pinned: boolean) => void;
 }
 
 export function useSessionFlags(): SessionFlags {
@@ -119,6 +146,9 @@ export function useSessionFlags(): SessionFlags {
   );
   const [archived, setArchivedMap] = useState<Record<string, boolean>>(() =>
     cleanFlags(readJson<Record<string, unknown>>(ARCHIVED_KEY, {}, isPlainObject)),
+  );
+  const [pinned, setPinnedMap] = useState<Record<string, boolean>>(() =>
+    cleanFlags(readJson<Record<string, unknown>>(PINNED_KEY, {}, isPlainObject)),
   );
 
   const markOf = useCallback((id: string): Mark => marks[id] ?? EMPTY, [marks]);
@@ -234,6 +264,37 @@ export function useSessionFlags(): SessionFlags {
       writeJson(ARCHIVED_KEY, next);
       return next;
     });
+    // "Stop showing me this" and "always show me this" are contradictory claims,
+    // and a session holding both would read as a bug wherever the two are asked
+    // in a different order. The newer claim wins and the older one is dropped.
+    if (value) {
+      setPinnedMap((current) => {
+        if (!current[id]) return current;
+        const next = { ...current };
+        delete next[id];
+        writeJson(PINNED_KEY, next);
+        return next;
+      });
+    }
+  }, []);
+
+  const setPinned = useCallback((id: string, value: boolean) => {
+    setPinnedMap((current) => {
+      const next = { ...current };
+      if (value) next[id] = true;
+      else delete next[id];
+      writeJson(PINNED_KEY, next);
+      return next;
+    });
+    if (value) {
+      setArchivedMap((current) => {
+        if (!current[id]) return current;
+        const next = { ...current };
+        delete next[id];
+        writeJson(ARCHIVED_KEY, next);
+        return next;
+      });
+    }
   }, []);
 
   /** Ids of the `CHECKED_SET_SIZE` most recently seen sessions. */
@@ -251,6 +312,9 @@ export function useSessionFlags(): SessionFlags {
   const isArchived = useCallback((id: string) => archived[id] === true, [archived]);
   const archivedCount = useMemo(() => Object.keys(archived).length, [archived]);
 
+  const isPinned = useCallback((id: string) => pinned[id] === true, [pinned]);
+  const pinnedCount = useMemo(() => Object.keys(pinned).length, [pinned]);
+
   // Memoised as one object: the pane keys `useMemo` and `useEffect` off this
   // value, and a fresh identity per render would re-run all of them.
   return useMemo(
@@ -261,10 +325,13 @@ export function useSessionFlags(): SessionFlags {
       isRecentlyChecked,
       isArchived,
       archivedCount,
+      isPinned,
+      pinnedCount,
       markSeen,
       markUnread,
       markAllSeen,
       setArchived,
+      setPinned,
     }),
     [
       effectiveStatus,
@@ -273,10 +340,13 @@ export function useSessionFlags(): SessionFlags {
       isRecentlyChecked,
       isArchived,
       archivedCount,
+      isPinned,
+      pinnedCount,
       markSeen,
       markUnread,
       markAllSeen,
       setArchived,
+      setPinned,
     ],
   );
 }

@@ -6,6 +6,7 @@ mod git;
 mod primary;
 mod permission;
 mod pty;
+mod recap;
 mod search;
 mod sessions;
 mod stats;
@@ -181,6 +182,7 @@ pub fn run() {
         .manage(pty::PtyState::default())
         .manage(sessions::SessionCache::default())
         .manage(stats::StatsCache::default())
+        .manage(recap::RecapCache::default())
         .setup(|app| {
             trace("setup");
             watch_sessions(app.handle().clone());
@@ -277,7 +279,9 @@ pub fn run() {
             // sessions sidebar
             sessions::list_sessions,
             sessions::read_session_transcript,
+            sessions::read_session_window,
             sessions::search_sessions,
+            recap::session_recap,
             chats::rename_session,
             chats::expand_search_terms,
             // chat transport

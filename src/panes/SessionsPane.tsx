@@ -5,40 +5,56 @@ import {
   onSessionsChanged,
   revealPath,
   searchSessions,
+  sessionRecap,
 } from "../lib/ipc";
 
 import {
   ArchiveIcon,
+  BranchIcon,
   ChevronRightIcon,
   ClearIcon,
+  CommitIcon,
   DeepSearchIcon,
   MarkAllReadIcon,
+  PencilIcon,
+  PinIcon,
   ReadToggleIcon,
+  RecapIcon,
   RefreshIcon,
   RepoIcon,
   SearchIcon,
   StatusGlyph,
   SubagentGlyph,
   UnarchiveIcon,
+  UnpinIcon,
   UnreadToggleIcon,
   WorkflowGlyph,
 } from "../lib/icons";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
+import { markTerms } from "../lib/marks";
 import { useMenu, type MenuEntry } from "../lib/menu";
+import { recapFileLabel, recapHeadline } from "../lib/recap";
 import { useFlags } from "../lib/sessionFlagsContext";
+import { pinnedFirst } from "../lib/sessionStore";
 import type {
   ProjectGroup,
   RunningAgent,
   SessionHit,
   SessionMeta,
+  SessionRecap,
   SessionStatus,
 } from "../lib/types";
 
 interface SessionsPaneProps {
   /** Session currently attached to the chat pane, highlighted in the list. */
   activeSessionId: string | null;
-  onResume: (session: SessionMeta) => void;
+  /**
+   * Open a session. `anchor` is a byte offset into its transcript, from a search
+   * hit: the pane it opens hydrates the conversation around that record instead
+   * of the tail, which is the difference between finding a match and reading it.
+   */
+  onResume: (session: SessionMeta, anchor?: number) => void;
   onNewSession: (cwd: string) => void;
   /** Clicking a group label switches the sidebars to that repo. */
   onSelectRepo: (cwd: string) => void;
@@ -46,6 +62,8 @@ interface SessionsPaneProps {
   activeCwd: string | null;
   /** Lifts the scanned groups so the quick-open palette can reuse them. */
   onGroups: (groups: ProjectGroup[]) => void;
+  /** Open a file a recap lists, so "what was done" is one click from the work. */
+  onOpenFile: (path: string) => void;
 }
 
 /**
@@ -195,6 +213,181 @@ function groupSummary(statuses: SessionStatus[]): string {
   return parts.join(" · ");
 }
 
+/* ---------- recap ---------- */
+
+/**
+ * One session's recap, as the pane holds it.
+ *
+ * `recap` and `loading` are independent on purpose: re-opening a row re-reads
+ * the transcript, and showing the last answer while the new one is fetched beats
+ * blanking a panel that is about to say almost the same thing.
+ */
+interface RecapState {
+  recap: SessionRecap | null;
+  loading: boolean;
+  error: string | null;
+}
+
+/**
+ * What a session did, under its row.
+ *
+ * Every line here is mined from tool calls rather than from prose, which is the
+ * whole point: an assistant saying "I've updated the rail" is a claim, and
+ * `Edit src/rail.tsx` twice followed by `[main 9f3c1aa]` is the record. Ordered
+ * by how much each line settles "is this the session I am looking for" —
+ * commits, then the ask, then the files.
+ */
+const RecapBlock = memo(function RecapBlock({
+  state,
+  cwd,
+  onOpenFile,
+}: {
+  state: RecapState | undefined;
+  /** The session's own repo, so paths inside it can be written relatively. */
+  cwd: string | null;
+  onOpenFile: (path: string) => void;
+}) {
+  const recap = state?.recap ?? null;
+  if (!recap) {
+    return (
+      <div className="recap">
+        <div className="recap-note">
+          {state?.error ? `could not read the transcript: ${state.error}` : "reading it…"}
+        </div>
+      </div>
+    );
+  }
+  const commitLabel =
+    recap.commitCount > recap.commits.length
+      ? `last ${recap.commits.length} of ${recap.commitCount} commits`
+      : recap.commitCount === 1
+        ? "commit"
+        : "commits";
+  const fileLabel =
+    recap.fileCount > recap.files.length
+      ? `top ${recap.files.length} of ${recap.fileCount} files`
+      : recap.fileCount === 1
+        ? "file changed"
+        : "files changed";
+  return (
+    <div className="recap">
+      <div className="recap-head">
+        <span className="recap-headline">{recapHeadline(recap)}</span>
+        {state?.loading && <span className="recap-note">re-reading…</span>}
+        {recap.truncated && (
+          <span
+            className="recap-note"
+            title="The transcript is longer than the scan cap, so this covers the start of it."
+          >
+            partial
+          </span>
+        )}
+      </div>
+
+      {recap.firstPrompt && (
+        <div className="recap-line" title={recap.firstPrompt}>
+          <span className="recap-label">asked</span>
+          <span className="recap-value">{recap.firstPrompt}</span>
+        </div>
+      )}
+      {/* Only when it differs: a one-turn session would otherwise print the same
+          sentence twice under two different labels. */}
+      {recap.lastPrompt && recap.lastPrompt !== recap.firstPrompt && (
+        <div className="recap-line" title={recap.lastPrompt}>
+          <span className="recap-label">then</span>
+          <span className="recap-value">{recap.lastPrompt}</span>
+        </div>
+      )}
+      {recap.branches.length > 0 && (
+        <div className="recap-line" title={recap.branches.join("\n")}>
+          <span className="recap-label">
+            <BranchIcon />
+          </span>
+          <span className="recap-value">{recap.branches.join(", ")}</span>
+        </div>
+      )}
+
+      {recap.commits.length > 0 && (
+        <>
+          <div className="recap-section">{commitLabel}</div>
+          {recap.commits.map((commit) => (
+            <div
+              key={commit.sha}
+              className="recap-row"
+              title={`${commit.sha} on ${commit.branch}\n${commit.subject}\n\nClick to copy the sha.`}
+              onClick={() => void copyText(commit.sha)}
+            >
+              <CommitIcon className="recap-glyph" />
+              <span className="recap-sha">{commit.sha.slice(0, 7)}</span>
+              <span className="recap-value">{commit.subject}</span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {recap.files.length > 0 && (
+        <>
+          <div className="recap-section">{fileLabel}</div>
+          {recap.files.map((file) => (
+            <div
+              key={file.path}
+              className="recap-row"
+              data-written={file.written || undefined}
+              title={[
+                file.path,
+                `${file.changes} change${file.changes === 1 ? "" : "s"}`,
+                file.written ? "written whole at least once" : null,
+                "Click to open it.",
+              ]
+                .filter(Boolean)
+                .join("\n")}
+              onClick={() => onOpenFile(file.path)}
+            >
+              <PencilIcon className="recap-glyph" />
+              <span className="recap-value">{recapFileLabel(file.path, cwd)}</span>
+              <span className="recap-count">×{file.changes}</span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {recap.agents.length > 0 && (
+        <>
+          <div className="recap-section">
+            {recap.agentCount === 1 ? "fan-out" : `${recap.agentCount} fan-outs`}
+          </div>
+          {recap.agents.map((agent) => (
+            <div
+              key={agent.agentType}
+              className="recap-row"
+              title={[agent.agentType, agent.description].filter(Boolean).join("\n")}
+            >
+              <SubagentGlyph running={false} className="recap-glyph" />
+              <span className="recap-value">
+                {agent.agentType}
+                {agent.description && <span className="dim"> — {agent.description}</span>}
+              </span>
+              <span className="recap-count">×{agent.count}</span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {recap.tools.length > 0 && (
+        <div
+          className="recap-line"
+          title={recap.tools.map((tool) => `${tool.name} ${tool.count}`).join("\n")}
+        >
+          <span className="recap-label">tools</span>
+          <span className="recap-value">
+            {recap.tools.map((tool) => `${tool.name} ${tool.count}`).join(" · ")}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+});
+
 /**
  * Every Claude Code session on the machine, grouped by repo.
  *
@@ -204,8 +397,8 @@ function groupSummary(statuses: SessionStatus[]): string {
  * status field, which ages out on a timer rather than on a file event.
  *
  * Rows are one line each, with live subagent and workflow fan-outs nested under
- * their session. Read and archive state is an overlay in `sessionStore`, not a
- * fact about the transcript.
+ * their session. Read, archive and pin state is an overlay in `sessionStore`,
+ * not a fact about the transcript.
  */
 export const SessionsPane = memo(function SessionsPane({
   activeSessionId,
@@ -214,6 +407,7 @@ export const SessionsPane = memo(function SessionsPane({
   onSelectRepo,
   activeCwd,
   onGroups,
+  onOpenFile,
 }: SessionsPaneProps) {
   const menu = useMenu();
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
@@ -236,6 +430,9 @@ export const SessionsPane = memo(function SessionsPane({
   /** Which rung is running, so the note line can name it. */
   const [deepBusy, setDeepBusy] = useState<"literal" | "haiku" | null>(null);
   const [deepError, setDeepError] = useState<string | null>(null);
+  /** Sessions whose recap is open, and what has been read for each. */
+  const [recapOpen, setRecapOpen] = useState<Set<string>>(new Set());
+  const [recaps, setRecaps] = useState<Map<string, RecapState>>(new Map());
 
   const flags = useFlags();
 
@@ -332,13 +529,19 @@ export const SessionsPane = memo(function SessionsPane({
           activeHits?.has(session.id) === true
         );
       }
+      // A pin is the standing answer to every one of these questions: it is
+      // what you say about the session you want to find without remembering it.
+      if (flags.isPinned(session.id)) return true;
       if (flags.isArchived(session.id) && !showArchived) return false;
       const status = flags.effectiveStatus(session);
       if (onlyLive) return status === "active" || status === "awaiting";
       return showIdle || status !== "idle";
     };
     return groups
-      .map((group) => ({ ...group, sessions: group.sessions.filter(keep) }))
+      .map((group) => ({
+        ...group,
+        sessions: pinnedFirst(group.sessions.filter(keep), flags.isPinned),
+      }))
       .filter((group) => group.sessions.length > 0);
   }, [
     groups,
@@ -482,11 +685,68 @@ export const SessionsPane = memo(function SessionsPane({
     });
 
   const openSession = useCallback(
-    (session: SessionMeta) => {
+    (session: SessionMeta, anchor?: number) => {
       flags.markSeen(session);
-      onResume(session);
+      onResume(session, anchor);
     },
     [flags, onResume],
+  );
+
+  /**
+   * The words the sweep actually looked for, which is what a snippet paints.
+   *
+   * Not `terms`, and not `deep.terms` either: a literal sweep is sent the raw
+   * query as one string and splits it in Rust, so `deep.terms` there is the
+   * whole query — highlighting with it would find nothing in a two-word search.
+   * `queryTerms` is the same split Rust performs, which is what makes the marks
+   * land on exactly what matched.
+   */
+  const hitTerms = useMemo(() => {
+    if (!deep) return terms;
+    return deep.mode === "haiku" ? deep.terms : queryTerms(deep.query);
+  }, [deep, terms]);
+
+  const loadRecap = useCallback(async (session: SessionMeta) => {
+    setRecaps((current) => {
+      const next = new Map(current);
+      next.set(session.id, {
+        recap: current.get(session.id)?.recap ?? null,
+        loading: true,
+        error: null,
+      });
+      return next;
+    });
+    try {
+      const recap = await sessionRecap(session.file);
+      setRecaps((current) => new Map(current).set(session.id, { recap, loading: false, error: null }));
+    } catch (error) {
+      setRecaps((current) => {
+        const next = new Map(current);
+        next.set(session.id, {
+          recap: current.get(session.id)?.recap ?? null,
+          loading: false,
+          error: String(error),
+        });
+        return next;
+      });
+    }
+  }, []);
+
+  const toggleRecap = useCallback(
+    (session: SessionMeta) => {
+      const open = recapOpen.has(session.id);
+      setRecapOpen((current) => {
+        const next = new Set(current);
+        if (open) next.delete(session.id);
+        else next.add(session.id);
+        return next;
+      });
+      // Re-read on every open rather than once: the Rust scan resumes from a
+      // byte offset, so a session that has said more since costs only its new
+      // bytes and one that has not costs nothing at all.
+      if (!open) void loadRecap(session);
+    },
+    [recapOpen, loadRecap],
   );
 
   /** The pane's own toggles, ending every menu in here. */
@@ -513,6 +773,7 @@ export const SessionsPane = memo(function SessionsPane({
   const sessionMenu = useCallback(
     (session: SessionMeta): MenuEntry[] => {
       const archived = flags.isArchived(session.id);
+      const pinned = flags.isPinned(session.id);
       const unread = flags.isMarkedUnread(session.id);
       const cwd = session.cwd ?? "";
       return [
@@ -530,10 +791,18 @@ export const SessionsPane = memo(function SessionsPane({
           run: () => (unread ? flags.markSeen(session) : flags.markUnread(session.id)),
         },
         {
+          label: pinned ? "Unpin" : "Pin to Top",
+          run: () => flags.setPinned(session.id, !pinned),
+        },
+        {
           label: archived ? "Unarchive" : "Archive",
           run: () => flags.setArchived(session.id, !archived),
         },
         "separator",
+        {
+          label: recapOpen.has(session.id) ? "Hide What Was Done" : "What Was Done",
+          run: () => toggleRecap(session),
+        },
         { label: "Copy Session Id", run: () => void copyText(session.id) },
         session.title && { label: "Copy Title", run: () => void copyText(session.title ?? "") },
         cwd && { label: "Copy Working Directory", run: () => void copyText(cwd) },
@@ -545,7 +814,7 @@ export const SessionsPane = memo(function SessionsPane({
         ...paneEntries(),
       ];
     },
-    [flags, openSession, onSelectRepo, onNewSession, paneEntries],
+    [flags, openSession, onSelectRepo, onNewSession, paneEntries, recapOpen, toggleRecap],
   );
 
   const repoMenu = useCallback(
@@ -782,8 +1051,10 @@ export const SessionsPane = memo(function SessionsPane({
                 group.sessions.map((session) => {
                   const status = flags.effectiveStatus(session);
                   const hit = activeHits?.get(session.id) ?? null;
+                  const showRecap = recapOpen.has(session.id);
                   const markedUnread = flags.isMarkedUnread(session.id);
                   const archived = flags.isArchived(session.id);
+                  const pinned = flags.isPinned(session.id);
                   const agents = session.runningAgents ?? [];
                   const workflows = session.runningWorkflows ?? [];
                   const workflowAgents = workflows.reduce((n, w) => n + w.agents.length, 0);
@@ -799,6 +1070,7 @@ export const SessionsPane = memo(function SessionsPane({
                         data-warm={status === "finished" && flags.isRecentlyChecked(session.id)}
                         data-unread={markedUnread || status === "pendingReview"}
                         data-archived={archived}
+                        data-pinned={pinned}
                         onClick={() => openSession(session)}
                         onContextMenu={(event) =>
                           menu.openContextMenu(event, sessionMenu(session))
@@ -807,8 +1079,8 @@ export const SessionsPane = memo(function SessionsPane({
                           session.title ?? session.id,
                           session.lastPrompt,
                           hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
-                          ...(hit?.snippets ?? []),
                           `${status} · ${shortAge(session.lastActivityMs)} ago`,
+                          pinned ? "pinned — kept through every filter" : null,
                           markedUnread ? "marked unread" : null,
                           session.gitBranch,
                           `${session.messageCount}${session.messageCountExact ? "" : "+"} msg`,
@@ -843,6 +1115,13 @@ export const SessionsPane = memo(function SessionsPane({
                             {fanout}⚙
                           </span>
                         )}
+                        {/* Wrapped rather than titled directly: a `title`
+                            attribute on an <svg> is not a tooltip. */}
+                        {pinned && (
+                          <span className="pin-marker" title="Pinned to the top of this repo">
+                            <PinIcon />
+                          </span>
+                        )}
                         {(markedUnread || status === "pendingReview") && (
                           <span
                             className="unread-dot"
@@ -856,6 +1135,32 @@ export const SessionsPane = memo(function SessionsPane({
                         )}
                         <span className="age">{shortAge(session.lastActivityMs)}</span>
                         <span className="row-actions">
+                          <button
+                            className="toggle-button icon-button"
+                            data-active={showRecap}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleRecap(session);
+                            }}
+                            title={
+                              showRecap
+                                ? "Hide what was done"
+                                : "What was done: files, commits, branches, fan-outs"
+                            }
+                          >
+                            <RecapIcon />
+                          </button>
+                          <button
+                            className="toggle-button icon-button"
+                            data-active={pinned}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              flags.setPinned(session.id, !pinned);
+                            }}
+                            title={pinned ? "Unpin" : "Pin to the top, through every filter"}
+                          >
+                            {pinned ? <UnpinIcon /> : <PinIcon />}
+                          </button>
                           <button
                             className="toggle-button icon-button"
                             onClick={(event) => {
@@ -879,17 +1184,57 @@ export const SessionsPane = memo(function SessionsPane({
                           </button>
                         </span>
                       </div>
-                      {/* Why this row is here, when the reason is not in its
-                          title: one line of the conversation that matched. */}
-                      {hit && hit.snippet && (
+                      {/* Why this row is here, and where in the session to
+                          find it: one row per matching turn, each one a click
+                          away from the conversation around it. Listing them all
+                          rather than only the first is what makes a result
+                          scannable — the first match is rarely the one that
+                          tells you this is the session you meant. */}
+                      {hit?.snippets.map((snippet, index) => (
                         <div
+                          key={`${snippet.offset}-${index}`}
                           className="match-row"
-                          onClick={() => openSession(session)}
-                          title={hit.snippets.join("\n\n")}
+                          data-role={snippet.role}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openSession(session, snippet.offset);
+                          }}
+                          title={[
+                            snippet.text,
+                            snippet.role === "user" ? "you said this" : "claude said this",
+                            "Click to open the session at this turn.",
+                            index === 0 && hit.matchCount > hit.snippets.length
+                              ? `${hit.matchCount} matching turns in all`
+                              : null,
+                          ]
+                            .filter(Boolean)
+                            .join("\n\n")}
                         >
-                          <span className="match-count">{hit.matchCount}×</span>
-                          <span className="match-text">{hit.snippet}</span>
+                          {/* The count sits on the first row only, but the
+                              column is held on all of them so the snippets
+                              stay aligned under each other. */}
+                          <span className="match-count">
+                            {index === 0 ? `${hit.matchCount}×` : ""}
+                          </span>
+                          <span className="match-text">
+                            {markTerms(snippet.text, hitTerms).map((segment, at) =>
+                              segment.hit ? (
+                                <mark key={at} className="search-hit">
+                                  {segment.text}
+                                </mark>
+                              ) : (
+                                <span key={at}>{segment.text}</span>
+                              ),
+                            )}
+                          </span>
                         </div>
+                      ))}
+                      {showRecap && (
+                        <RecapBlock
+                          state={recaps.get(session.id)}
+                          cwd={session.cwd ?? group.cwd}
+                          onOpenFile={onOpenFile}
+                        />
                       )}
                       {showFanout && (
                         <>

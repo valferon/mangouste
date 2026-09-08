@@ -404,7 +404,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 }
 
 /// `2026-08-22T20:14:59.987Z` to epoch millis. Returns 0 on anything else.
-fn parse_iso_ms(text: &str) -> u64 {
+pub(crate) fn parse_iso_ms(text: &str) -> u64 {
     let bytes = text.as_bytes();
     if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
         return 0;

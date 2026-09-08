@@ -26,6 +26,8 @@ import type {
   SearchOutcome,
   StartOptions,
   SessionHit,
+  SessionRecap,
+  SessionWindow,
   StatsSummary,
   TerminalInfo,
 } from "./types";
@@ -83,6 +85,30 @@ export const clipboardImage = () => invoke<ClipboardImage | null>("clipboard_ima
 export const listSessions = () => invoke<ProjectGroup[]>("list_sessions");
 export const readSessionTranscript = (file: string, limit?: number) =>
   invoke<ClaudeFrame[]>("read_session_transcript", { file, limit });
+
+/**
+ * The conversation around one byte offset — the other half of a search hit.
+ *
+ * `readSessionTranscript` answers "show me this session"; this answers "show me
+ * this moment in it", which is what a transcript match actually found. Without
+ * it a hit older than the pane's history limit is unreachable.
+ */
+export const readSessionWindow = (
+  file: string,
+  offset: number,
+  before?: number,
+  after?: number,
+) => invoke<SessionWindow>("read_session_window", { file, offset, before, after });
+
+/**
+ * What a session did: files changed, commits landed, branches, fan-outs.
+ *
+ * Reads the whole transcript, so it is asked for on demand and never on a scan.
+ * Cached and incremental in Rust — re-asking costs nothing until the session
+ * writes more.
+ */
+export const sessionRecap = (file: string) =>
+  invoke<SessionRecap>("session_recap", { file });
 
 /**
  * Search inside every transcript, not just the metadata a scan holds.

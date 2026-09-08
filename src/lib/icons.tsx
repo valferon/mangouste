@@ -271,7 +271,49 @@ export function UnarchiveIcon(props: IconProps) {
   );
 }
 
+/**
+ * Pinned: a push-pin, and the one glyph in the rail drawn filled — a pin is a
+ * standing decision rather than a state the transcript reports, so it has to
+ * read differently from the status shapes beside it.
+ */
+export function PinIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path
+        d="M9.6 1.9 14.1 6.4l-1.7.6a3 3 0 0 0-1.4 1l-1.3 1.7.6 1.4-3-.1-4 3.1 2.4-4.4-.1-2.7 1.4.6 1.7-1.3a3 3 0 0 0 1-1.4Z"
+        fill="currentColor"
+      />
+    </Icon>
+  );
+}
+
+/** Unpin: the same pin, hollow and struck through. */
+export function UnpinIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9.6 1.9 14.1 6.4l-1.7.6a3 3 0 0 0-1.4 1l-1.3 1.7.6 1.4-3-.1-4 3.1 2.4-4.4-.1-2.7 1.4.6 1.7-1.3a3 3 0 0 0 1-1.4Z" />
+      <path d="M2.2 13.8 13.8 2.2" />
+    </Icon>
+  );
+}
+
 /** Magnifier for the sessions filter box. */
+/**
+ * Recap glyph: a page with an account written on it.
+ *
+ * Deliberately not a list glyph — the sidebar already spends `▸`/`▾` on the
+ * fan-out, and a second list-shaped affordance next to it reads as more of the
+ * same thing rather than as a different question.
+ */
+export function RecapIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.6 2.4h8.8v11.2H3.6z" />
+      <path d="M5.8 5.4h4.4M5.8 8h4.4M5.8 10.6h2.6" />
+    </Icon>
+  );
+}
+
 export function SearchIcon(props: IconProps) {
   return (
     <Icon {...props}>
