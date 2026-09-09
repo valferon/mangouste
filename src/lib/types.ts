@@ -38,6 +38,21 @@ export interface RunningAgent {
   mtimeMs: number;
 }
 
+/**
+ * A backgrounded Bash command the transcript never saw finish.
+ *
+ * The turn that launches one ends cleanly straight away, so without these a
+ * session with a build still running read as `finished`.
+ */
+export interface BackgroundTask {
+  id: string;
+  /** The Bash call's own description, falling back to the command line. */
+  label: string | null;
+  outputPath: string;
+  /** mtime of the output file: the only evidence of progress there is. */
+  mtimeMs: number;
+}
+
 /** A Workflow-tool run with agents writing right now. */
 export interface RunningWorkflow {
   runId: string;
@@ -75,6 +90,8 @@ export interface SessionMeta {
   runningAgents: RunningAgent[];
   /** Workflow-tool runs with agents writing within the active window. */
   runningWorkflows: RunningWorkflow[];
+  /** Backgrounded commands still running, newest launch last. */
+  backgroundTasks: BackgroundTask[];
 }
 
 export interface ProjectGroup {

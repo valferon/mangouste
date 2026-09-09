@@ -17,6 +17,7 @@ import {
   DeepSearchIcon,
   MarkAllReadIcon,
   PencilIcon,
+  BackgroundTaskGlyph,
   PinIcon,
   ReadToggleIcon,
   RecapIcon,
@@ -39,6 +40,7 @@ import { useFlags } from "../lib/sessionFlagsContext";
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import type {
+  BackgroundTask,
   ProjectGroup,
   RunningAgent,
   SessionHit,
@@ -183,6 +185,9 @@ function sessionHaystack(session: SessionMeta, group: ProjectGroup): string {
   ];
   for (const agent of session.runningAgents ?? []) {
     parts.push(agent.description, agent.agentType);
+  }
+  for (const task of session.backgroundTasks ?? []) {
+    parts.push(task.label, task.id);
   }
   for (const workflow of session.runningWorkflows ?? []) {
     parts.push(workflow.name, workflow.phase);
@@ -909,6 +914,30 @@ export const SessionsPane = memo(function SessionsPane({
     </div>
   );
 
+  /**
+   * A command the session backgrounded and has not been told finished. Sits
+   * beside the agent rows because it answers the same question — what is this
+   * session still doing — from the other direction: the task's own output
+   * file rather than a sidechain log.
+   */
+  const taskRow = (task: BackgroundTask, session: SessionMeta) => (
+    <div
+      key={task.id}
+      className="task-row"
+      onClick={() => openSession(session)}
+      title={[
+        task.label || task.id,
+        "backgrounded command, still running",
+        `output last written ${shortAge(task.mtimeMs)} ago`,
+        task.outputPath,
+      ].join("\n")}
+    >
+      <BackgroundTaskGlyph />
+      <span className="title">{task.label || task.id}</span>
+      <span className="agent-type">{task.id}</span>
+    </div>
+  );
+
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
       <div
@@ -1139,9 +1168,21 @@ export const SessionsPane = memo(function SessionsPane({
                   const pinned = flags.isPinned(session.id);
                   const agents = session.runningAgents ?? [];
                   const workflows = session.runningWorkflows ?? [];
+                  const tasks = session.backgroundTasks ?? [];
                   const workflowAgents = workflows.reduce((n, w) => n + w.agents.length, 0);
                   const fanout = agents.length + workflowAgents;
-                  const showFanout = fanout > 0 && (fanoutOverride.get(session.id) ?? true);
+                  // Agents and backgrounded commands expand from the same
+                  // twisty: both answer what the session is still doing.
+                  const working = fanout + tasks.length;
+                  const workingLabel = [
+                    fanout > 0 ? `${fanout} agent${fanout === 1 ? "" : "s"} writing now` : null,
+                    tasks.length > 0
+                      ? `${tasks.length} backgrounded command${tasks.length === 1 ? "" : "s"} running`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
+                  const showFanout = working > 0 && (fanoutOverride.get(session.id) ?? true);
                   const heat = heatLevel(session);
                   return (
                     <Fragment key={session.id}>
@@ -1162,6 +1203,7 @@ export const SessionsPane = memo(function SessionsPane({
                           session.lastPrompt,
                           hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
                           `${status} · ${shortAge(session.lastActivityMs)} ago`,
+                          workingLabel || null,
                           pinned ? "pinned — kept through every filter" : null,
                           markedUnread ? "marked unread" : null,
                           session.gitBranch,
@@ -1171,14 +1213,14 @@ export const SessionsPane = memo(function SessionsPane({
                           .filter(Boolean)
                           .join("\n")}
                       >
-                        {fanout > 0 ? (
+                        {working > 0 ? (
                           <span
                             className="twisty"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggleFanout(session.id, true);
                             }}
-                            title={`${fanout} agent${fanout === 1 ? "" : "s"} writing now`}
+                            title={workingLabel}
                           >
                             {showFanout ? "▾" : "▸"}
                           </span>
@@ -1192,9 +1234,10 @@ export const SessionsPane = memo(function SessionsPane({
                         <span className="title">
                           {session.title ?? session.id.slice(0, 8)}
                         </span>
-                        {fanout > 0 && !showFanout && (
-                          <span className="agent-count" title={`${fanout} agents writing now`}>
-                            {fanout}⚙
+                        {working > 0 && !showFanout && (
+                          <span className="agent-count" title={workingLabel}>
+                            {fanout > 0 && `${fanout}⚙`}
+                            {tasks.length > 0 && `${tasks.length}❯`}
                           </span>
                         )}
                         {/* Wrapped rather than titled directly: a `title`
@@ -1320,6 +1363,7 @@ export const SessionsPane = memo(function SessionsPane({
                       )}
                       {showFanout && (
                         <>
+                          {tasks.map((task) => taskRow(task, session))}
                           {agents.map((agent) => agentRow(agent, session, false))}
                           {workflows.map((workflow) => (
                             <Fragment key={workflow.runId}>

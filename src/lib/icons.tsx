@@ -452,6 +452,20 @@ export function SubagentGlyph({ running, ...rest }: { running: boolean } & IconP
   );
 }
 
+/**
+ * A backgrounded command. A shell prompt rather than a ring or a box: it is not
+ * an agent and not a run — it is a command line the session let go of.
+ */
+export function BackgroundTaskGlyph(props: IconProps) {
+  const merged = { ...props, className: "task-glyph" };
+  return (
+    <Icon {...merged}>
+      <path d="M3.4 4.4 6.4 8l-3 3.6" />
+      <path d="M8.4 11.6h4.2" />
+    </Icon>
+  );
+}
+
 /** A Workflow-tool run: the parent of a group of agent rows. */
 export function WorkflowGlyph(props: IconProps) {
   const merged = { ...props, className: "workflow-glyph" };

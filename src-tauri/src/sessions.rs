@@ -50,6 +50,18 @@ const IDLE_WINDOW_MS: u64 = 24 * 3_600_000;
 /// it is called interrupted — a build or a subagent fan-out legitimately runs
 /// for tens of minutes.
 const TOOL_RUNNING_GRACE_MS: u64 = 30 * 60_000;
+/// A backgrounded command appends nothing to the transcript while it runs, and
+/// its own output file can sit silent for minutes (a linker, a quiet test run),
+/// so a pending task holds the session live for this long past the newer of the
+/// last transcript record and the last byte written to its output. Beyond that
+/// the likelier explanation is a window that died taking its children with it —
+/// nothing is ever written to the transcript for that.
+const BACKGROUND_TASK_GRACE_MS: u64 = 30 * 60_000;
+
+/// Head of the `tool_result` Claude Code writes for a backgrounded Bash call,
+/// followed by the task id, and later in the same text by `BACKGROUND_OUTPUT`.
+const BACKGROUND_START: &str = "Command running in background with ID: ";
+const BACKGROUND_OUTPUT: &str = "Output is being written to: ";
 
 /// `stop_reason` values that mean the turn closed cleanly. Notably excludes
 /// `tool_use` (a tool is still running) and `pause_turn` (harness auto-continues).
@@ -98,6 +110,31 @@ const LIVENESS_SYSTEM_SUBTYPES: [&str; 2] = ["api_error", "model_refusal_fallbac
 /// window.
 const TERMINAL_WORKFLOW_STATUSES: [&str; 6] =
     ["completed", "failed", "error", "cancelled", "killed", "stopped"];
+
+/// A backgrounded Bash command the transcript never saw finish.
+///
+/// Cache-stable, so it lives on `StatusInputs`: the launch and its completion
+/// notice are both records. What is NOT stable is whether the command is still
+/// going, which only its output file can answer — see `probe_background`.
+#[derive(Debug, Clone)]
+struct PendingTask {
+    id: String,
+    /// The Bash call's own description, falling back to the command line.
+    label: Option<String>,
+    output_path: String,
+}
+
+/// One backgrounded command still believed to be running.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTask {
+    /// Task id from the launch marker, e.g. `bdvk6z2m9`.
+    pub id: String,
+    pub label: Option<String>,
+    pub output_path: String,
+    /// mtime of the output file: the only evidence of progress there is.
+    pub mtime_ms: u64,
+}
 
 /// One subagent whose sidechain log is being written right now.
 ///
@@ -181,6 +218,8 @@ pub struct SessionMeta {
     pub running_agents: Vec<RunningAgent>,
     /// Workflow-tool runs with agents writing within the active window.
     pub running_workflows: Vec<RunningWorkflow>,
+    /// Backgrounded commands still running, newest launch last.
+    pub background_tasks: Vec<BackgroundTask>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,6 +253,10 @@ struct StatusInputs {
     queue_depth: i64,
     /// Timestamp of the newest record, preferred over mtime for activity.
     ended_at_ms: u64,
+    /// Backgrounded commands launched in the sampled tail with no completion
+    /// notice after them. A turn can end cleanly with one of these still
+    /// running — which is the whole reason they are tracked.
+    background_tasks: Vec<PendingTask>,
 }
 
 /// One parsed session, plus the inputs needed to re-derive its status cheaply.
@@ -544,6 +587,27 @@ fn mtime_ms(metadata: std::fs::Metadata) -> Option<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
+/// Stat the output files of the tasks the transcript left pending.
+///
+/// The transcript says a command was backgrounded; only the output file says
+/// anything about it since. A file that is gone — a cleared `/tmp`, a reboot —
+/// is proof the task went with it, so it drops out instead of holding a session
+/// live forever.
+fn probe_background(pending: &[PendingTask]) -> Vec<BackgroundTask> {
+    pending
+        .iter()
+        .filter_map(|task| {
+            let mtime = std::fs::metadata(&task.output_path).ok().and_then(mtime_ms)?;
+            Some(BackgroundTask {
+                id: task.id.clone(),
+                label: task.label.clone(),
+                output_path: task.output_path.clone(),
+                mtime_ms: mtime,
+            })
+        })
+        .collect()
+}
+
 /// Derive a session's status.
 ///
 /// Port of `computeStatus` from the session-control-center extension. The
@@ -553,6 +617,7 @@ fn classify(
     inputs: &StatusInputs,
     last_activity_ms: u64,
     sidechain_ms: u64,
+    background: &[BackgroundTask],
     now_ms: u64,
 ) -> &'static str {
     let age = now_ms.saturating_sub(last_activity_ms);
@@ -582,6 +647,17 @@ fn classify(
     let sidechain_busy =
         sidechain_ms > last_activity_ms && now_ms.saturating_sub(sidechain_ms) <= ACTIVE_WINDOW_MS;
 
+    // A backgrounded command is work in flight that the transcript cannot show:
+    // the turn that launched it ends cleanly and nothing more is written until
+    // the notice lands. Measured from whichever is newer, the transcript or the
+    // command's own output, so a chatty task holds the session live as long as
+    // it keeps writing and a silent one still gets the grace.
+    let background_busy = background.iter().any(|task| {
+        now_ms.saturating_sub(task.mtime_ms.max(last_activity_ms)) <= BACKGROUND_TASK_GRACE_MS
+    });
+    // Anything still working, wherever it is working.
+    let work_in_flight = sidechain_busy || background_busy;
+
     // Clean end = newest record is an assistant message with a terminal
     // stop_reason. Anything else means the turn never closed.
     let clean_end = inputs.last_conv_role.as_deref() == Some("assistant")
@@ -594,7 +670,7 @@ fn classify(
         if clean_end {
             // Queue depth is only trusted while recent: a live harness would
             // have dequeued within seconds, so an old positive depth is noise.
-            return if inputs.queue_depth > 0 || sidechain_busy {
+            return if inputs.queue_depth > 0 || work_in_flight {
                 "active"
             } else {
                 "finished"
@@ -605,14 +681,14 @@ fn classify(
     }
 
     if clean_end {
-        return if sidechain_busy { "active" } else { "finished" };
+        return if work_in_flight { "active" } else { "finished" };
     }
 
     // Dangling and quiet. An unanswered tool_use is normal silence, so hold
     // active through the tool grace window rather than flapping to interrupted.
     let tool_in_flight = inputs.last_conv_role.as_deref() == Some("assistant")
         && inputs.last_stop_reason.as_deref() == Some("tool_use");
-    if tool_in_flight && (age <= TOOL_RUNNING_GRACE_MS.max(ACTIVE_WINDOW_MS) || sidechain_busy) {
+    if tool_in_flight && (age <= TOOL_RUNNING_GRACE_MS.max(ACTIVE_WINDOW_MS) || work_in_flight) {
         return "active";
     }
 
@@ -682,6 +758,92 @@ pub(crate) fn is_interrupt_marker(message: &serde_json::Value) -> bool {
     }
 }
 
+/// A `tool_result` block's text, in either shape the transcript uses.
+fn tool_result_text(block: &serde_json::Value) -> Option<String> {
+    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+        return None;
+    }
+    match block.get("content") {
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        Some(serde_json::Value::Array(blocks)) => {
+            let text = blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+/// An assistant block that asked for a Bash call to be backgrounded, as
+/// (tool_use id, label). A foreground call never becomes a task: it holds the
+/// turn open, so `tool_use` liveness already covers it.
+fn background_launch_call(block: &serde_json::Value) -> Option<(String, Option<String>)> {
+    if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+        return None;
+    }
+    if block.get("name").and_then(|n| n.as_str()) != Some("Bash") {
+        return None;
+    }
+    let input = block.get("input")?;
+    if input.get("run_in_background").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    let label = str_field(input, "description")
+        .or_else(|| str_field(input, "command"))
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|text: String| text.chars().take(120).collect::<String>());
+    Some((str_field(block, "id")?, label))
+}
+
+/// A launch marker in a `tool_result`, resolved against the calls above it.
+///
+/// The marker carries the id and the output path; the label comes from the
+/// `tool_use` it answers, which is in the same tail unless the sample cut
+/// between them — a task with no label is still a task.
+fn background_launch(
+    block: &serde_json::Value,
+    launches: &HashMap<String, Option<String>>,
+) -> Option<PendingTask> {
+    let text = tool_result_text(block)?;
+    let rest = text.split_once(BACKGROUND_START)?.1;
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if id.is_empty() {
+        return None;
+    }
+    // The path runs to the sentence break, not to the next space: a cwd with a
+    // space in it is still one path.
+    let tail = rest.split_once(BACKGROUND_OUTPUT)?.1;
+    let end = tail.find(". ").or_else(|| tail.find(".\n")).unwrap_or(tail.len());
+    let output_path = tail[..end].trim().to_string();
+    if output_path.is_empty() {
+        return None;
+    }
+    let label = str_field(block, "tool_use_id")
+        .and_then(|call| launches.get(&call).cloned())
+        .flatten();
+    Some(PendingTask { id, label, output_path })
+}
+
+/// The task id a `<task-notification>` record is reporting on.
+///
+/// Written for every ending a task can have — completed, failed, killed,
+/// stopped — so the status inside it is not read: any of them closes the task.
+fn task_notification_id(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<task-notification") {
+        return None;
+    }
+    let (id, _) = trimmed.split_once("<task-id>")?.1.split_once("</task-id>")?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Walk the tail oldest-to-newest, last write wins.
 ///
 /// Only the tail of the file is available, so `queue_depth` can miss an enqueue
@@ -689,6 +851,9 @@ pub(crate) fn is_interrupt_marker(message: &serde_json::Value) -> bool {
 /// toward "finished" rather than a stuck "active".
 fn status_inputs(tail: &[serde_json::Value]) -> StatusInputs {
     let mut inputs = StatusInputs::default();
+    // Backgrounded Bash calls seen so far, by `tool_use` id, so the marker
+    // that answers one can borrow its description.
+    let mut launches: HashMap<String, Option<String>> = HashMap::new();
 
     for record in tail {
         let record_type = str_field(record, "type");
@@ -730,8 +895,40 @@ fn status_inputs(tail: &[serde_json::Value]) -> StatusInputs {
                                     .is_some_and(|name| INPUT_PROMPT_TOOLS.contains(&name))
                         })
                     });
+                for block in message
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .map(|blocks| blocks.as_slice())
+                    .unwrap_or_default()
+                {
+                    if let Some((call, label)) = background_launch_call(block) {
+                        launches.insert(call, label);
+                    }
+                }
             }
             Some("user") => {
+                // Background bookkeeping comes first, before the synthetic
+                // skip: a completion notice is synthetic — not a turn, and it
+                // must not move the watermark — yet it is the only record that
+                // ever closes a task out.
+                if let Some(message) = record.get("message") {
+                    for text in text_payloads(message) {
+                        if let Some(done) = task_notification_id(text) {
+                            inputs.background_tasks.retain(|task| task.id != done);
+                        }
+                    }
+                    for block in message
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|blocks| blocks.as_slice())
+                        .unwrap_or_default()
+                    {
+                        if let Some(task) = background_launch(block, &launches) {
+                            inputs.background_tasks.retain(|seen| seen.id != task.id);
+                            inputs.background_tasks.push(task);
+                        }
+                    }
+                }
                 // Command echoes and IDE/task injections are not turns. Counting
                 // them made finished sessions read as active, then interrupted.
                 if record.get("message").is_some_and(is_synthetic_echo) {
@@ -754,8 +951,17 @@ fn status_inputs(tail: &[serde_json::Value]) -> StatusInputs {
                     note_activity(&mut inputs);
                 }
             }
+            // A completion notice reaches the transcript as a queued input
+            // before — and sometimes instead of — the `user` record that
+            // delivers it: a session closed between the two never gets the
+            // delivery. Either form proves the task is over.
             Some("queue-operation") => match {
                 note_activity(&mut inputs);
+                if let Some(done) =
+                    str_field(record, "content").as_deref().and_then(task_notification_id)
+                {
+                    inputs.background_tasks.retain(|task| task.id != done);
+                }
                 str_field(record, "operation")
             }
             .as_deref()
@@ -802,6 +1008,113 @@ fn parse_timestamp_ms(text: &str) -> Option<u64> {
     u64::try_from(total).ok()
 }
 
+/// Format epoch millis the way transcript records carry timestamps.
+///
+/// Inverse of `parse_timestamp_ms`, and hand-rolled for the same reason: a date
+/// crate earns nothing here.
+fn format_timestamp_ms(ms: u64) -> String {
+    let seconds = (ms / 1_000) as i64;
+    let millis = ms % 1_000;
+    let days = seconds.div_euclid(86_400);
+    let time = seconds.rem_euclid(86_400);
+
+    // civil-from-days (Howard Hinnant), the other direction.
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_adjusted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_adjusted + 2) / 5 + 1;
+    let month = if month_adjusted < 10 { month_adjusted + 3 } else { month_adjusted - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    let (hour, minute, second) = (time / 3_600, (time % 3_600) / 60, time % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// A v4 uuid, straight from the OS entropy pool.
+///
+/// The marker below needs an id the CLI can chain on resume, and 16 random
+/// bytes is the whole of what a uuid crate would bring.
+fn new_uuid() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+}
+
+/// Record that a turn was cut off, in the CLI's own words.
+///
+/// Called when this app kills a chat that was mid-turn: a closed pane, a closed
+/// window, the app quitting. Without it the transcript simply stops — nothing
+/// in the store says the turn ended — so every reader shows the session live
+/// until the grace windows expire, and half an hour of "active" is the wrong
+/// answer for a process that is already gone.
+///
+/// The record is the one the CLI writes for ESC, chained onto the newest record
+/// carrying a uuid so `--resume` reads it as any other interrupt. Returns
+/// whether anything was written.
+pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
+    let tail = parsed_lines(&read_last_lines(path, 8, Some(TAIL_BYTES)).unwrap_or_default());
+    // Already cut off — by ESC, or by a second kill for the same chat. A repeat
+    // marker would add a turn to the transcript and say nothing new.
+    let already = tail
+        .iter()
+        .rev()
+        .find(|record| is_conversational(record))
+        .is_some_and(|record| record.get("message").is_some_and(is_interrupt_marker));
+    if already {
+        return false;
+    }
+    let Some(uuid) = new_uuid() else {
+        return false;
+    };
+    let newest = tail.iter().rev().find(|record| record.get("uuid").is_some());
+    let mut record = serde_json::json!({
+        "parentUuid": newest.and_then(|record| str_field(record, "uuid")),
+        "isSidechain": false,
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "[Request interrupted by user]"}],
+        },
+        "uuid": uuid,
+        "timestamp": format_timestamp_ms(now_ms()),
+        "userType": "external",
+        "sessionId": session_id,
+    });
+    // Copied from the session's own records rather than recomputed: these are
+    // properties of the session, and a reader that groups or filters on them
+    // must see the values it already has. Taken per key from the newest record
+    // that carries it, since not every record carries all three.
+    for key in ["cwd", "version", "gitBranch"] {
+        if let Some(value) = tail.iter().rev().find_map(|record| str_field(record, key)) {
+            record[key] = serde_json::Value::String(value);
+        }
+    }
+    // One appended write of a whole line, which is safe beside the CLI's own
+    // appends; a reader that catches a torn line skips it and heals next scan.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{record}")
+        })
+        .is_ok()
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -811,7 +1124,7 @@ fn now_ms() -> u64 {
 
 /// Parse one transcript's samples into a cache entry.
 ///
-/// `status`, `running_agents` and `running_workflows` are left neutral: they
+/// `status`, the fan-out lists and the background tasks are left neutral: they
 /// decay with wall-clock time, so `list_sessions` recomputes them on every scan
 /// from a TTL-cached probe, cache hit or miss. Probing here would be thrown away.
 fn read_session(path: &Path, project_dir: &str) -> Option<CachedSession> {
@@ -911,12 +1224,13 @@ fn read_session(path: &Path, project_dir: &str) -> Option<CachedSession> {
             modified_ms,
             last_activity_ms,
             size_bytes,
-            // Placeholders; `list_sessions` fills all three in per scan.
+            // Placeholders; `list_sessions` fills all four in per scan.
             status: "idle",
             message_count,
             message_count_exact: size_bytes <= TAIL_BYTES,
             running_agents: Vec::new(),
             running_workflows: Vec::new(),
+            background_tasks: Vec::new(),
         },
     })
 }
@@ -1014,9 +1328,10 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
                 } else {
                     cached.mtime
                 };
-                let probe = if now.saturating_sub(last_activity_ms) > IDLE_WINDOW_MS {
-                    // Long-dead session: nothing can be running under it, so
-                    // skip the walk entirely.
+                // Long-dead session: nothing can be running under it, so skip
+                // both the sidechain walk and the output-file stats entirely.
+                let stale = now.saturating_sub(last_activity_ms) > IDLE_WINDOW_MS;
+                let probe = if stale {
                     probes.remove(&path);
                     SidechainProbe::default()
                 } else {
@@ -1029,12 +1344,25 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
                         }
                     }
                 };
-                let computed =
-                    classify(&cached.inputs, last_activity_ms, probe.newest_mtime_ms, now);
+                // Not TTL-cached beside the probe: this is a handful of stats
+                // against paths already known, not a directory walk.
+                let background = if stale {
+                    Vec::new()
+                } else {
+                    probe_background(&cached.inputs.background_tasks)
+                };
+                let computed = classify(
+                    &cached.inputs,
+                    last_activity_ms,
+                    probe.newest_mtime_ms,
+                    &background,
+                    now,
+                );
                 cached.meta.status =
                     apply_downgrade_grace(previous_status, computed, cached.mtime, now);
                 cached.meta.running_agents = probe.running;
                 cached.meta.running_workflows = probe.workflows;
+                cached.meta.background_tasks = background;
                 sessions.push(cached.meta.clone());
             }
         }
@@ -1835,9 +2163,20 @@ mod status_tests {
         }
     }
 
-    /// No sidechain, so every case below turns on the transcript alone.
+    /// No sidechain and no background task, so every case below turns on the
+    /// transcript alone.
     fn status(inputs: &StatusInputs, age_ms: u64) -> &'static str {
-        classify(inputs, NOW - age_ms, 0, NOW)
+        classify(inputs, NOW - age_ms, 0, &[], NOW)
+    }
+
+    /// One backgrounded command whose output was last written `age_ms` ago.
+    fn task(age_ms: u64) -> Vec<BackgroundTask> {
+        vec![BackgroundTask {
+            id: "bdvk6z2m9".to_string(),
+            label: Some("cargo build".to_string()),
+            output_path: "/tmp/tasks/bdvk6z2m9.output".to_string(),
+            mtime_ms: NOW - age_ms,
+        }]
     }
 
     #[test]
@@ -1906,7 +2245,126 @@ mod status_tests {
 
         // A fanned-out session writes nothing to its own transcript for minutes.
         let sidechain = NOW - 1_000;
-        assert_eq!(classify(&clean, NOW - ACTIVE_WINDOW_MS - 1, sidechain, NOW), "active");
+        assert_eq!(
+            classify(&clean, NOW - ACTIVE_WINDOW_MS - 1, sidechain, &[], NOW),
+            "active"
+        );
+    }
+
+    #[test]
+    fn a_backgrounded_command_outlives_the_turn_that_launched_it() {
+        // The reported bug: the turn ends cleanly the moment the command is
+        // backgrounded, so the row read "finished" with a build still going.
+        let clean = ended("assistant", Some("end_turn"));
+        let quiet_task = task(BACKGROUND_TASK_GRACE_MS * 2);
+        for age in [1_000, ACTIVE_WINDOW_MS + 1, BACKGROUND_TASK_GRACE_MS - 1] {
+            assert_eq!(
+                classify(&clean, NOW - age, 0, &quiet_task, NOW),
+                "active",
+                "a pending task at {age}ms should hold the session live"
+            );
+        }
+        // Past the grace with nothing written either side, the likelier story
+        // is a dead window: no notice is ever recorded for that.
+        assert_eq!(
+            classify(&clean, NOW - BACKGROUND_TASK_GRACE_MS - 1, 0, &quiet_task, NOW),
+            "finished"
+        );
+        // Unless the command itself is still writing, which is proof enough.
+        assert_eq!(
+            classify(&clean, NOW - BACKGROUND_TASK_GRACE_MS - 1, 0, &task(1_000), NOW),
+            "active"
+        );
+    }
+
+    #[test]
+    fn a_launch_marker_opens_a_task_and_its_notice_closes_it() {
+        let launch = |id: &str| {
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-09-09T08:58:49.774Z",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_016yYsufCF6S1DAxfXqDzeTD",
+                    "content": format!(
+                        "Command running in background with ID: {id}. Output is being \
+                         written to: /tmp/claude-1000/-repo/sess/tasks/{id}.output. You will \
+                         be notified when it completes."
+                    ),
+                }]},
+            })
+        };
+        let call = serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-09-09T08:58:48.000Z",
+            "message": {"stop_reason": "tool_use", "content": [{
+                "type": "tool_use",
+                "id": "toolu_016yYsufCF6S1DAxfXqDzeTD",
+                "name": "Bash",
+                "input": {"command": "npm run app:build", "description": "Rebuild", "run_in_background": true},
+            }]},
+        });
+
+        let open = status_inputs(&[call.clone(), launch("bdvk6z2m9")]);
+        assert_eq!(open.background_tasks.len(), 1);
+        assert_eq!(open.background_tasks[0].id, "bdvk6z2m9");
+        assert_eq!(open.background_tasks[0].output_path, "/tmp/claude-1000/-repo/sess/tasks/bdvk6z2m9.output");
+        // The label comes from the call the marker answers.
+        assert_eq!(open.background_tasks[0].label.as_deref(), Some("Rebuild"));
+
+        let notice = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-09-09T09:20:00.000Z",
+            "message": {"content": [{"type": "text", "text":
+                "<task-notification>\n<task-id>bdvk6z2m9</task-id>\n<status>completed</status>\n</task-notification>"}]},
+        });
+        let closed = status_inputs(&[call.clone(), launch("bdvk6z2m9"), notice.clone()]);
+        assert!(closed.background_tasks.is_empty(), "the notice closes the task out");
+        // And it stays synthetic: it is not a turn and must not move the watermark.
+        assert_eq!(
+            closed.ended_at_ms,
+            parse_timestamp_ms("2026-09-09T08:58:49.774Z").unwrap()
+        );
+
+        // The queued form, which is all a session that ended before delivery
+        // ever writes, closes it just the same.
+        let queued = serde_json::json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": "2026-09-09T09:20:00.000Z",
+            "content": "<task-notification>\n<task-id>bdvk6z2m9</task-id>\n<status>completed</status>\n</task-notification>",
+        });
+        let queued_only = status_inputs(&[call.clone(), launch("bdvk6z2m9"), queued]);
+        assert!(queued_only.background_tasks.is_empty(), "the queued notice closes it too");
+
+        // A notice for one task leaves another running.
+        let two = status_inputs(&[call, launch("bdvk6z2m9"), launch("bnqto21na"), notice]);
+        assert_eq!(
+            two.background_tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["bnqto21na"]
+        );
+    }
+
+    #[test]
+    fn a_foreground_bash_call_is_not_a_task() {
+        let tail = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-09T08:58:48.000Z",
+                "message": {"stop_reason": "tool_use", "content": [{
+                    "type": "tool_use", "id": "toolu_1", "name": "Bash",
+                    "input": {"command": "cargo test"},
+                }]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-09-09T08:58:49.000Z",
+                "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok",
+                }]},
+            }),
+        ];
+        assert!(status_inputs(&tail).background_tasks.is_empty());
     }
 
     #[test]
@@ -1959,6 +2417,78 @@ mod status_tests {
     }
 
     #[test]
+    fn timestamps_round_trip_through_the_formatter() {
+        for text in [
+            "2026-09-09T08:58:49.774Z",
+            "2026-01-01T00:00:00.000Z",
+            "2024-02-29T23:59:59.999Z",
+            "1970-01-01T00:00:00.000Z",
+        ] {
+            let ms = parse_timestamp_ms(text).expect("parses");
+            assert_eq!(format_timestamp_ms(ms), text);
+        }
+    }
+
+    #[test]
+    fn killing_a_running_chat_leaves_the_cut_off_on_the_record() {
+        let dir = std::env::temp_dir().join("mangouste-interrupt-marker");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("2f8c1d40-0000-4000-8000-000000000001.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","timestamp":"2026-09-09T10:00:00.000Z","cwd":"/home/val/repo","version":"2.1.227","gitBranch":"main","message":{"role":"user","content":"rebuild it"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"22222222-2222-4222-8222-222222222222","timestamp":"2026-09-09T10:00:04.000Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo build"}}]}}"#,
+                "\n",
+            ),
+        )
+        .expect("write transcript");
+
+        // Mid-turn, so the rail would call this active for the whole tool grace
+        // even though the process is gone.
+        let before = read_session(&path, "-home-val-repo").expect("parsed");
+        assert_eq!(status(&before.inputs, 1_000), "active");
+
+        assert!(append_interrupt_marker(&path, "2f8c1d40-0000-4000-8000-000000000001"));
+        let after = read_session(&path, "-home-val-repo").expect("parsed");
+        assert!(after.inputs.interrupted);
+        assert_eq!(status(&after.inputs, 1_000), "interrupted");
+
+        let lines: Vec<serde_json::Value> =
+            parsed_lines(&std::fs::read_to_string(&path).expect("read back"));
+        assert_eq!(lines.len(), 3, "one record appended, nothing rewritten");
+        let marker = &lines[2];
+        // Chained onto the newest record, and carrying the session's own facts:
+        // a resume reads it as any other interrupt.
+        assert_eq!(
+            str_field(marker, "parentUuid").as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            str_field(marker, "sessionId").as_deref(),
+            Some("2f8c1d40-0000-4000-8000-000000000001")
+        );
+        assert_eq!(str_field(marker, "cwd").as_deref(), Some("/home/val/repo"));
+        assert_eq!(str_field(marker, "gitBranch").as_deref(), Some("main"));
+        assert_eq!(str_field(marker, "version").as_deref(), Some("2.1.227"));
+        let uuid = str_field(marker, "uuid").expect("a uuid");
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(&uuid[14..15], "4", "v4");
+        assert!(parse_timestamp_ms(&str_field(marker, "timestamp").unwrap()).is_some());
+
+        // A second kill for the same chat — a window close inside an app quit —
+        // must not append a turn that says the same thing twice.
+        assert!(!append_interrupt_marker(&path, "2f8c1d40-0000-4000-8000-000000000001"));
+        assert_eq!(
+            parsed_lines(&std::fs::read_to_string(&path).expect("read back")).len(),
+            3
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn both_marker_wordings_are_recognised_in_either_content_shape() {
         for text in ["[Request interrupted by user]", "[Request interrupted by user for tool use]"] {
             assert!(is_interrupt_marker(&serde_json::json!({"content": text})));
@@ -1969,3 +2499,5 @@ mod status_tests {
         assert!(!is_interrupt_marker(&serde_json::json!({"content": "interrupt the turn"})));
     }
 }
+
+

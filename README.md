@@ -329,6 +329,14 @@ Status is a port of the state machine in
 | `interrupted` | Went quiet mid-turn: ESC, dead window, or an API error |
 | `idle` | Nothing for over 24 h, and nothing above claimed it |
 
+A turn this app kills mid-flight is recorded as interrupted rather than left to
+age out: closing a pane, closing a window or quitting appends the same
+`[Request interrupted by user]` record the CLI writes for ESC, chained onto the
+newest record so `--resume` reads it as any other interrupt. Without it the
+transcript simply stops, and half an hour of `active` is the wrong answer for a
+process that is already gone. Only for a chat that was mid-turn, and only once —
+a chat killed between turns ended cleanly and should keep saying so.
+
 `awaiting` and `interrupted` are decided before the recency windows, so neither
 ages into `idle`. A question nobody answered is still unanswered a week later,
 and a turn that was cut off is still the reason the session stopped; collapsing
@@ -342,7 +350,12 @@ seen-store overlay rewrites it, exactly as the extension does — see below.
 
 Windows: active 5 min, idle 24 h, and a 30 min grace for an unanswered
 `tool_use` — tool calls append nothing while they run, so a shorter window
-mislabels long builds and agent fan-outs as interrupted. `system` records only
+mislabels long builds and agent fan-outs as interrupted. A pending backgrounded
+command earns the same 30 minutes, measured from whichever is newer: the last
+transcript record, or the last byte written to the command's own output file. So
+a chatty task holds its session `active` for as long as it keeps writing, a
+silent one still gets the grace, and past it the likelier story is a window that
+died taking its children with it — for which nothing is ever written. `system` records only
 move the activity watermark for the two subtypes that prove a turn is in flight
 (`api_error`, `model_refusal_fallback`); a whitelist, because `away_summary`
 lands minutes after the turn and would drag the watermark past its end.
@@ -384,6 +397,17 @@ branch, message count, full id, exact status — is in the row tooltip, because 
 rail is ~300px and the pane earns its keep by showing every session at once.
 Running agents and workflow runs nest under their session, open by default while
 anything is writing.
+
+Backgrounded commands nest there too, from the same twisty, in orange rather
+than purple — the session's own shell still going, not a fan-out. A row carries
+the Bash call's description and the task id, and its tooltip the output path and
+when that file was last written to. They are read out of the transcript in
+`src-tauri/src/sessions.rs`: a launch marker (`Command running in background
+with ID:`) opens a task, and either form of the `<task-notification>` closes it
+— the delivered `user` record, or the queued one, which is all a session that
+ended before delivery ever writes. Only `run_in_background` calls count; a
+foreground Bash call holds the turn open and `tool_use` liveness already covers
+it.
 
 A repo you opened but never talked to gets a header row too, with nothing under
 it. The rail is built out of transcripts, so reading code in a tree without

@@ -433,6 +433,7 @@ export const Dashboard = memo(function Dashboard({
         messageCountExact: false,
         runningAgents: [],
         runningWorkflows: [],
+        backgroundTasks: [],
       });
     },
     [metaById, onResume],

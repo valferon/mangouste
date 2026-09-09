@@ -1711,11 +1711,54 @@ mark.search-new {
   padding-left: calc(var(--rail-indent) + var(--rail-step) * 2);
 }
 
+/* A backgrounded command. Same shape as an agent row, orange rather than
+   purple: it is the session's own shell still going, not a fan-out. */
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-height);
+  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.task-row:hover {
+  background: var(--bg-hover);
+}
+
+.task-row .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The task id is context, not the label: it gives up its space first. */
+.task-row .agent-type {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
 .subagent-glyph,
 .workflow-glyph {
   flex: 0 0 auto;
   font-size: 12px;
   color: var(--purple);
+}
+
+.task-glyph {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--orange);
 }
 
 .subagent-glyph[data-running="false"] {

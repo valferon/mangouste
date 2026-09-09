@@ -33,6 +33,7 @@ function session(id: string): SessionMeta {
     messageCountExact: true,
     runningAgents: [],
     runningWorkflows: [],
+    backgroundTasks: [],
   };
 }
 

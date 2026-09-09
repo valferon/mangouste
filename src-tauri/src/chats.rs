@@ -281,6 +281,19 @@ impl ChatManager {
             unsafe { libc::killpg(chat.pid as i32, libc::SIGTERM) };
             let _ = child.kill();
         }
+        drop(child);
+        // A turn dies with the process and nothing in the store would say so,
+        // which left every reader showing the session live for as long as its
+        // grace windows ran. Written after the signal, so the CLI is no longer
+        // appending, and only for a turn that was actually in flight: a chat
+        // killed between turns ended cleanly and should keep saying so.
+        if chat.running.load(Ordering::SeqCst) {
+            if let Some(session) = chat.session_id.lock().clone() {
+                if let Some(path) = transcript_path(&session) {
+                    crate::sessions::append_interrupt_marker(&path, &session);
+                }
+            }
+        }
     }
 
     pub fn statuses(&self) -> Vec<ChatStatus> {
@@ -404,7 +417,7 @@ fn derive_title(text: &str) -> Option<String> {
 /// The transcript the CLI is writing for this session. Found by scanning the
 /// project dirs: the cwd-to-dirname escaping is lossy, so the directory name
 /// cannot be computed from `cwd` alone.
-fn transcript_path(session_id: &str) -> Option<PathBuf> {
+pub(crate) fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let root = crate::sessions::projects_root()?;
     let name = format!("{session_id}.jsonl");
     for entry in std::fs::read_dir(root).ok()?.flatten() {

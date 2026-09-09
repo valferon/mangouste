@@ -33,6 +33,7 @@ function session(id: string, agoMs: number, status: SessionStatus = "idle"): Ses
     messageCountExact: true,
     runningAgents: [],
     runningWorkflows: [],
+    backgroundTasks: [],
   };
 }
 
