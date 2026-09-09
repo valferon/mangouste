@@ -61,6 +61,38 @@
   font-family: var(--font-mono);
 }
 
+/* A repo you visited without talking to it. Dimmed rather than badged: it is
+   the same repo as any other header, holding nothing — and a header that reads
+   as loudly as one with live work under it would be a lie about the rail. */
+.repo-row[data-empty="true"] .label,
+.repo-row[data-empty="true"] svg {
+  color: var(--fg-dim);
+}
+
+/* The badge carries a duration here, not a word: "40m" is a unit and the
+   header's uppercase would turn it into a shout. */
+.repo-row[data-empty="true"] .badge {
+  text-transform: lowercase;
+}
+
+/* Stands in for the session rows the group has none of, and starts one when
+   clicked — which is the whole reason the row is in the rail. */
+.repo-empty-row {
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  padding: 0 6px 0 var(--rail-indent);
+  cursor: pointer;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--fg-dim);
+}
+
+.repo-empty-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 /* Fonts and metrics. Colours are NOT here — every palette lives in themes.css,
    which is generated from VS Code's own theme files, and a theme switch has to
    leave type and geometry exactly where they were. */

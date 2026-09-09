@@ -385,6 +385,19 @@ rail is ~300px and the pane earns its keep by showing every session at once.
 Running agents and workflow runs nest under their session, open by default while
 anything is writing.
 
+A repo you opened but never talked to gets a header row too, with nothing under
+it. The rail is built out of transcripts, so reading code in a tree without
+starting a session there used to leave no trace of it at all: switch away and the
+only way back is the repo picker. Visits are remembered in `src/lib/visitedRepos.ts`
+— a `localStorage` list of paths and when each was last shown, capped at 40 —
+and a visited repo the scan cannot account for is drawn dimmed, badged with its
+age instead of a status summary, over a row that starts a session there. Where
+the scan did find sessions and the standing filters are hiding all of them, that
+row says so and clicking it turns the idle filter on. Visits age out on the same
+24 h line that makes a session `idle`, so one retention rule covers both, and
+*Forget this Repo* in the row's menu drops one early. `onlyLive` is the one
+toggle a visited row cannot pass — nothing is running in a repo with no sessions.
+
 The badge column is a recency ramp (`■ ▪ ▫` at 20 / 120 / 480 min), keyed on the
 conversational watermark rather than mtime. A size ramp, not a colour one: three
 colour steps at 10px are indistinguishable, and the badge slot has no alignment
@@ -460,6 +473,19 @@ runs on a file they care about.
 
 Tabs never unmount for the same reason: hiding is not unmounting, so switching
 tabs cannot silently drop an unsaved buffer, and closing one asks before it does.
+
+Chat tabs do retire themselves, though — a strip is not a filing cabinet.
+`src/lib/tabRetire.ts` decides which: a chat whose session has been quiet for two
+days, or one whose session you archived, closes without asking. Two days rather
+than one because a session picked up the next morning is still the one you were
+working on. The clock is the conversational watermark, so a tab is not kept alive
+by having been glanced at. Nothing in flight is touched — `active`, `awaiting` and
+`pendingReview` outrank the clock, along with the tab in front and anything
+pinned — and the sweep rides the rail's own scan rather than a timer of its own,
+which is why a window left up overnight does not re-accumulate what the last one
+cleared. This is also the app's standing cost, not only its clutter: every repo's
+panes stay mounted on purpose, and each mounted chat is a listener on every frame
+its session streams.
 
 The strip belongs to the repo in front. A tab — a chat, a file, a diff — is owned
 by the repo it was opened from and only appears in that repo's strip, so switching

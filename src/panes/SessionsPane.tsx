@@ -37,6 +37,7 @@ import { useMenu, type MenuEntry } from "../lib/menu";
 import { recapFileLabel, recapHeadline } from "../lib/recap";
 import { useFlags } from "../lib/sessionFlagsContext";
 import { pinnedFirst } from "../lib/sessionStore";
+import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import type {
   ProjectGroup,
   RunningAgent,
@@ -435,6 +436,20 @@ export const SessionsPane = memo(function SessionsPane({
   const [recaps, setRecaps] = useState<Map<string, RecapState>>(new Map());
 
   const flags = useFlags();
+  const visited = useVisitedRepos();
+
+  /**
+   * Stamp the repo the workbench is showing as visited.
+   *
+   * Keyed on `activeCwd`, so every way into a tree counts the same: the picker,
+   * quick-open, a session resume that switched repos, and the launch that
+   * restored the last one. A launch re-stamping the remembered repo is the
+   * point — the window is showing it, and the row that takes you back to it
+   * should not have aged out while the app was closed.
+   */
+  useEffect(() => {
+    visited.recordVisit(activeCwd ?? "");
+  }, [activeCwd, visited.recordVisit]);
 
   /** Guards against overlapping scans when watcher events arrive in bursts. */
   const inFlight = useRef(false);
@@ -498,6 +513,19 @@ export const SessionsPane = memo(function SessionsPane({
   }, [groups]);
 
   /**
+   * How many sessions the scan found per repo, filters ignored.
+   *
+   * A visited repo whose sessions are all hidden still gets a header row, and
+   * the row has to say which of the two things it is: a tree with nothing in it
+   * yet, or one whose sessions the toggles are holding back.
+   */
+  const scannedCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const group of groups) counts.set(group.cwd, group.sessions.length);
+    return counts;
+  }, [groups]);
+
+  /**
    * Transcript hits, but only while they still answer the query in the box.
    *
    * Gated rather than cleared, so editing a query back to what it was reuses the
@@ -537,12 +565,27 @@ export const SessionsPane = memo(function SessionsPane({
       if (onlyLive) return status === "active" || status === "awaiting";
       return showIdle || status !== "idle";
     };
-    return groups
+    const scanned = groups
       .map((group) => ({
         ...group,
         sessions: pinnedFirst(group.sessions.filter(keep), flags.isPinned),
       }))
       .filter((group) => group.sessions.length > 0);
+    // Repos you were in that the scan cannot account for — no session there, or
+    // none that survived the filters. `onlyLive` is the one toggle they cannot
+    // pass: nothing is running under a repo with no sessions, so a rail asked
+    // for live work only must not list one.
+    const placeholders = onlyLive
+      ? []
+      : visitedPlaceholders(
+          visited.visits,
+          scanned.map((group) => group.cwd),
+          { now: Date.now(), includeIdle: showIdle || searching },
+        ).filter(
+          (group) =>
+            !searching || matchesTerms(`${group.label} ${group.cwd}`.toLowerCase(), terms),
+        );
+    return withPlaceholders(scanned, placeholders);
   }, [
     groups,
     onlyLive,
@@ -553,6 +596,7 @@ export const SessionsPane = memo(function SessionsPane({
     terms,
     haystacks,
     activeHits,
+    visited.visits,
   ]);
 
   /** Rows the query actually produced, for the header count. */
@@ -830,13 +874,20 @@ export const SessionsPane = memo(function SessionsPane({
         label: collapsed.has(group.dirName) ? "Expand" : "Collapse",
         run: () => toggleGroup(group.dirName),
       },
+      // Only a visited-repo row can be dismissed, and only because nothing on
+      // disk backs it. A group with sessions is there because the transcripts
+      // are, and forgetting the visit would not remove it.
+      group.sessions.length === 0 && {
+        label: "Forget this Repo",
+        run: () => visited.forget(group.cwd),
+      },
       "separator",
       { label: "Copy Path", run: () => void copyText(group.cwd) },
       { label: "Reveal in File Manager", run: () => void revealPath(group.cwd) },
       "separator",
       ...paneEntries(),
     ],
-    [onSelectRepo, onNewSession, collapsed, paneEntries],
+    [onSelectRepo, onNewSession, collapsed, paneEntries, visited.forget],
   );
 
   const agentRow = (agent: RunningAgent, session: SessionMeta, nested: boolean) => (
@@ -1012,14 +1063,25 @@ export const SessionsPane = memo(function SessionsPane({
           // every group without touching what the user collapsed by hand.
           const isCollapsed = collapsed.has(group.dirName) && !searching;
           const isActiveRepo = activeCwd === group.cwd;
+          // A group the scan produced always has sessions, so an empty one is a
+          // repo you were in with nothing to list under it.
+          const visitedMs = group.sessions.length === 0 ? visited.visits[group.cwd] : undefined;
+          const isVisitOnly = visitedMs !== undefined;
+          /** Sessions the scan found here that the toggles are holding back. */
+          const hiddenCount = isVisitOnly ? (scannedCounts.get(group.cwd) ?? 0) : 0;
           return (
             <div key={group.dirName}>
               <div
                 className="repo-row"
                 data-selected={isActiveRepo}
+                data-empty={isVisitOnly}
                 onClick={() => onSelectRepo(group.cwd)}
                 onContextMenu={(event) => menu.openContextMenu(event, repoMenu(group))}
-                title={group.cwd}
+                title={
+                  isVisitOnly
+                    ? `${group.cwd}\nno sessions · opened ${shortAge(visitedMs)} ago`
+                    : group.cwd
+                }
               >
                 <span
                   className="twisty"
@@ -1033,7 +1095,9 @@ export const SessionsPane = memo(function SessionsPane({
                 <RepoIcon />
                 <span className="label">{group.label}</span>
                 <span className="badge">
-                  {groupSummary(group.sessions.map((s) => flags.effectiveStatus(s)))}
+                  {isVisitOnly
+                    ? shortAge(visitedMs)
+                    : groupSummary(group.sessions.map((s) => flags.effectiveStatus(s)))}
                 </span>
                 <button
                   className="toggle-button"
@@ -1047,6 +1111,24 @@ export const SessionsPane = memo(function SessionsPane({
                 </button>
                 {isActiveRepo && <ChevronRightIcon className="repo-active-marker" />}
               </div>
+              {!isCollapsed && isVisitOnly && hiddenCount === 0 && (
+                <div
+                  className="repo-empty-row"
+                  onClick={() => onNewSession(group.cwd)}
+                  title="Start a session in this repo"
+                >
+                  no sessions yet — start one
+                </div>
+              )}
+              {!isCollapsed && isVisitOnly && hiddenCount > 0 && (
+                <div
+                  className="repo-empty-row"
+                  onClick={() => setShowIdle(true)}
+                  title="These are hidden by the standing filters — click to include idle sessions"
+                >
+                  {hiddenCount} session{hiddenCount === 1 ? "" : "s"} hidden by the filters
+                </div>
+              )}
               {!isCollapsed &&
                 group.sessions.map((session) => {
                   const status = flags.effectiveStatus(session);

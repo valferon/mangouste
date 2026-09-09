@@ -73,7 +73,8 @@ import {
   writeString,
 } from "./lib/persist";
 import { installPrimarySelectionBridge } from "./lib/primary";
-import { SessionFlagsProvider } from "./lib/sessionFlagsContext";
+import { retirableTabs, sessionsById } from "./lib/tabRetire";
+import { SessionFlagsProvider, useFlags } from "./lib/sessionFlagsContext";
 import { SYSTEM, THEME_LIST, applyTheme, loadTheme, type Theme } from "./lib/theme";
 import {
   cleanStoredTabs,
@@ -252,6 +253,10 @@ export default function App() {
 
 function Workbench() {
   const menu = useMenu();
+  /** The session overlay, for the retirement sweep: a pin keeps a tab, an
+      archive retires one. Read here rather than from `localStorage` so
+      archiving a session closes its tab on the spot. */
+  const flags = useFlags();
   const [workspaceRoot, setWorkspaceRoot] = useState<string>(
     () => readString(WORKSPACE_KEY),
   );
@@ -818,6 +823,16 @@ function Workbench() {
   }, [activeTab]);
 
   /**
+   * The same mirror for the tab list, so the retirement sweep below can read it
+   * without listing `tabs` as a dependency — a sweep that closes tabs would
+   * otherwise re-arm itself on its own result.
+   */
+  const tabsRef = useRef(tabs);
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  /**
    * Coarse status per chat tab, for its dot.
    *
    * Held here rather than in each pane because one extra state lives on top of
@@ -1348,6 +1363,38 @@ function Workbench() {
     },
     [forceCloseTab],
   );
+
+  /**
+   * Close chat tabs whose session has been quiet for two days, or been archived.
+   *
+   * Riding on `sessionGroups` rather than a timer of its own, because that is
+   * already the sweep: the sessions pane rescans every 15 seconds and on every
+   * `sessions://changed`, and the scan is where the watermarks come from. So
+   * this runs once shortly after launch, when the strip a restored window puts
+   * up is at its most stale, and then keeps running — a window left open for a
+   * day would otherwise re-accumulate exactly what the launch sweep cleared.
+   *
+   * The two predicates are dependencies in their own right, and are the reason
+   * this does not depend on `flags` whole: both are memoised on their own map,
+   * so archiving a session sweeps on that commit instead of waiting up to 15
+   * seconds for the next scan, while the read/unread marks — which churn as you
+   * click through the rail — do not re-arm anything.
+   *
+   * `forceCloseTab` and not `closeTab`: the guard `closeTab` adds is the unsaved
+   * -buffer prompt, which only file tabs can trigger and `retirableTabs` never
+   * returns one. Going through it would only add a branch that cannot be taken.
+   */
+  useEffect(() => {
+    const stale = retirableTabs({
+      tabs: tabsRef.current,
+      sessions: sessionsById(sessionGroups),
+      activeTab: activeTabRef.current,
+      isPinned: flags.isPinned,
+      isArchived: flags.isArchived,
+      now: Date.now(),
+    });
+    for (const id of stale) forceCloseTab(id);
+  }, [sessionGroups, flags.isPinned, flags.isArchived, forceCloseTab]);
 
   /* ---------- session switching ---------- */
 

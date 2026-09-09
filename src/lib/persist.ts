@@ -76,6 +76,14 @@ export const KEYS = {
     sessionsArchived: "mangouste.sessionsArchived",
     /** The opposite claim to `sessionsArchived`: rows that outrank every filter. */
     sessionsPinned: "mangouste.sessionsPinned",
+    /**
+     * When each repo was last shown in the workbench.
+     *
+     * The one thing in the rail that is not derived from a transcript: a repo
+     * opened to read code has no session to be listed by, and this is what
+     * gives it a row anyway. See `visitedRepos.ts`.
+     */
+    reposVisited: "mangouste.reposVisited",
   },
   release: {
     /**
