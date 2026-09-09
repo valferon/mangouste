@@ -3093,11 +3093,24 @@ select {
   font-family: var(--font-mono);
 }
 
+/* A sheet is a document, and it says so here rather than trusting where it was
+   mounted.
+   `position: fixed` takes the box out of the flow; it does not take the element
+   out of the tree, so a sheet still inherits from its DOM parent. Both status
+   bar sheets — the update one and the branch one — are rendered as siblings of
+   the chip that opens them, which puts them inside `.statusbar`, which paints
+   its own text in `--accent-fg` at 11px. On Light Modern that is #ffffff, so
+   the release notes came out white on the #f8f8f8 sheet: the headings survived
+   on `--fg-bright` and the chips on their own colours, and every paragraph
+   between them was invisible. Nothing in a sheet should depend on which corner
+   of the chrome opened it. */
 .quickopen-scrim {
   position: fixed;
   inset: 0;
   z-index: 50;
   background: var(--scrim);
+  color: var(--fg);
+  font-size: 13px;
   display: flex;
   justify-content: center;
   align-items: flex-start;
@@ -3512,6 +3525,22 @@ select {
   color: var(--fg-dim);
   font-size: 11px;
   line-height: 1.45;
+}
+
+/* Hints name things — a flag, a command, a menu item, a file — and every one
+   of those names is a bare `<code>` with nothing styling it. Two problems, one
+   rule: it had no chip at all, and WebKit sizes an unstyled monospace run off
+   its own default fixed-font size rather than the paragraph it sits in, so the
+   name came out bigger than the sentence around it. Same soft fill as the
+   release notes use, for the same reason. */
+.setting-hint code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--chip-bg) 45%, var(--bg-elevated));
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  word-break: break-word;
 }
 
 .segmented {
