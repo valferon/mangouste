@@ -288,7 +288,7 @@
   --bg-active: #707070;
   --border: #424242;
   --fg: #c5c8c6;
-  --fg-dim: #8b8d8b;
+  --fg-dim: #919391;
   --fg-bright: #e8e9e8;
   --accent: #565656;
   --accent-fg: #ffffff;
@@ -303,7 +303,7 @@
   --chip-fg: #adb8e1;
   --chip-head-bg: #3d344e;
   --chip-head-fg: #c0aee1;
-  --status-idle: #5a5b5a;
+  --status-idle: #5d5e5d;
   --track: #ffffff1f;
   --scrollbar-thumb: #ffffff59;
   --scrollbar-thumb-hover: #ffffff8c;
@@ -606,7 +606,7 @@
   --bg-active: #7c5021;
   --border: #453f35;
   --fg: #d3af86;
-  --fg-dim: #957b5c;
+  --fg-dim: #a58f74;
   --fg-bright: #eddfcf;
   --accent: #6e583b;
   --accent-fg: #ffffff;
@@ -621,7 +621,7 @@
   --chip-fg: #87b1e1;
   --chip-head-bg: #4d243f;
   --chip-head-fg: #da95da;
-  --status-idle: #614f39;
+  --status-idle: #6a5a47;
   --track: #ffffff1f;
   --scrollbar-thumb: #ffffff59;
   --scrollbar-thumb-hover: #ffffff8c;
@@ -659,7 +659,7 @@
   --bg-active: #880000;
   --border: #611414;
   --fg: #f8f8f8;
-  --fg-dim: #b56565;
+  --fg-dim: #b96d6d;
   --fg-bright: #fcfcfc;
   --accent: #883333;
   --accent-fg: #ffffff;
@@ -674,7 +674,7 @@
   --chip-fg: #87b1e1;
   --chip-head-bg: #5e1235;
   --chip-head-fg: #da95da;
-  --status-idle: #7d3838;
+  --status-idle: #7f3c3c;
   --track: #ffffff1f;
   --scrollbar-thumb: #ffffff59;
   --scrollbar-thumb-hover: #ffffff8c;
@@ -871,7 +871,7 @@
   --bg-active: #e8e8e8;
   --border: #e5e5e5;
   --fg: #3b3b3b;
-  --fg-dim: #6e7681;
+  --fg-dim: #69707b;
   --fg-bright: #181818;
   --accent: #005fb8;
   --accent-fg: #ffffff;
@@ -886,7 +886,7 @@
   --chip-fg: #0451a5;
   --chip-head-bg: #ecb9ec;
   --chip-head-fg: #bc05bc;
-  --status-idle: #afb4ba;
+  --status-idle: #adb0b6;
   --track: #0000001f;
   --scrollbar-thumb: #00000059;
   --scrollbar-thumb-hover: #0000008c;
@@ -1030,7 +1030,7 @@
   --bg-active: #cccccc;
   --border: #d6d6d6;
   --fg: #3b3b3b;
-  --fg-dim: #7a7a7a;
+  --fg-dim: #747474;
   --fg-bright: #181818;
   --accent: #0078d4;
   --accent-fg: #ffffff;
@@ -1045,7 +1045,7 @@
   --chip-fg: #0451a5;
   --chip-head-bg: #ecb9ec;
   --chip-head-fg: #bc05bc;
-  --status-idle: #b6b6b6;
+  --status-idle: #b3b3b3;
   --track: #0000001f;
   --scrollbar-thumb: #00000059;
   --scrollbar-thumb-hover: #0000008c;

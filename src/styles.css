@@ -5310,6 +5310,20 @@ select {
   margin-top: 0;
 }
 
+/* Inline code, quieter than it is in a chat turn.
+   `--chip-bg` is sized for the odd `useMemo` in a paragraph of prose. Release
+   notes are prose that names things — a flag, a file, a command, a version —
+   and at full chip strength every one of them is a filled block: one release's
+   notes measured 11k pixels of chip fill around 350 pixels of chip text, which
+   is a page of blue rectangles with the sentences arranged between them. So in
+   here the fill is a tint of the sheet it sits on and the text stays the colour
+   the rest of the paragraph is written in. The mono face is what says code;
+   the block was saying it twice and drowning the words doing it. */
+.update-notes .markdown code.inline-code {
+  background: color-mix(in srgb, var(--chip-bg) 45%, var(--bg-elevated));
+  color: var(--fg);
+}
+
 /* Everything in the sheet that is not the notes keeps its own height: in a
    flex column the default is to shrink, and a squashed header is not a saving
    worth making when the notes below it are the thing that scrolls. */

@@ -301,6 +301,21 @@ const SYNTAX_ROLES = {
  */
 const ACTIVE_FLOOR = 2.5;
 
+/**
+ * Least contrast `--fg-dim` may have against a surface that can host it, and
+ * how much room a surface needs before it counts as one.
+ *
+ * 4.5:1 is WCAG AA for text this size. The gate is there because `--bg-elevated`
+ * is whatever the theme calls a widget background, and some of those are mid
+ * greys — Monokai Dimmed's is #525252, where the theme's own plain text manages
+ * 4.6:1. Asking quiet text to clear 4.5:1 on that surface makes it brighter
+ * than the text it is meant to be quieter than, which is a worse lie than a
+ * faint label on one sheet. So the floor applies where plain text has room to
+ * spare, and the surface's own contrast is the answer everywhere else.
+ */
+const DIM_FLOOR = 4.5;
+const DIM_HOST = 6.0;
+
 /** VS Code's own ANSI ramp, for the themes that do not name one. */
 const ANSI = {
   dark: {
@@ -361,15 +376,29 @@ function build({ id, label, kind, file, base }) {
   // faithful and useless here, so a candidate that is not actually quieter than
   // `fg` is passed over rather than accepted for having the right name.
   const plain = contrast(fg, bg);
-  const dim = [
+  // `bg` is not the only surface this is written on: the rail draws it on
+  // `panel` and every sheet, dropdown and menu draws it on `elevated`. That
+  // half-step of grey is what this used to ignore — Light Modern's
+  // `descriptionForeground` clears the floor on the white editor background and
+  // lands at 4.3:1 on the #f8f8f8 sheet in front of it, which is where the
+  // update sheet writes its date and its own buttons. A candidate is pushed
+  // clear of each hosting surface in turn; every surface in a theme sits on the
+  // same side of its text, so satisfying the next cannot undo the last.
+  const hosts = [panel, elevated].filter((surface) => contrast(fg, surface) >= DIM_HOST);
+  const legible = (color) =>
+    hosts.reduce(
+      (soFar, surface) => readable(soFar, surface, kind, DIM_FLOOR),
+      readable(color, bg, kind, 4.0),
+    );
+  const dims = [
     pick("descriptionForeground"),
     pick("editorLineNumber.foreground"),
     mix(fg, bg, 0.35),
   ]
     .filter(Boolean)
     .map((color) => flatten(color, bg))
-    .map((color) => readable(color, bg, kind, 4.0))
-    .find((color) => contrast(color, bg) < plain * 0.92) ?? readable(mix(fg, bg, 0.35), bg, kind, 4.0);
+    .map(legible);
+  const dim = dims.find((color) => contrast(color, bg) < plain * 0.92) ?? dims.at(-1);
   const accent = flatten(pick("button.background", "focusBorder", "textLink.foreground", "progressBar.background") ?? "#0078d4", bg);
   const accentFg = flatten(pick("button.foreground") ?? (luminance(accent) > 0.4 ? "#000000" : "#ffffff"), accent);
 
@@ -491,6 +520,18 @@ for (const theme of built) {
     const ratio = contrast(theme.tokens[text], theme.tokens[surface]);
     if (ratio < floor) {
       throw new Error(`${theme.id}: ${text} on ${surface} is ${ratio.toFixed(2)}:1, under ${floor}:1`);
+    }
+  }
+  // The rail and every sheet write `--fg-dim` on these, and a fixed floor is
+  // the wrong shape for them: see DIM_FLOOR. A surface plain text has room on
+  // owes quiet text the AA floor; one it does not owes nothing this can check.
+  for (const surface of ["--bg-panel", "--bg-elevated"]) {
+    if (contrast(theme.tokens["--fg"], theme.tokens[surface]) < DIM_HOST) continue;
+    const ratio = contrast(theme.tokens["--fg-dim"], theme.tokens[surface]);
+    if (ratio < DIM_FLOOR) {
+      throw new Error(
+        `${theme.id}: --fg-dim on ${surface} is ${ratio.toFixed(2)}:1, under ${DIM_FLOOR}:1`,
+      );
     }
   }
 }
