@@ -18,6 +18,7 @@ import {
 } from "./panes/TerminalPanel";
 import { TerminalPane } from "./panes/TerminalPane";
 import { HistoryPane } from "./panes/HistoryPane";
+import ChangesPane from "./panes/ChangesPane";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
 import { AboutDialog, ISSUES_URL, REPO_URL, ShortcutsDialog } from "./panes/HelpPanels";
@@ -37,11 +38,19 @@ import {
   claudeKill,
   discoverRepos,
   homeDir,
+  onSessionTransition,
   openExternal,
   openWindow,
+  postNotification,
   renameSession,
   revealPath,
 } from "./lib/ipc";
+import {
+  DEFAULT_ALERT_PREFS,
+  alertText,
+  shouldAlert,
+  type AlertPrefs,
+} from "./lib/alerts";
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
 import {
@@ -77,9 +86,11 @@ import { retirableTabs, sessionsById } from "./lib/tabRetire";
 import { SessionFlagsProvider, useFlags } from "./lib/sessionFlagsContext";
 import { SYSTEM, THEME_LIST, applyTheme, loadTheme, type Theme } from "./lib/theme";
 import {
+  changesTabLabel,
   cleanStoredTabs,
   restoreTab,
   storedTabId,
+  successorTab,
   tabInRepo,
   toStoredTab,
   type ChatTab,
@@ -347,6 +358,28 @@ function Workbench() {
     writeBoolean(KEYS.prefs.updateCheck, updateCheck);
   }, [updateCheck]);
   /**
+   * Whether a session that wants you raises a desktop notification.
+   *
+   * The rail knows every status to the second, but it cannot reach past the
+   * window — and a session going `awaiting` while you are in another app is
+   * precisely the case this workbench exists for. On by default for that
+   * reason; `alertTurnDone` covers clean ends and is off, because on a machine
+   * running eight sessions that one fires constantly and `pendingReview`
+   * already carries it without interrupting anyone.
+   */
+  const [alertNeedsYou, setAlertNeedsYou] = useState(() =>
+    readBoolean(KEYS.prefs.alertNeedsYou, DEFAULT_ALERT_PREFS.needsYou),
+  );
+  useEffect(() => {
+    writeBoolean(KEYS.prefs.alertNeedsYou, alertNeedsYou);
+  }, [alertNeedsYou]);
+  const [alertTurnDone, setAlertTurnDone] = useState(() =>
+    readBoolean(KEYS.prefs.alertTurnDone, DEFAULT_ALERT_PREFS.turnDone),
+  );
+  useEffect(() => {
+    writeBoolean(KEYS.prefs.alertTurnDone, alertTurnDone);
+  }, [alertTurnDone]);
+  /**
    * The update chip's own action, published upward.
    *
    * Same shape as `terminalActions` below and for the same reason: the check
@@ -435,6 +468,24 @@ function Workbench() {
       return next;
     });
   }, [activeTab]);
+  /**
+   * Every tab that has been in front this run, newest first.
+   *
+   * A ref and not state: nothing renders from it. It exists so closing the
+   * front tab lands on the one you were reading before it rather than on
+   * whatever sits leftmost in the strip — the strip's order is drag order, and
+   * has nothing to do with where you just were. Not persisted, for the same
+   * reason `coldTabs` is not: "where I was" is a fact about this run, and the
+   * restored `activeTab` seeds it on mount when this effect first fires.
+   */
+  const tabHistoryRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!activeTab) return;
+    tabHistoryRef.current = [
+      activeTab,
+      ...tabHistoryRef.current.filter((id) => id !== activeTab),
+    ];
+  }, [activeTab]);
   // Written through on every commit rather than from inside the setTabs
   // updaters: React may run an updater twice (the claudeKill in forceCloseTab
   // was moved outside for exactly that reason), and an effect only sees
@@ -489,6 +540,51 @@ function Workbench() {
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   /** Makes each fresh tab id unique, so a new session never reuses a chat id. */
   const newSessionCounter = useRef(0);
+
+  /**
+   * What the notification listener needs to know, kept in a ref.
+   *
+   * Not closed over: the subscription below must be built once and never torn
+   * down, because the gap between an unlisten and its replacement is exactly
+   * where a transition goes missing — and both of these inputs change often
+   * (every preference toggle, every switch of the chat tab in front).
+   */
+  const alertContext = useRef<{ prefs: AlertPrefs; activeSessionId: string | null }>({
+    prefs: DEFAULT_ALERT_PREFS,
+    activeSessionId: null,
+  });
+  useEffect(() => {
+    alertContext.current = {
+      prefs: { needsYou: alertNeedsYou, turnDone: alertTurnDone },
+      activeSessionId: liveSessionId,
+    };
+  }, [alertNeedsYou, alertTurnDone, liveSessionId]);
+
+  /**
+   * Desktop notifications for the sessions you are not looking at.
+   *
+   * Rust decides what happened and hands it to exactly one window; this decides
+   * whether you want to hear it (see `src/lib/alerts.ts`) and asks the backend
+   * to say it. `document.hasFocus()` is read at delivery rather than tracked,
+   * since it is only ever needed at this instant.
+   */
+  useEffect(() => {
+    const unlisten = onSessionTransition((transition) => {
+      const { prefs, activeSessionId } = alertContext.current;
+      if (!shouldAlert(transition, prefs, { focused: document.hasFocus(), activeSessionId })) {
+        return;
+      }
+      const { title, body } = alertText(transition);
+      void postNotification(title, body).catch((error: unknown) => {
+        // A desktop with no notification daemon is a real configuration, and
+        // it must cost the toast rather than the listener.
+        console.warn("notification failed", error);
+      });
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
 
   /**
    * Terminal visibility per repo root, persisted.
@@ -1191,6 +1287,36 @@ function Workbench() {
   }, []);
 
   /**
+   * Watch what one session is doing to the code.
+   *
+   * One tab per session rather than per repo: two sessions in one repo are two
+   * different answers, and the case this exists for is watching one of them
+   * while the other runs. Re-opening focuses the tab that is already there, so
+   * the rail's menu and the chat's button cannot mint two.
+   */
+  const openChanges = useCallback((session: SessionMeta) => {
+    const cwd = session.cwd ?? "";
+    if (cwd === "" || session.file === "") return;
+    const id = `changes|${cwd}|${session.id}`;
+    setTabs((current) =>
+      current.some((tab) => tab.id === id)
+        ? current
+        : [
+            ...current,
+            {
+              id,
+              kind: "changes",
+              label: changesTabLabel(session.id),
+              cwd,
+              file: session.file,
+              sessionId: session.id,
+            },
+          ],
+    );
+    setActiveTab(id);
+  }, []);
+
+  /**
    * A diff for `cwd`. The repo is in the id, not just the tab: a diff is titled
    * by a repo-relative path or a short sha, so `src/App.tsx` in two repos would
    * otherwise be one tab whose patch is whichever repo asked last.
@@ -1305,6 +1431,9 @@ function Workbench() {
         // clear button is the only other caller and it dies with the tab.
         clearDebug(id);
       }
+      // Outside the updater, which React may run twice: dropping the id is
+      // idempotent, but so is every other side effect that was moved out here.
+      tabHistoryRef.current = tabHistoryRef.current.filter((seen) => seen !== id);
       setTabs((current) => {
         const next = current.filter((tab) => tab.id !== id);
         if (activeTabRef.current !== id) return next;
@@ -1312,18 +1441,21 @@ function Workbench() {
         // filtered out of it, so focusing one leaves the centre pane blank.
         const selectable = next.filter((tab) => tabInRepo(tab, activeRepo));
         // A file or dashboard tab is selectable but is not a chat: leaving the
-        // repo with none of its own means no live session, so the seed below
-        // has to run even when something else could hold focus.
-        const chatSibling = selectable.find((tab) => tab.kind === "chat") ?? null;
-        if (chatSibling || !activeRepo) {
-          setActiveTab(chatSibling?.id ?? selectable[0]?.id ?? "");
-          return next;
-        }
-        // Last chat of this repo: the seed effect only runs on a repo change,
-        // so the replacement has to be made here or the centre stays blank.
-        const fresh = newSessionTab(activeRepo);
-        setActiveTab(fresh.id);
-        return [...next, fresh];
+        // repo with none of its own means no live session, so the seed runs
+        // even when something else could hold focus. The seed effect only runs
+        // on a repo change, so the replacement has to be made here.
+        const fresh =
+          activeRepo && !selectable.some((tab) => tab.kind === "chat")
+            ? newSessionTab(activeRepo)
+            : null;
+        // The seeded tab has never been in front, so it cannot win the history
+        // walk — it is only ever the fallback, which is what it is for.
+        const successor = successorTab(
+          fresh ? [...selectable, fresh] : selectable,
+          tabHistoryRef.current,
+        );
+        setActiveTab(successor?.id ?? "");
+        return fresh ? [...next, fresh] : next;
       });
     },
     [activeRepo, newSessionTab],
@@ -1610,6 +1742,53 @@ function Workbench() {
     () => tabs.filter((tab) => tabInRepo(tab, activeRepo)),
     [tabs, activeRepo],
   );
+
+  /** The strip element, for the two things only the DOM node can answer. */
+  const tabStripRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * A plain vertical wheel scrolls the strip sideways, as in Firefox.
+   *
+   * Chrome redirects a vertical wheel onto an element that can only scroll
+   * horizontally; WebKitGTK does not, so on the platform this app actually
+   * ships to the strip is unreachable by wheel without this. Registered by
+   * hand rather than through `onWheel` because React attaches wheel listeners
+   * passively at the root, where `preventDefault` is a no-op and the page
+   * behind the strip scrolls instead.
+   */
+  useEffect(() => {
+    const strip = tabStripRef.current;
+    if (!strip) return;
+    const onWheel = (event: WheelEvent) => {
+      // A trackpad's sideways component already reaches the strip as deltaX;
+      // taking deltaY as well would double every diagonal flick.
+      if (event.deltaX !== 0) return;
+      // Nothing to scroll: let the event through rather than swallowing it.
+      if (strip.scrollWidth <= strip.clientWidth) return;
+      event.preventDefault();
+      // GTK reports wheel notches in lines, not pixels, and a line is one tab
+      // width of nothing. 16 is the line height the rest of the strip is sized
+      // against, which makes one notch roughly one tab.
+      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE;
+      strip.scrollLeft += event.deltaY * (lines ? 16 : 1);
+    };
+    strip.addEventListener("wheel", onWheel, { passive: false });
+    return () => strip.removeEventListener("wheel", onWheel);
+  }, []);
+
+  /**
+   * Keep the front tab on screen.
+   *
+   * Focus moves from places that are not a click on the strip — the close path
+   * picking the tab you were last on, a chord, the sessions rail — and any of
+   * them can land on a tab scrolled out of view, which reads as the centre pane
+   * changing under a strip that did not. `nearest` on both axes so a strip that
+   * already shows the tab does not move, and the page does not scroll.
+   */
+  useEffect(() => {
+    const front = tabStripRef.current?.querySelector('.tab[data-active="true"]');
+    front?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTab, visibleTabs]);
 
   /**
    * Close every visible tab but one.
@@ -2081,6 +2260,7 @@ function Workbench() {
         <div className="center-column">
           <div
             className="tab-strip"
+            ref={tabStripRef}
             onContextMenu={(event) =>
               menu.openContextMenu(event, [
                 activeRepo && {
@@ -2375,6 +2555,32 @@ function Workbench() {
                   </PaneBoundary>
                 </div>
               )}
+              {/* Mounted per tab and kept mounted, like the chats: a changes
+                  pane holds a scroll position in a patch and a file you chose
+                  to read, and a repo switch must not throw either away. */}
+              {tabs
+                .filter(
+                  (tab): tab is Extract<Tab, { kind: "changes" }> => tab.kind === "changes",
+                )
+                .map((tab) => (
+                  <div
+                    key={tab.id}
+                    style={{
+                      display: tab.id === activeTab ? "flex" : "none",
+                      flex: 1,
+                      minHeight: 0,
+                    }}
+                  >
+                    <PaneBoundary label="changes">
+                      <ChangesPane
+                        cwd={tab.cwd}
+                        file={tab.file}
+                        seenAtMs={flags.seenAt(tab.sessionId)}
+                        visible={tab.id === activeTab}
+                      />
+                    </PaneBoundary>
+                  </div>
+                ))}
               {currentTab?.kind === "dashboard" && (
                 <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
                   <PaneBoundary label="dashboard">
@@ -2429,6 +2635,7 @@ function Workbench() {
             onResume={handleResume}
             onNewSession={handleNewSession}
             onOpenFile={openFileHere}
+            onWatchChanges={openChanges}
           />
           </PaneBoundary>
         </div>
@@ -2442,6 +2649,10 @@ function Workbench() {
           onSessionSurface={setSessionSurface}
           permissionMode={permissionMode}
           onPermissionMode={setPermissionMode}
+          alertNeedsYou={alertNeedsYou}
+          onAlertNeedsYou={setAlertNeedsYou}
+          alertTurnDone={alertTurnDone}
+          onAlertTurnDone={setAlertTurnDone}
           restoreTabs={restoreTabs}
           upstreamWatch={upstreamWatch}
           onUpstreamWatch={setUpstreamWatch}

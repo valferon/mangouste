@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  changesTabLabel,
   cleanStoredTabs,
   isStoredTab,
   restoreTab,
   storedTabId,
+  successorTab,
   tabInRepo,
   tabRepo,
   toStoredTab,
@@ -35,7 +37,58 @@ const historyTab: Tab = {
   cwd: "/repos/mangouste",
 };
 
+const changesTab: Tab = {
+  kind: "changes",
+  id: "changes|/repos/mangouste|abc-123",
+  label: "Changes abc-12",
+  cwd: "/repos/mangouste",
+  file: "/home/v/.claude/projects/x/abc-123.jsonl",
+  sessionId: "abc-123",
+};
+
 const dashboardTab: Tab = { kind: "dashboard", id: "dashboard", label: "Dashboard" };
+
+describe("changes tabs", () => {
+  it("survives a restart: git and the transcript both outlive the window", () => {
+    const stored = toStoredTab(changesTab);
+    expect(stored).toEqual({
+      kind: "changes",
+      cwd: "/repos/mangouste",
+      sessionId: "abc-123",
+      file: "/home/v/.claude/projects/x/abc-123.jsonl",
+    });
+    expect(restoreTab(stored as StoredTab)).toEqual(changesTab);
+  });
+
+  it("mints the id App opens with, so a restored tab is not a second copy", () => {
+    expect(storedTabId(toStoredTab(changesTab) as StoredTab)).toBe(changesTab.id);
+  });
+
+  it("is one tab per session, not per repo", () => {
+    // Two sessions in one repo are two different answers to "what has this
+    // changed", and watching one while the other runs is the whole point.
+    const other = { ...changesTab, id: "changes|/repos/mangouste|def-456", sessionId: "def-456" };
+    expect(storedTabId(toStoredTab(other) as StoredTab)).not.toBe(changesTab.id);
+  });
+
+  it("drops an entry with no transcript to fold", () => {
+    // Without it the pane can only ever say "no changes".
+    expect(isStoredTab({ kind: "changes", cwd: "/r", sessionId: "a" })).toBe(false);
+    expect(isStoredTab({ kind: "changes", cwd: "/r", sessionId: "a", file: "/t.jsonl" })).toBe(
+      true,
+    );
+  });
+
+  it("names the tab by session, so two in one repo are told apart", () => {
+    expect(changesTabLabel("abc-123-def")).toBe("Changes abc-12");
+    expect(changesTabLabel("abc-123-def")).not.toBe(changesTabLabel("xyz-789-def"));
+  });
+
+  it("belongs to its repo like every tab but the dashboard", () => {
+    expect(tabRepo(changesTab)).toBe("/repos/mangouste");
+    expect(tabInRepo(changesTab, "/repos/other")).toBe(false);
+  });
+});
 
 describe("toStoredTab", () => {
   it("drops a diff tab, whose patch is derived output", () => {
@@ -294,5 +347,39 @@ describe("tabRepo / tabInRepo", () => {
     const homeless: Tab = { ...fileTab, cwd: "" };
     expect(tabInRepo(homeless, "")).toBe(true);
     expect(tabInRepo(homeless, "/repos/mangouste")).toBe(false);
+  });
+});
+
+describe("successorTab", () => {
+  const secondChat: Tab = { ...chatTab, id: "chat|/repos/mangouste|def-456" };
+
+  it("picks the most recently fronted tab still open", () => {
+    const open = [chatTab, fileTab, historyTab];
+    expect(successorTab(open, [historyTab.id, chatTab.id])?.id).toBe(historyTab.id);
+  });
+
+  it("skips history entries for tabs that have since been closed", () => {
+    const open = [chatTab, fileTab];
+    expect(successorTab(open, ["chat|/gone|x", fileTab.id, chatTab.id])?.id).toBe(
+      fileTab.id,
+    );
+  });
+
+  it("prefers a chat when nothing open has been in front", () => {
+    expect(successorTab([fileTab, secondChat, historyTab], [])?.id).toBe(secondChat.id);
+  });
+
+  it("falls back to the first tab when the repo has no chat left", () => {
+    expect(successorTab([fileTab, historyTab], [])?.id).toBe(fileTab.id);
+  });
+
+  it("returns null when the strip is empty", () => {
+    expect(successorTab([], [chatTab.id])).toBeNull();
+  });
+
+  it("ignores a dashboard ahead of it in history only if it is closed", () => {
+    expect(successorTab([chatTab, dashboardTab], [dashboardTab.id])?.id).toBe(
+      dashboardTab.id,
+    );
   });
 });

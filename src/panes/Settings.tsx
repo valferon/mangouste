@@ -14,6 +14,10 @@ interface SettingsProps {
   onUpstreamWatch: (on: boolean) => void;
   updateCheck: boolean;
   onUpdateCheck: (on: boolean) => void;
+  alertNeedsYou: boolean;
+  onAlertNeedsYou: (on: boolean) => void;
+  alertTurnDone: boolean;
+  onAlertTurnDone: (on: boolean) => void;
   workspaceRoot: string;
   onWorkspaceRoot: (root: string) => void;
   onClose: () => void;
@@ -34,6 +38,10 @@ export function Settings({
   onUpstreamWatch,
   updateCheck,
   onUpdateCheck,
+  alertNeedsYou,
+  onAlertNeedsYou,
+  alertTurnDone,
+  onAlertTurnDone,
   workspaceRoot,
   onWorkspaceRoot,
   onClose,
@@ -183,6 +191,44 @@ export function Settings({
           this app never replaces itself. Off stops the polling only:{" "}
           <code>Help ▸ Check for Updates…</code> still works, and so does the{" "}
           <code>What's new</code> sheet after you install a new build.
+        </p>
+
+        <div className="setting-row">
+          <label>Notify when a session wants you</label>
+          <div className="segmented">
+            <button data-active={alertNeedsYou} onClick={() => onAlertNeedsYou(true)}>
+              on
+            </button>
+            <button data-active={!alertNeedsYou} onClick={() => onAlertNeedsYou(false)}>
+              off
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          Raises a desktop notification when a session becomes <code>awaiting</code> —
+          blocked on a question — or <code>interrupted</code>, cut off mid-turn. Only on
+          the change: a session that was already waiting when the app started says
+          nothing, and neither does the session you have open in front of you. With two
+          windows open only one notifies.
+        </p>
+
+        <div className="setting-row">
+          <label>Notify when a turn finishes</label>
+          <div className="segmented">
+            <button data-active={alertTurnDone} onClick={() => onAlertTurnDone(true)}>
+              on
+            </button>
+            <button data-active={!alertTurnDone} onClick={() => onAlertTurnDone(false)}>
+              off
+            </button>
+          </div>
+        </div>
+        <p className="setting-hint">
+          Every clean end, not just the ones that ask you something. Off by default —
+          with several sessions running this fires constantly, and the rail already
+          marks a finished session <code>pendingReview</code> until you read it. For
+          anything beyond a toast, the same status changes can run your own commands:
+          see <code>~/.config/mangouste/hooks.json</code> in the README.
         </p>
 
         <div className="setting-row">

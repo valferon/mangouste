@@ -37,6 +37,8 @@ import { markTerms } from "../lib/marks";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { recapFileLabel, recapHeadline } from "../lib/recap";
 import { useFlags } from "../lib/sessionFlagsContext";
+import { KEYS, readEnum, writeString } from "../lib/persist";
+import { SESSION_SORTS, sortSessions, type SessionSort } from "../lib/sessionOrder";
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import type {
@@ -63,6 +65,8 @@ interface SessionsPaneProps {
   onSelectRepo: (cwd: string) => void;
   /** Repo currently shown in the other panes, highlighted in the list. */
   activeCwd: string | null;
+  /** Open a live diff of what this session has changed. */
+  onWatchChanges: (session: SessionMeta) => void;
   /** Lifts the scanned groups so the quick-open palette can reuse them. */
   onGroups: (groups: ProjectGroup[]) => void;
   /** Open a file a recap lists, so "what was done" is one click from the work. */
@@ -414,6 +418,7 @@ export const SessionsPane = memo(function SessionsPane({
   activeCwd,
   onGroups,
   onOpenFile,
+  onWatchChanges,
 }: SessionsPaneProps) {
   const menu = useMenu();
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
@@ -422,6 +427,21 @@ export const SessionsPane = memo(function SessionsPane({
   /** Idle is >24h stale and dominates the list, so it is collapsed away by default. */
   const [showIdle, setShowIdle] = useState(false);
   const [onlyLive, setOnlyLive] = useState(false);
+  /**
+   * Status-and-name, or newest first. Remembered, unlike the filters above:
+   * those narrow what is shown and are a question about right now, this is how
+   * you read the list and is the same tomorrow.
+   */
+  const [sort, setSort] = useState<SessionSort>(() =>
+    readEnum(KEYS.prefs.sessionSort, SESSION_SORTS, "status"),
+  );
+  const toggleSort = useCallback(() => {
+    setSort((current) => {
+      const next: SessionSort = current === "status" ? "recent" : "status";
+      writeString(KEYS.prefs.sessionSort, next);
+      return next;
+    });
+  }, []);
   const [showArchived, setShowArchived] = useState(false);
   /**
    * Per-session override for the fan-out list.
@@ -573,7 +593,10 @@ export const SessionsPane = memo(function SessionsPane({
     const scanned = groups
       .map((group) => ({
         ...group,
-        sessions: pinnedFirst(group.sessions.filter(keep), flags.isPinned),
+        sessions: pinnedFirst(
+          sortSessions(group.sessions.filter(keep), flags.effectiveStatus, sort),
+          flags.isPinned,
+        ),
       }))
       .filter((group) => group.sessions.length > 0);
     // Repos you were in that the scan cannot account for — no session there, or
@@ -596,6 +619,7 @@ export const SessionsPane = memo(function SessionsPane({
     onlyLive,
     showIdle,
     showArchived,
+    sort,
     flags,
     searching,
     terms,
@@ -811,12 +835,14 @@ export const SessionsPane = memo(function SessionsPane({
         run: () => setShowArchived((v) => !v),
       },
       "separator",
+      { label: "Order by Time", checked: sort === "recent", run: toggleSort },
+      "separator",
       {
         label: "Mark All as Read",
         run: () => flags.markAllSeen(groups.flatMap((group) => group.sessions)),
       },
     ],
-    [refresh, onlyLive, showIdle, showArchived, flags, groups],
+    [refresh, onlyLive, showIdle, showArchived, sort, toggleSort, flags, groups],
   );
 
   const sessionMenu = useCallback(
@@ -852,6 +878,10 @@ export const SessionsPane = memo(function SessionsPane({
           label: recapOpen.has(session.id) ? "Hide What Was Done" : "What Was Done",
           run: () => toggleRecap(session),
         },
+        // Separate from the recap on purpose: that reads the transcript and
+        // says what the session *did*, this reads git and shows what the code
+        // says now — including the edits no tool call names.
+        cwd && { label: "Watch Changes", run: () => onWatchChanges(session) },
         { label: "Copy Session Id", run: () => void copyText(session.id) },
         session.title && { label: "Copy Title", run: () => void copyText(session.title ?? "") },
         cwd && { label: "Copy Working Directory", run: () => void copyText(cwd) },
@@ -863,7 +893,16 @@ export const SessionsPane = memo(function SessionsPane({
         ...paneEntries(),
       ];
     },
-    [flags, openSession, onSelectRepo, onNewSession, paneEntries, recapOpen, toggleRecap],
+    [
+      flags,
+      openSession,
+      onSelectRepo,
+      onNewSession,
+      onWatchChanges,
+      paneEntries,
+      recapOpen,
+      toggleRecap,
+    ],
   );
 
   const repoMenu = useCallback(
@@ -979,6 +1018,21 @@ export const SessionsPane = memo(function SessionsPane({
             title="Include sessions idle for over a day"
           >
             idle
+          </button>
+          {/* The one control here that is not a filter: it changes how the
+              rows read, not which rows there are, and it applies to a filtered
+              list the same as a full one. */}
+          <button
+            className="toggle-button"
+            data-active={sort === "recent"}
+            onClick={toggleSort}
+            title={
+              sort === "recent"
+                ? "Ordered by last activity — click for status, then name"
+                : "Ordered by status, then name — click for last activity"
+            }
+          >
+            time
           </button>
           <button
             className="toggle-button icon-button"

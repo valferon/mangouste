@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "../lib/editing";
-import { listDir, revealPath } from "../lib/ipc";
+import { fileGlyph } from "../lib/fileIcons";
+import { listDir, openInDefaultApp, revealPath } from "../lib/ipc";
+import { ChevronRightIcon, CollapseAllIcon, FilesIcon, RefreshIcon } from "../lib/icons";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, relativePath } from "../lib/paths";
 import type { DirEntryInfo } from "../lib/types";
@@ -10,6 +12,14 @@ interface FileTreeProps {
   onOpenFile: (path: string) => void;
   selectedPath: string | null;
 }
+
+/*
+ * Row geometry. `GUIDE_BASE` is the chevron's own centre: an indent guide that
+ * lands anywhere else reads as belonging to the wrong level.
+ */
+const INDENT_BASE = 8;
+const INDENT_STEP = 12;
+const GUIDE_BASE = INDENT_BASE + 6;
 
 /** Children keyed by directory path. A missing key means "not loaded yet". */
 type ChildrenCache = Record<string, DirEntryInfo[]>;
@@ -112,6 +122,13 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
             run: () => toggle(entry.path),
           }
         : { label: "Open", run: () => onOpenFile(entry.path) },
+      // The way out for a file this window has no view for — a PDF, a
+      // spreadsheet, a video. The binary pane offers the same thing, but a file
+      // nobody wants to open in a tab should not need one opened first.
+      !entry.isDir && {
+        label: "Open Externally",
+        run: () => void openInDefaultApp(entry.path),
+      },
       entry.isDir && { label: "Refresh", run: () => void load(entry.path) },
       "separator",
       { label: "Copy Path", run: () => void copyText(entry.path) },
@@ -132,20 +149,42 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
     if (!entries) return null;
     return entries.map((entry) => {
       const isOpen = expanded.has(entry.path);
+      const { Icon, tone } = fileGlyph(entry.name, entry.isDir, isOpen);
       return (
         <div key={entry.path}>
           <div
-            className={`row ${entry.isDir ? "dir" : "file"}`}
-            style={{ paddingLeft: 8 + depth * 12 }}
+            className={`row tree-row ${entry.isDir ? "dir" : "file"}`}
+            style={{ paddingLeft: INDENT_BASE + depth * INDENT_STEP }}
             data-selected={selectedPath === entry.path}
             onClick={() => (entry.isDir ? toggle(entry.path) : onOpenFile(entry.path))}
             onContextMenu={(event) => menu.openContextMenu(event, entryMenu(entry))}
             title={entry.path}
           >
-            <span className="twisty">{entry.isDir ? (isOpen ? "▾" : "▸") : ""}</span>
+            {/* Files keep the chevron's width so their glyph lines up under a
+                sibling directory's rather than half a step to its left. */}
+            <span className="twisty" data-open={isOpen}>
+              {entry.isDir && <ChevronRightIcon />}
+            </span>
+            <span className="tree-glyph" data-tone={tone}>
+              <Icon />
+            </span>
             <span className="label">{entry.name}</span>
           </div>
-          {entry.isDir && isOpen && renderLevel(entry.path, depth + 1)}
+          {entry.isDir && isOpen && (
+            /* One guide per open directory, spanning exactly the rows it owns,
+               drawn from the wrapper because that is the only element whose box
+               already has the right top, bottom and depth. */
+            <div
+              className="tree-children"
+              style={
+                {
+                  "--guide": `${GUIDE_BASE + depth * INDENT_STEP}px`,
+                } as React.CSSProperties
+              }
+            >
+              {renderLevel(entry.path, depth + 1)}
+            </div>
+          )}
         </div>
       );
     });
@@ -157,7 +196,8 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
         className="pane-header"
         onContextMenu={(event) => menu.openContextMenu(event, paneEntries())}
       >
-        <span>Explorer</span>
+        <FilesIcon />
+        <span className="pane-title">Explorer</span>
         <div className="actions">
           <button
             className="toggle-button"
@@ -167,8 +207,20 @@ export const FileTree = memo(function FileTree({ root, onOpenFile, selectedPath 
           >
             .*
           </button>
-          <button className="toggle-button" onClick={() => void load(root)} title="Refresh">
-            ⟳
+          <button
+            className="toggle-button icon-button"
+            disabled={expanded.size === 0}
+            onClick={() => setExpanded(new Set())}
+            title="Collapse all"
+          >
+            <CollapseAllIcon />
+          </button>
+          <button
+            className="toggle-button icon-button"
+            onClick={() => void load(root)}
+            title="Refresh"
+          >
+            <RefreshIcon />
           </button>
         </div>
       </div>

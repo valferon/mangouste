@@ -107,6 +107,13 @@ export interface SessionFlags {
   /** Explicitly flagged to come back to, overriding the watermark. */
   isMarkedUnread: (id: string) => boolean;
   /**
+   * When you last looked at this session, or 0 if you never have.
+   *
+   * Exposed for the changes pane's "since I last looked" scope, which needs the
+   * watermark itself and not the read/unread verdict built on it.
+   */
+  seenAt: (id: string) => number;
+  /**
    * Among the last few sessions you checked.
    *
    * Rank-based rather than time-based, so a quiet hour does not fade the set you
@@ -160,6 +167,8 @@ export function useSessionFlags(): SessionFlags {
     },
     [markOf],
   );
+
+  const seenAt = useCallback((id: string) => markOf(id).seenAt, [markOf]);
 
   const isReviewed = useCallback(
     (session: SessionMeta) => {
@@ -322,6 +331,7 @@ export function useSessionFlags(): SessionFlags {
       effectiveStatus,
       isReviewed,
       isMarkedUnread,
+      seenAt,
       isRecentlyChecked,
       isArchived,
       archivedCount,
@@ -337,6 +347,7 @@ export function useSessionFlags(): SessionFlags {
       effectiveStatus,
       isReviewed,
       isMarkedUnread,
+      seenAt,
       isRecentlyChecked,
       isArchived,
       archivedCount,

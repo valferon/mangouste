@@ -14,6 +14,7 @@ import type {
   Commit,
   CommitDetail,
   DirEntryInfo,
+  FileBytes,
   FileText,
   Formatted,
   LogFilter,
@@ -26,7 +27,9 @@ import type {
   SearchOutcome,
   StartOptions,
   SessionHit,
+  SessionChanges,
   SessionRecap,
+  SessionTransition,
   SessionWindow,
   StatsSummary,
   TerminalInfo,
@@ -111,6 +114,31 @@ export const sessionRecap = (file: string) =>
   invoke<SessionRecap>("session_recap", { file });
 
 /**
+ * What a session has changed on disk, against the commit it started from.
+ *
+ * Cheap enough to poll while a turn streams: the transcript fold is the same
+ * incremental one the recap uses, and the git side is a single
+ * `diff --numstat` over the paths that session wrote. The patches themselves
+ * are not in here — see `sessionChangePatch`.
+ */
+export const sessionChanges = (cwd: string, file: string) =>
+  invoke<SessionChanges>("session_changes", { cwd, file });
+
+/**
+ * One file's patch against the session's baseline.
+ *
+ * Asked for per open file rather than as one patch for the session: a session
+ * that rewrote a lockfile has megabytes of diff nobody is reading, and the pane
+ * only ever renders what is expanded.
+ */
+export const sessionChangePatch = (
+  cwd: string,
+  base: string,
+  path: string,
+  untracked = false,
+) => invoke<string>("session_change_patch", { cwd, base, path, untracked });
+
+/**
  * Search inside every transcript, not just the metadata a scan holds.
  *
  * Sweeps ~300 MB across the corpus, so it belongs on an explicit user action
@@ -130,6 +158,22 @@ export const expandSearchTerms = (query: string) =>
 
 export const onSessionsChanged = (handler: () => void): Promise<UnlistenFn> =>
   listen("sessions://changed", handler);
+
+/**
+ * A session's status changed, as the first scan to notice saw it.
+ *
+ * Delivered to one window only — Rust picks it, preferring the focused one —
+ * so two windows do not raise two notifications for one event. See
+ * `src-tauri/src/alerts.rs`.
+ */
+export const onSessionTransition = (
+  handler: (transition: SessionTransition) => void,
+): Promise<UnlistenFn> =>
+  listen<SessionTransition>("sessions://transition", (e) => handler(e.payload));
+
+/** Raise a desktop notification. Policy lives in `src/lib/alerts.ts`. */
+export const postNotification = (title: string, body: string) =>
+  invoke<void>("post_notification", { title, body });
 
 /** Appends a `custom-title` record, which outranks any AI title. */
 export const renameSession = (sessionId: string, title: string) =>
@@ -264,6 +308,30 @@ export const readTextFile = (path: string, maxBytes?: number) =>
  */
 export const readTextFileMeta = (path: string, maxBytes?: number) =>
   invoke<FileText>("read_text_file_meta", { path, maxBytes });
+
+/**
+ * Read a file's leading bytes, for the preview `readTextFileMeta` refuses.
+ *
+ * Truncates instead of refusing where the text reader errors out: the first
+ * page of a file is worth a hex dump whatever its size, and the result says
+ * whether there was more.
+ */
+export const readFileBytes = (path: string, maxBytes?: number) =>
+  invoke<FileBytes>("read_file_bytes", { path, maxBytes });
+
+/**
+ * Hand a file to the desktop's default application.
+ *
+ * Not the opener plugin's own command: that one is gated by a path scope in the
+ * capability file, and the scope covering every repo on the machine would be no
+ * scope at all. Resolves to `false` when the platform had no handler, so a
+ * button can say so rather than look like it worked.
+ */
+export const openInDefaultApp = (path: string) =>
+  invoke<null>("open_in_default_app", { path }).then(
+    () => true,
+    () => false,
+  );
 
 /**
  * Save text over an existing file, resolving to the new mtime.

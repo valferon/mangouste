@@ -47,6 +47,21 @@ export const foldsThinking = (level: FeedbackLevel): boolean => level === "quiet
  */
 export const namesIntent = (level: FeedbackLevel): boolean => level !== "quiet";
 
+/**
+ * Show an edit's diff in the flow, without a click and without opening the card.
+ *
+ * The other half of the same argument `namesIntent` makes. A row that says
+ * `Edit src/lib/rail.ts` names the file and says nothing about the change, so
+ * the moment to stop a wrong edit is after it has landed — and an edit is the
+ * one tool whose arguments *are* the answer, already rendered as a diff for the
+ * permission prompt. Off at `quiet`, which is the level that asked for a rail of
+ * actions rather than their contents.
+ *
+ * Capped where it renders: this says whether to show a change, not how much of
+ * a four-hundred-line `Write` belongs in the middle of a conversation.
+ */
+export const inlinesEdits = (level: FeedbackLevel): boolean => level !== "quiet";
+
 /** Open every call's arguments and output without a click. */
 export const opensTools = (level: FeedbackLevel): boolean => level === "verbose";
 

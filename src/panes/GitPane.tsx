@@ -16,13 +16,15 @@ import {
   gitUnstage,
   revealPath,
 } from "../lib/ipc";
+import { fileGlyph } from "../lib/fileIcons";
+import { baseName, parentDir } from "../lib/paths";
+import { scmStatus } from "../lib/scmStatus";
 import {
   BranchIcon,
   CheckIcon,
   DiscardIcon,
-  FetchIcon,
-  MergeIcon,
   MinusIcon,
+  OverflowIcon,
   PlusIcon,
   PullIcon,
   PushIcon,
@@ -420,15 +422,28 @@ export const GitPane = memo(function GitPane({
     </div>
   );
 
-  const fileRow = (file: FileStatus, staged: boolean) => (
+  const fileRow = (file: FileStatus, staged: boolean) => {
+    const { letter, tone, title } = scmStatus(file.code);
+    const { Icon, tone: fileTone } = fileGlyph(baseName(file.path));
+    const folder = parentDir(file.path);
+    const moved = file.originalPath ? `${file.originalPath} → ${file.path}` : file.path;
+    return (
     <div
       key={`${staged ? "s" : "u"}:${file.path}`}
       className="row scm-row"
-      title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+      data-tone={tone}
+      title={`${title} — ${moved}`}
       onClick={() => void openFileDiff(file, staged)}
       onContextMenu={(event) => menu.openContextMenu(event, fileMenu(file, staged))}
     >
-      <span className="label">{file.path}</span>
+      <span className="tree-glyph" data-tone={fileTone}>
+        <Icon />
+      </span>
+      {/* Name first and directory after it, dimmed: a column of full paths
+          truncates from the right, which eats exactly the filename you were
+          scanning for. */}
+      <span className="label">{baseName(file.path)}</span>
+      {folder && folder !== file.path && <span className="scm-dir">{folder}</span>}
       <div className="row-actions" onClick={(e) => e.stopPropagation()}>
         {!staged && (
           <button
@@ -449,11 +464,10 @@ export const GitPane = memo(function GitPane({
           {staged ? <MinusIcon /> : <PlusIcon />}
         </button>
       </div>
-      <span className="status-code" data-untracked={isUntracked(file)}>
-        {file.code.trim() || "·"}
-      </span>
+      <span className="status-code">{letter}</span>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
@@ -463,19 +477,6 @@ export const GitPane = memo(function GitPane({
       >
         <SourceControlIcon />
         <span className="pane-title">Source Control</span>
-        {status?.branch && (
-          <button
-            className="count branch-chip"
-            title="Switch branch"
-            disabled={busy !== null}
-            onClick={() => openBranchMenu("checkout")}
-          >
-            <BranchIcon />
-            {status.branch}
-            {status.ahead > 0 && ` ↑${status.ahead}`}
-            {status.behind > 0 && ` ↓${status.behind}`}
-          </button>
-        )}
         <div className="actions">
           <button
             className="toggle-button icon-button"
@@ -495,29 +496,51 @@ export const GitPane = memo(function GitPane({
           </button>
           <button
             className="toggle-button icon-button"
-            onClick={() => openBranchMenu("merge")}
-            disabled={busy !== null}
-            title="Merge a branch into this one"
-          >
-            <MergeIcon />
-          </button>
-          <button
-            className="toggle-button icon-button"
-            onClick={() => void run("fetch", () => gitFetch(cwd))}
-            disabled={busy !== null}
-            title="Fetch"
-          >
-            <FetchIcon />
-          </button>
-          <button
-            className="toggle-button icon-button"
             onClick={() => void refresh()}
             title="Refresh"
           >
             <RefreshIcon />
           </button>
+          {/* Fetch and Merge used to sit here as buttons of their own, and five
+              actions plus a title do not fit a 250px pane — the header clipped
+              to "SOURCE CO…". Nothing was dropped: this opens the same list the
+              header's right-click always did. */}
+          <button
+            className="toggle-button icon-button"
+            title="More git actions"
+            onClick={(event) => {
+              const at = event.currentTarget.getBoundingClientRect();
+              menu.openMenu({ items: repoEntries(), x: at.left, y: at.bottom + 2 });
+            }}
+          >
+            <OverflowIcon />
+          </button>
         </div>
       </div>
+
+      {/* The branch gets its own row rather than a slot in the header. Sharing
+          one 26px line with a title and five buttons is what clipped the pane
+          to "SOURCE CO…" and the branch to two letters — and the branch name is
+          the one thing here whose tail (`…/fix-scroll`) carries the meaning. */}
+      {status?.branch && (
+        <div className="branch-bar">
+          <button
+            className="branch-chip"
+            title="Switch branch"
+            disabled={busy !== null}
+            onClick={() => openBranchMenu("checkout")}
+          >
+            <BranchIcon />
+            <span className="branch-name">{status.branch}</span>
+          </button>
+          {(status.ahead > 0 || status.behind > 0) && (
+            <span className="branch-track">
+              {status.ahead > 0 && <span title="Commits to push">↑{status.ahead}</span>}
+              {status.behind > 0 && <span title="Commits to pull">↓{status.behind}</span>}
+            </span>
+          )}
+        </div>
+      )}
 
       {branchMode && (
         <div className="branch-menu">

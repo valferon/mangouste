@@ -5,6 +5,7 @@ import {
   feedbackArgs,
   feedbackNeedsRestart,
   foldsThinking,
+  inlinesEdits,
   namesIntent,
   opensTools,
   showsSubagents,
@@ -27,6 +28,12 @@ describe("the feedback dial", () => {
 
   it("names intent everywhere except quiet", () => {
     expect(FEEDBACK_LEVELS.filter(namesIntent)).toEqual(["normal", "verbose"]);
+  });
+
+  it("shows edits in the flow everywhere except quiet", () => {
+    // Quiet asked for a list of actions; every other level asked what the
+    // session is doing, and for an edit the diff is that answer.
+    expect(FEEDBACK_LEVELS.filter(inlinesEdits)).toEqual(["normal", "verbose"]);
   });
 
   it("opens calls and forwards subagents only at the loudest level", () => {

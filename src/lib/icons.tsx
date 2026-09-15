@@ -504,3 +504,23 @@ export function MongooseLogo({ className, ...rest }: IconProps) {
     </svg>
   );
 }
+
+/** Collapse-all: two rows folding in on the line between them. */
+export function CollapseAllIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2.5 8h11" />
+      <path d="M5.6 4.6 8 2.2l2.4 2.4" />
+      <path d="M5.6 11.4 8 13.8l2.4-2.4" />
+    </Icon>
+  );
+}
+
+/** Toolbar overflow: the actions a narrow pane header cannot show as buttons. */
+export function OverflowIcon(props: IconProps) {
+  return (
+    <Icon {...props} strokeWidth={2}>
+      <path d="M8 3.6h.01M8 8h.01M8 12.4h.01" />
+    </Icon>
+  );
+}

@@ -713,6 +713,76 @@ gives up its copy of the running cost total so one exchange does not bill twice.
 The turn that follows says `resumed by task-notification`, which is the only frame
 of the pair that knows what it is.
 
+## Reaching you when the window is not in front
+
+The rail knows every session's status to the second, and cannot reach past the
+window. A session going `awaiting` while you are in a browser is the case the
+whole workbench exists for, so the status *change* — not the status — is also
+an event you can be told about.
+
+The edge costs nothing to find. `list_sessions` already captures each
+transcript's previous status before it re-parses, because `apply_downgrade_grace`
+needs to know what a session read as a moment ago; a transition is that value
+against the settled one, two lines apart in `src-tauri/src/sessions.rs`. Reading
+it there rather than in a scan of its own is also what keeps a turn boundary
+quiet: the grace exists to absorb the instant where `end_turn` is the tail of
+the file and the next record is milliseconds away, and a notification fired
+before it settled would be announcing a session that never stopped.
+
+Three statuses are notable: `awaiting`, `interrupted` and `finished`. Not
+`active`, because the usual way a session becomes active is that you just typed
+into it, and not `idle`, which reports the clock rather than an outcome. A
+transcript this process has not scanned before has no previous status and so
+produces nothing at all — otherwise a cold start would announce every question
+you left unanswered last month.
+
+Deduplication across windows is free for the same reason: the session cache is
+process-wide and both windows call the same `list_sessions`, so whichever scan
+lands first consumes the edge and the second sees no change. The announcement
+then goes to one window — the focused one by preference, since it is the only
+one that can honestly say whether you are already looking at the session.
+
+Notifications are the frontend's decision (`src/lib/alerts.ts`) and Rust's
+delivery. Two preferences, because they are two different appetites: sessions
+that want you (`awaiting`, `interrupted`) are on, every clean end is off — with
+several sessions running that one fires constantly, and the rail already marks a
+finished session `pendingReview` until you read it. The one suppression is
+narrow on purpose: this window focused, showing that session. An unfocused
+window cannot claim you can see it — it may be behind a browser, or on a monitor
+you are not at — and the failure that matters is the missed `awaiting`, not the
+redundant toast.
+
+### Hooks
+
+The same edges can run your own commands, from `~/.config/mangouste/hooks.json`:
+
+```json
+{
+  "hooks": [
+    { "on": ["awaiting", "interrupted"], "run": "say \"$MANGOUSTE_SESSION_TITLE needs you\"" },
+    { "run": "logger -t mangouste \"$MANGOUSTE_SESSION_ID $MANGOUSTE_FROM -> $MANGOUSTE_TO\"" }
+  ]
+}
+```
+
+`on` filters by the status being entered; absent, or `["*"]`, means all of them.
+`run` goes to `sh -c`, in its own process group, with output discarded and a 30
+second ceiling after which the group is killed — these are spawned from a scan
+that runs every fifteen seconds, and one wedged hook must not become one stuck
+child per tick. The file is re-read when its mtime moves, so editing it takes
+effect on the next scan; a file that is missing or malformed is no hooks, never
+an error, because a typo in a config file must not stop the sidebar scanning.
+
+The session arrives in the environment — `MANGOUSTE_SESSION_ID`,
+`MANGOUSTE_SESSION_TITLE`, `MANGOUSTE_SESSION_CWD`, `MANGOUSTE_SESSION_FILE`,
+`MANGOUSTE_FROM`, `MANGOUSTE_TO` — and **never** in the command string. That is
+the whole reason for the split: titles and prompts come out of transcripts,
+which are full of model output and tool output, and formatting any of it into a
+string bound for `sh -c` would be a command-injection path from anything Claude
+ever read. For the same class of reason the file is read from your config
+directory and nowhere else: a repo-local hooks file would mean cloning a
+repository and opening it here was enough to run its author's commands.
+
 ## The branch, and what it owes upstream
 
 Laid out as VSCode lays it out. Leftmost, because it is the item the eye goes

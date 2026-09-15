@@ -102,6 +102,23 @@ export interface ProjectGroup {
 }
 
 /**
+ * One session crossing from one status to another, as the scan saw it.
+ *
+ * Mirrors `Transition` in `src-tauri/src/alerts.rs`. `from` and `to` are the
+ * statuses Rust computes, so `pendingReview` never appears in either — it is an
+ * overlay this side applies afterwards, and the transition that stands behind
+ * it is the one into `finished`.
+ */
+export interface SessionTransition {
+  sessionId: string;
+  file: string;
+  cwd: string;
+  title: string | null;
+  from: SessionStatus;
+  to: SessionStatus;
+}
+
+/**
  * One transcript that matched a content search, with the evidence for it.
  *
  * Mirrors `SessionHit` in `src-tauri/src/sessions.rs`. The sidebar joins these
@@ -194,6 +211,57 @@ export interface RecapCommit {
   subject: string;
 }
 
+/* ---------- session changes ---------- */
+
+/**
+ * What a session has changed on disk, against where it started. Mirrors
+ * `SessionChanges` in `src-tauri/src/changes.rs`.
+ *
+ * Read from git rather than from the transcript's `Edit` calls, because the two
+ * answer different questions: the transcript says what the model asked for, one
+ * attempt at a time, and git says what the code says now — including the changes
+ * a `Bash` call, a formatter or a codegen step made, which no `Edit` card can
+ * show.
+ */
+export interface SessionChanges {
+  /** The commit the diff is taken against. */
+  base: string;
+  /** How that baseline was chosen, for the header to print. */
+  baseLabel: string;
+  files: ChangedFile[];
+  /** Files before the display cap `files` was cut to. */
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  /**
+   * Paths the session wrote that git now reports as unchanged — reverted, or
+   * written back to what they already said. Worth printing: "it edited nine
+   * files and six of them are back where they started" is a real answer.
+   */
+  unchanged: number;
+  /** When the newest turn began, for the "this turn" scope. Zero before the
+   * first prompt. */
+  turnStartMs: number;
+}
+
+export interface ChangedFile {
+  /** Repo-relative, as the patch headers and the status porcelain spell it. */
+  path: string;
+  /** Null for a binary file, which git counts as `-` rather than as 0. */
+  additions: number | null;
+  deletions: number | null;
+  /** Git has never seen it, so its patch comes from `--no-index`. */
+  untracked: boolean;
+  /**
+   * When the session last wrote it, from the transcript. Zero when git found
+   * the change but no write tool named the path — a `Bash` heredoc, a formatter
+   * — in which case nothing can date it.
+   */
+  lastTouchMs: number;
+  /** Write-tool calls the session made on it. Zero for the same reason. */
+  touches: number;
+}
+
 export interface RecapAgent {
   agentType: string;
   description: string;
@@ -212,6 +280,16 @@ export interface DirEntryInfo {
 export interface FileText {
   content: string;
   modifiedMs: number;
+}
+
+/** A file's leading bytes, base64, from `read_file_bytes`. */
+export interface FileBytes {
+  /** Base64 of what was read, which is `size` bytes unless `truncated`. */
+  data: string;
+  /** Size on disk, which is what the bar reports. */
+  size: number;
+  /** Whether the file runs past what `data` holds. */
+  truncated: boolean;
 }
 
 /**
@@ -437,6 +515,14 @@ export interface ClaudeFrame {
   type: string;
   subtype?: string;
   session_id?: string;
+  /**
+   * When the record was written, RFC3339, on transcript records only.
+   *
+   * Live stream-json frames carry no time of their own — the pane stamps their
+   * arrival instead — so this is absent for everything that did not come off
+   * disk. See `chatTimes.ts`.
+   */
+  timestamp?: string;
   message?: {
     id?: string;
     role?: string;

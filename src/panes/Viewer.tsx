@@ -20,6 +20,7 @@ import {
   setBlameShown,
   subscribeBlame,
 } from "../lib/blame";
+import { HEX_ROW, decodeBase64, formatBytes, hexRows, previewFor } from "../lib/binary";
 import { copyText } from "../lib/editing";
 import { highlightCode, highlightDiff, languageForPath } from "../lib/highlight";
 import { diffFileHeaderPath, diffHeaderPath, diffLineClass } from "../lib/diff";
@@ -28,6 +29,8 @@ import {
   formatText,
   gitBlame,
   gitShow,
+  openInDefaultApp,
+  readFileBytes,
   readTextFileMeta,
   revealPath,
   writeTextFile,
@@ -35,7 +38,7 @@ import {
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
-import type { Blame, BlameCommit } from "../lib/types";
+import type { Blame, BlameCommit, FileBytes } from "../lib/types";
 
 /**
  * Ceiling on rendered diff lines. One DOM node per line with no virtualisation,
@@ -417,6 +420,173 @@ export const ToolDiff = memo(function ToolDiff({
  * Keep in sync with `workspace.rs`.
  */
 const STALE_MARKER = "STALE:";
+
+/**
+ * What `read_text` says about a file it will not decode. Keep in sync with
+ * `src-tauri/src/workspace.rs`, which is also the only place that produces it.
+ */
+const BINARY_MARKER = "binary file";
+
+/**
+ * Bytes pulled for a hex dump.
+ *
+ * A page of a file answers "what is this?" — the magic number is in the first
+ * row — and the rest is scrolling nobody does. Reading the whole preview budget
+ * to throw most of it away would only cost the webview the memory.
+ */
+const HEX_PREVIEW_BYTES = 64 * 1024;
+
+/** Rows the dump will draw. One DOM row each, so this is the real ceiling. */
+const MAX_HEX_ROWS = 4096;
+
+/**
+ * Read nothing, keep the stat. What the external-application view wants: the
+ * size to print, and none of the bytes it has no way to render.
+ */
+const STAT_ONLY = 0;
+
+/**
+ * The view for a file the editor refuses to open.
+ *
+ * Deliberately not a mode of `FileView`: nothing here can be edited, and an
+ * editor whose save path is reachable with a base64 buffer behind it is one
+ * mistake away from writing a mangled file back over a real one. Every route out
+ * of this pane hands the file to something else.
+ */
+const BinaryView = memo(function BinaryView({ path }: { path: string }) {
+  const preview = useMemo(() => previewFor(path), [path]);
+  const [file, setFile] = useState<FileBytes | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  /** Set when the desktop had nothing to open the file with. */
+  const [openFailed, setOpenFailed] = useState(false);
+  /** Filled in by the image itself, which is the only thing that knows. */
+  const [pixels, setPixels] = useState<{ width: number; height: number } | null>(null);
+
+  const budget =
+    preview.kind === "external"
+      ? STAT_ONLY
+      : preview.kind === "hex"
+        ? HEX_PREVIEW_BYTES
+        : undefined;
+
+  useEffect(() => {
+    const signal = { cancelled: false };
+    setFile(null);
+    setError(null);
+    setOpenFailed(false);
+    setPixels(null);
+    readFileBytes(path, budget)
+      .then((bytes) => {
+        if (!signal.cancelled) setFile(bytes);
+      })
+      .catch((e: unknown) => {
+        if (!signal.cancelled) setError(String(e));
+      });
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [budget, path]);
+
+  const rows = useMemo(
+    () =>
+      file === null || preview.kind !== "hex"
+        ? []
+        : hexRows(decodeBase64(file.data), MAX_HEX_ROWS),
+    [file, preview.kind],
+  );
+
+  if (error !== null) return <div className="empty-note">{error}</div>;
+  if (file === null) return <div className="empty-note">Loading…</div>;
+
+  const shown = rows.length * HEX_ROW;
+  let note: ReactNode = <span className="count">{formatBytes(file.size)}</span>;
+  if (openFailed)
+    note = <span className="diff-del">No application is registered for this file.</span>;
+  else if (preview.kind === "image" && pixels !== null)
+    note = (
+      <span className="count">
+        {pixels.width} × {pixels.height} · {formatBytes(file.size)}
+      </span>
+    );
+  else if (preview.kind === "hex" && shown < file.size)
+    note = (
+      <span className="count">
+        first {formatBytes(shown)} of {formatBytes(file.size)}
+      </span>
+    );
+
+  return (
+    <div className="editor">
+      <div className="editor-bar">
+        <span className="editor-path" title={path}>
+          {path}
+        </span>
+        {note}
+        <div className="actions">
+          <button
+            className="toggle-button"
+            onClick={() => {
+              setOpenFailed(false);
+              void openInDefaultApp(path).then((ok) => setOpenFailed(!ok));
+            }}
+          >
+            Open Externally
+          </button>
+          <button className="toggle-button" onClick={() => void revealPath(path)}>
+            Reveal
+          </button>
+        </div>
+      </div>
+      <div className="binary-body">
+        {preview.kind === "image" &&
+          (file.truncated ? (
+            <div className="empty-note">
+              Image is larger than this pane will load. Open it externally.
+            </div>
+          ) : (
+            <img
+              className="binary-image"
+              src={`data:${preview.mime};base64,${file.data}`}
+              alt={baseName(path)}
+              onLoad={(event) =>
+                setPixels({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                })
+              }
+            />
+          ))}
+        {preview.kind === "external" && (
+          <div className="empty-note">
+            A {preview.what} — nothing this window renders. Open it externally.
+          </div>
+        )}
+        {preview.kind === "hex" &&
+          (rows.length === 0 ? (
+            <div className="empty-note">Empty file.</div>
+          ) : (
+            <div className="binary-hex selectable">
+              {rows.map((row) => (
+                <div className="binary-hex-row" key={row.offset}>
+                  <span className="binary-hex-offset">{row.offset}</span>
+                  <span className="binary-hex-bytes">
+                    {row.bytes.map((byte, index) => (
+                      // Index keys: the row is a fixed sequence of bytes at a fixed
+                      // offset, and nothing ever reorders or splices it.
+                      <span className="binary-hex-byte" key={index} data-zero={byte === "00"}>
+                        {byte}
+                      </span>
+                    ))}
+                  </span>
+                  <span className="binary-hex-text">{row.text}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+});
 
 interface FileViewProps {
   path: string;
@@ -970,6 +1140,10 @@ export const FileView = memo(function FileView({
     [lineCount],
   );
 
+  // A file the text reader refused is not an error to print — it is a different
+  // pane. Everything else it refuses (too large, not a regular file) has no
+  // better view to fall back to and stays a note.
+  if (error === BINARY_MARKER) return <BinaryView path={path} />;
   if (error !== null) return <div className="empty-note">{error}</div>;
   if (saved === null) return <div className="empty-note">Loading…</div>;
 

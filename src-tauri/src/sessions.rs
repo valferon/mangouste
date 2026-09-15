@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 /// Bytes sampled from each end of a session file.
 const HEAD_BYTES: u64 = 32 * 1024;
@@ -1262,7 +1262,10 @@ fn apply_downgrade_grace(
 /// `async` so the scan — stat, sample, and sidechain probes across every
 /// transcript on the machine — runs off the main thread.
 #[tauri::command(async)]
-pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>, String> {
+pub fn list_sessions(
+    app: AppHandle,
+    cache: State<'_, SessionCache>,
+) -> Result<Vec<ProjectGroup>, String> {
     let root = projects_root().ok_or("no home directory")?;
     if !root.is_dir() {
         return Ok(Vec::new());
@@ -1272,6 +1275,10 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
     let mut entries = cache.entries.lock();
     let mut probes = cache.probes.lock();
     let mut seen: Vec<PathBuf> = Vec::new();
+    // Status changes this scan is the first to see. Collected rather than
+    // announced inline: the cwd a transition wants is only known once the whole
+    // group has been read, and the helper group below is dropped whole.
+    let mut transitions: Vec<crate::alerts::Transition> = Vec::new();
 
     for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
         let entry = match entry {
@@ -1283,6 +1290,11 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
         }
         let dir_name = entry.file_name().to_string_lossy().to_string();
         let mut sessions = Vec::new();
+        // Held at group scope so the helper-dir check below can throw the whole
+        // lot away: the `claude -p` helpers are tooling, and tooling finishing
+        // its turn is not news.
+        let mut group_transitions: Vec<(String, String, Option<String>, String, String)> =
+            Vec::new();
 
         let files = match std::fs::read_dir(entry.path()) {
             Ok(f) => f,
@@ -1360,6 +1372,18 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
                 );
                 cached.meta.status =
                     apply_downgrade_grace(previous_status, computed, cached.mtime, now);
+                // The edge, read where the grace has already settled it — so a
+                // turn boundary that reads `finished` for a hundred
+                // milliseconds never reaches a notification.
+                if crate::alerts::is_notable(previous_status, cached.meta.status) {
+                    group_transitions.push((
+                        cached.meta.id.clone(),
+                        cached.meta.file.clone(),
+                        cached.meta.title.clone(),
+                        previous_status.unwrap_or_default().to_string(),
+                        cached.meta.status.to_string(),
+                    ));
+                }
                 cached.meta.running_agents = probe.running;
                 cached.meta.running_workflows = probe.workflows;
                 cached.meta.background_tasks = background;
@@ -1383,6 +1407,16 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
         if Path::new(&cwd) == crate::chats::helper_dir() {
             continue;
         }
+        transitions.extend(group_transitions.into_iter().map(
+            |(session_id, file, title, from, to)| crate::alerts::Transition {
+                session_id,
+                file,
+                cwd: cwd.clone(),
+                title,
+                from,
+                to,
+            },
+        ));
         let label = Path::new(&cwd)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1400,6 +1434,13 @@ pub fn list_sessions(cache: State<'_, SessionCache>) -> Result<Vec<ProjectGroup>
     let live: std::collections::HashSet<&PathBuf> = seen.iter().collect();
     entries.retain(|path, _| live.contains(path));
     probes.retain(|path, _| live.contains(path));
+
+    // Off the cache locks before anything is announced. `dispatch` spawns hook
+    // children and emits into a webview, and the other window's scan must not
+    // be parked behind either of those.
+    drop(entries);
+    drop(probes);
+    crate::alerts::dispatch(&app, &transitions);
 
     let mut out: Vec<ProjectGroup> = groups.into_values().collect();
     // Alphabetical by label, never by activity: a row that moves while you are
@@ -2499,5 +2540,3 @@ mod status_tests {
         assert!(!is_interrupt_marker(&serde_json::json!({"content": "interrupt the turn"})));
     }
 }
-
-

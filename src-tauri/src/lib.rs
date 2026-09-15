@@ -1,3 +1,5 @@
+mod alerts;
+mod changes;
 mod chats;
 mod claude;
 mod env;
@@ -177,6 +179,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(chats::ChatManager::default()))
         .manage(Arc::new(permission::PermissionState::default()))
         .manage(pty::PtyState::default())
@@ -282,6 +285,8 @@ pub fn run() {
             sessions::read_session_window,
             sessions::search_sessions,
             recap::session_recap,
+            changes::session_changes,
+            changes::session_change_patch,
             chats::rename_session,
             chats::expand_search_terms,
             // chat transport
@@ -305,6 +310,8 @@ pub fn run() {
             workspace::search_files,
             workspace::read_text_file,
             workspace::read_text_file_meta,
+            workspace::read_file_bytes,
+            workspace::open_in_default_app,
             workspace::write_text_file,
             workspace::home_dir,
             format::format_text,
@@ -344,6 +351,8 @@ pub fn run() {
             stats::stats_summary,
             // tool permissions
             claude::permission_respond,
+            // desktop notifications
+            alerts::post_notification,
         ]);
 
     // Every window takes its own children with it. The process-wide sweep on

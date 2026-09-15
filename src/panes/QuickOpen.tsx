@@ -71,16 +71,16 @@ export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
 
   const all = useMemo(() => buildEntries(groups, repos), [groups, repos]);
 
+  // Every match is rendered: the list is the only way to reach a repo, so a cap
+  // silently hides the tail of the alphabet behind a scrollbar that looks done.
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return all.slice(0, 60);
-    return all
-      .filter(
-        (entry) =>
-          isSubsequence(needle, entry.label.toLowerCase()) ||
-          entry.path.toLowerCase().includes(needle),
-      )
-      .slice(0, 60);
+    if (!needle) return all;
+    return all.filter(
+      (entry) =>
+        isSubsequence(needle, entry.label.toLowerCase()) ||
+        entry.path.toLowerCase().includes(needle),
+    );
   }, [all, query]);
 
   // Any change to the result set invalidates the highlighted row.

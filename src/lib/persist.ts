@@ -69,7 +69,15 @@ export const KEYS = {
     /** Whether file editors show the git blame column. */
     blame: "mangouste.blame",
     feedback: "mangouste.feedback",
+    /** Whether the conversation shows a clock time beside each turn. */
+    chatTimes: "mangouste.chatTimes",
     updateCheck: "mangouste.updateCheck",
+    /** Desktop notification when a session goes `awaiting` or `interrupted`. */
+    alertNeedsYou: "mangouste.alertNeedsYou",
+    /** Desktop notification when a turn ends cleanly. */
+    alertTurnDone: "mangouste.alertTurnDone",
+    /** How the rail orders sessions within a repo: by status, or by time. */
+    sessionSort: "mangouste.sessionSort",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",

@@ -134,6 +134,12 @@ pub struct SessionRecap {
 struct FileTouch {
     changes: u64,
     written: bool,
+    /// When the session last wrote it, from the record's own timestamp.
+    ///
+    /// Carried so a live diff can be narrowed to "this turn" or "since I last
+    /// looked" without re-walking the transcript: the fold already passes every
+    /// write record, and the timestamp is a field away.
+    last_ms: u64,
 }
 
 /// One agent type's running tally.
@@ -149,6 +155,9 @@ struct AgentTouch {
 struct RecapAcc {
     first_prompt: Option<String>,
     last_prompt: Option<String>,
+    /// When the newest prompt was sent, which is when the current turn began.
+    /// The changes pane takes its "this turn" cutoff from it.
+    last_prompt_ms: u64,
     prompts: u64,
     files: BTreeMap<String, FileTouch>,
     commits: Vec<RecapCommit>,
@@ -336,6 +345,13 @@ fn fold_line(line: &str, acc: &mut RecapAcc) {
                     let touch = acc.files.entry(path).or_default();
                     touch.changes += 1;
                     touch.written |= name == "Write";
+                    // Parsed off the record rather than taken from the clock: a
+                    // recap folded an hour late must still say when the write
+                    // happened, or every scope filter built on it is wrong.
+                    let at = str_field(&record, "timestamp")
+                        .map(|text| crate::stats::parse_iso_ms(&text))
+                        .unwrap_or(0);
+                    touch.last_ms = touch.last_ms.max(at);
                 }
             }
             if AGENT_TOOLS.contains(&name) {
@@ -405,6 +421,11 @@ fn fold_line(line: &str, acc: &mut RecapAcc) {
         acc.first_prompt = Some(prompt.clone());
     }
     acc.last_prompt = Some(prompt);
+    if let Some(at) = str_field(&record, "timestamp").map(|text| crate::stats::parse_iso_ms(&text)) {
+        // Monotonic on purpose: a transcript with a clock that jumped backwards
+        // must not move the turn boundary backwards with it.
+        acc.last_prompt_ms = acc.last_prompt_ms.max(at);
+    }
 }
 
 /// Fold whatever has been appended since the last call. Returns bytes folded.
@@ -520,6 +541,55 @@ fn present(file: String, scan: &RecapScan, bytes_read: u64, scan_ms: u64) -> Ses
         scan_ms,
         truncated: scan.truncated,
     }
+}
+
+/// One file a session wrote, for the live-diff scan.
+///
+/// Deliberately not `RecapFile`: that is a display row, capped at
+/// `RECAP_FILES` and sorted for reading. This is the whole set, because a diff
+/// that silently dropped the thirteenth file would be a diff that lies.
+#[derive(Debug, Clone)]
+pub struct SessionWrite {
+    pub path: String,
+    pub changes: u64,
+    pub last_ms: u64,
+}
+
+/// Every path a session wrote, and the first commit it landed.
+#[derive(Debug, Clone, Default)]
+pub struct SessionWrites {
+    pub paths: Vec<SessionWrite>,
+    /// The session's own first commit, which is what a diff takes its baseline
+    /// from: everything this session did starts at that commit's parent.
+    pub first_commit: Option<String>,
+    /// When the newest turn began, for a scope narrower than the session.
+    pub last_prompt_ms: u64,
+}
+
+/// The write-set of one session, folded through the same cache the recap uses.
+///
+/// Shares the cache on purpose. A session with its recap row open and its
+/// changes pane open is one incremental walk, not two, and the second caller
+/// pays only for the bytes appended since the first.
+pub fn session_writes(file: &Path, cache: &RecapCache) -> Result<SessionWrites, String> {
+    let path = PathBuf::from(file);
+    let entry = cache.files.lock().entry(path.clone()).or_default().clone();
+    let mut scan = entry.lock();
+    scan_file(&path, &mut scan).map_err(|e| e.to_string())?;
+    Ok(SessionWrites {
+        paths: scan
+            .acc
+            .files
+            .iter()
+            .map(|(path, touch)| SessionWrite {
+                path: path.clone(),
+                changes: touch.changes,
+                last_ms: touch.last_ms,
+            })
+            .collect(),
+        first_commit: scan.acc.commits.first().map(|commit| commit.sha.clone()),
+        last_prompt_ms: scan.acc.last_prompt_ms,
+    })
 }
 
 /// What one session did, from its transcript.

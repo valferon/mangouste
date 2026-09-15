@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -72,12 +73,23 @@ import {
   feedbackArgs,
   feedbackNeedsRestart,
   foldsThinking,
+  inlinesEdits,
   namesIntent,
   opensTools,
   showsSubagents,
   type FeedbackLevel,
 } from "../lib/feedback";
+import { hiddenLabel, previewDiff } from "../lib/editPreview";
 import { recallThinking, rememberThinking } from "../lib/thinkingStore";
+import {
+  chatTimesShown,
+  chatTimesVersion,
+  setChatTimesShown,
+  stampTitle,
+  stampsFor,
+  subscribeChatTimes,
+  type ChatStamp,
+} from "../lib/chatTimes";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -166,12 +178,19 @@ interface ChatPaneProps {
 }
 
 /** Rendered conversation entry, derived from one or more stream-json frames. */
-type ChatItem =
-  | { kind: "user"; key: string; text: string }
-  | { kind: "assistant"; key: string; blocks: ContentBlock[] }
+/**
+ * One thing the log shows, before it is flattened into rows.
+ *
+ * `atMs` is when it happened: the record's own `timestamp` for history, the
+ * moment of arrival for a live frame, which carries none. Optional because a
+ * record can lack a parseable one, and a row with no time gets no stamp rather
+ * than a guessed one.
+ */
+type ChatItem = { key: string; atMs?: number } & (
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; blocks: ContentBlock[] }
   | {
       kind: "result";
-      key: string;
       text: string;
       costUsd?: number;
       turns?: number;
@@ -195,7 +214,7 @@ type ChatItem =
        */
       superseded?: boolean;
     }
-  | { kind: "permission"; key: string; request: PermissionRequest; decided: string | null }
+  | { kind: "permission"; request: PermissionRequest; decided: string | null }
   /**
    * The inside of a subagent, forwarded by the CLI at the `verbose` level.
    *
@@ -205,11 +224,12 @@ type ChatItem =
    * the real turn's spinner. `parentId` is the `tool_use` that started it, which
    * is how the row learns whose reasoning it is showing.
    */
-  | { kind: "subagent"; key: string; parentId: string; blocks: ContentBlock[] }
+  | { kind: "subagent"; parentId: string; blocks: ContentBlock[] }
   // A command answered in-app over the control protocol. The item only names
   // the command; the panel fetches its own data, so an answer arriving does not
   // re-render the timeline.
-  | { kind: "panel"; key: string; command: NativeCommand; args: string };
+  | { kind: "panel"; command: NativeCommand; args: string }
+);
 
 /** Everything a control panel needs that is not in its timeline entry. */
 interface PanelContext {
@@ -629,6 +649,15 @@ interface PendingImage {
 /** Longest tool summary rendered. A whole heredoc script is not a summary. */
 const SUMMARY_MAX = 140;
 
+/**
+ * Diff lines an edit shows in the flow before it is opened.
+ *
+ * A glance, not a read: twelve lines is a small edit whole, and a large one
+ * reduced to its shape with a line underneath saying what was left. The card
+ * below it is one click away and holds all of it.
+ */
+const INLINE_DIFF_LINES = 12;
+
 /** One-line gist of a tool call, so a collapsed block still says what it did. */
 function toolSummary(name: string, input: Record<string, unknown>): string {
   const pick = (key: string) => (typeof input[key] === "string" ? (input[key] as string) : null);
@@ -960,6 +989,15 @@ const ToolBlock = memo(function ToolBlock({
   // side by side made a two-line change unreadable. Null for every other tool,
   // which keeps the raw dump for anything this cannot render faithfully.
   const diffLines = useMemo(() => toolDiffLines(block.name, block.input), [block]);
+  // What of it rides in the conversation itself, rather than inside the card.
+  // Null at `quiet`, which asked for a rail of actions and not their contents.
+  const preview = useMemo(
+    () =>
+      diffLines === null || !inlinesEdits(level)
+        ? null
+        : previewDiff(diffLines, INLINE_DIFF_LINES),
+    [diffLines, level],
+  );
   const filePath =
     typeof block.input.file_path === "string" ? (block.input.file_path as string) : null;
   // The grammar an edit's diff is coloured in comes from the file's own name.
@@ -996,6 +1034,20 @@ const ToolBlock = memo(function ToolBlock({
           </>
         )}
       </div>
+      {/* The change itself, in the flow, while the turn is still running.
+          Without it a session at work is a list of file names: the diff is
+          already synthesised for the card and the permission prompt, and
+          watching a session edit code is the reason to have this window open
+          rather than a terminal. Clipped to a glance — the card underneath is
+          where the whole thing lives. */}
+      {!open && preview !== null && (
+        <div className="tool-diff-inline" onClick={() => setOpen(true)}>
+          <ToolDiff lines={preview.lines} language={language} />
+          {preview.hidden > 0 && (
+            <div className="diff-meta tool-diff-more">{hiddenLabel(preview.hidden)}</div>
+          )}
+        </div>
+      )}
       {open && (
         <>
           <div className="tool-io">
@@ -1033,6 +1085,19 @@ const ToolBlock = memo(function ToolBlock({
  * frames, so one mapping serves both. Tool results are hoisted out separately
  * because they arrive as `user` records referencing an earlier `tool_use`.
  */
+/**
+ * When a transcript record was written, or undefined for a live frame.
+ *
+ * Live stream-json carries no timestamp, so those are stamped on arrival by
+ * `appendItem` instead — the two are minutes apart at worst, and only while a
+ * turn is streaming.
+ */
+function frameTimeMs(frame: ClaudeFrame): number | undefined {
+  if (!frame.timestamp) return undefined;
+  const ms = Date.parse(frame.timestamp);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 function hydrate(
   records: ClaudeFrame[],
   generation: number,
@@ -1059,6 +1124,7 @@ function hydrate(
 
   const fold = (record: ClaudeFrame) => {
     const blocks = blocksOf(record);
+    const atMs = frameTimeMs(record);
     if (record.type === "assistant") {
       // Thinking is written to disk as a signature and an empty string, so a
       // resumed session's reasoning can only come from what this app kept while
@@ -1069,7 +1135,9 @@ function hydrate(
           ? { ...block, thinking: recallThinking(block.signature) ?? "" }
           : block,
       );
-      if (restored.length > 0) items.push({ kind: "assistant", key: historyKey(), blocks: restored });
+      if (restored.length > 0) {
+        items.push({ kind: "assistant", key: historyKey(), atMs, blocks: restored });
+      }
       return;
     }
     if (record.type !== "user") return;
@@ -1085,7 +1153,7 @@ function hydrate(
       return; // Tool-result echo, not something the human typed.
     }
     const text = blocks.filter(isText).map((b) => b.text).join("");
-    if (text.trim()) items.push({ kind: "user", key: historyKey(), text });
+    if (text.trim()) items.push({ kind: "user", key: historyKey(), atMs, text });
   };
 
   let anchorKey: string | null = null;
@@ -1112,7 +1180,7 @@ function hydrate(
  * bubble, so the rail reads as a sequence of actions — matching how the
  * official Claude Code plugin renders a turn.
  */
-type TimelineEntry = { key: string; state?: string } & (
+type TimelineEntry = { key: string; state?: string; atMs?: number } & (
   | { kind: "user"; text: string }
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
@@ -1192,16 +1260,19 @@ function toTimeline(
    */
   const agentLabels = new Map<string, string>();
   for (const item of items) {
+    // Every row an item produces happened when the item did, so the time is
+    // applied once here instead of at a dozen pushes.
+    const push = (entry: TimelineEntry) => entries.push({ atMs: item.atMs, ...entry });
     switch (item.kind) {
       case "user":
-        entries.push({ kind: "user", key: item.key, text: item.text, state: "user" });
+        push({ kind: "user", key: item.key, text: item.text, state: "user" });
         break;
       case "subagent": {
         const label = agentLabels.get(item.parentId) ?? null;
         item.blocks.forEach((block, index) => {
           const key = `${item.key}-${index}`;
           if (isText(block) && block.text.trim()) {
-            entries.push({
+            push({
               kind: "subagent",
               key,
               label,
@@ -1209,7 +1280,7 @@ function toTimeline(
               state: "assistant",
             });
           } else if (isThinking(block) && block.thinking.trim()) {
-            entries.push({
+            push({
               kind: "subagent",
               key,
               label,
@@ -1221,7 +1292,7 @@ function toTimeline(
             // merged into the same map, so a nested call fills in exactly like
             // one on the main thread.
             const result = toolResults[block.id];
-            entries.push({
+            push({
               kind: "subagent",
               key: block.id ?? key,
               label,
@@ -1237,11 +1308,11 @@ function toTimeline(
           const key = `${item.key}-${index}`;
           if (isText(block)) {
             if (block.text.trim()) {
-              entries.push({ kind: "text", key, text: block.text, state: "assistant" });
+              push({ kind: "text", key, text: block.text, state: "assistant" });
             }
           } else if (isThinking(block)) {
             if (block.thinking.trim()) {
-              entries.push({ kind: "thinking", key, text: block.thinking, state: "thinking" });
+              push({ kind: "thinking", key, text: block.thinking, state: "thinking" });
             }
           } else if (isToolUse(block)) {
             const result = toolResults[block.id];
@@ -1252,7 +1323,7 @@ function toTimeline(
                 typeof agentType === "string" && agentType.trim() ? agentType : block.name,
               );
             }
-            entries.push({
+            push({
               kind: "tool",
               key: block.id ?? key,
               block,
@@ -1261,12 +1332,12 @@ function toTimeline(
               state: result ? (result.isError ? "error" : "done") : "running",
             });
           } else {
-            entries.push({ kind: "unknown", key, block });
+            push({ kind: "unknown", key, block });
           }
         });
         break;
       case "permission":
-        entries.push({
+        push({
           kind: "permission",
           key: item.key,
           request: item.request,
@@ -1275,7 +1346,7 @@ function toTimeline(
         });
         break;
       case "panel":
-        entries.push({
+        push({
           kind: "panel",
           key: item.key,
           command: item.command,
@@ -1284,7 +1355,7 @@ function toTimeline(
         });
         break;
       case "result":
-        entries.push({
+        push({
           kind: "result",
           key: item.key,
           text: item.text,
@@ -1437,6 +1508,23 @@ function PermissionCard({
  * keystrokes — which only touch draft state — do not re-reconcile up to
  * MAX_ITEMS rows on every character.
  */
+/**
+ * The clock gutter for one row.
+ *
+ * A time where the minute changed, blank where it did not — the column stays
+ * the same width either way, so the rows do not jog left and right as stamps
+ * come and go. The tooltip carries the full date and time for every row that
+ * has one, including the ones the minute rule left blank.
+ */
+function RowTime({ stamp, atMs }: { stamp: ChatStamp | null; atMs?: number }) {
+  return (
+    <span className="timeline-time" title={atMs === undefined ? undefined : stampTitle(atMs)}>
+      {stamp?.day && <span className="timeline-day">{stamp.day}</span>}
+      {stamp?.time ?? ""}
+    </span>
+  );
+}
+
 const Timeline = memo(function Timeline({
   entries,
   toolResults,
@@ -1446,6 +1534,7 @@ const Timeline = memo(function Timeline({
   panelContext,
   logMenu,
   level,
+  times,
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
@@ -1470,8 +1559,13 @@ const Timeline = memo(function Timeline({
   logMenu: () => MenuEntry[];
   /** How much of each row to show. */
   level: FeedbackLevel;
+  /** Whether the clock gutter shows. */
+  times: boolean;
 }) {
   const menu = useMenu();
+  // Null while stamps are off, which is also what keeps the gutter out of the
+  // DOM entirely rather than rendering a column of empty spans.
+  const stamps = useMemo(() => (times ? stampsFor(entries) : null), [entries, times]);
   return (
     <>
       {entries.map((entry) => (
@@ -1479,6 +1573,7 @@ const Timeline = memo(function Timeline({
           key={entry.key}
           className="timeline-row"
           data-kind={entry.kind}
+          data-times={times ? "true" : undefined}
           data-anchor={
             anchorKey !== null &&
             (entry.key === anchorKey || entry.key.startsWith(`${anchorKey}-`))
@@ -1496,6 +1591,7 @@ const Timeline = memo(function Timeline({
             ]);
           }}
         >
+          {stamps && <RowTime stamp={stamps.get(entry.key) ?? null} atMs={entry.atMs} />}
           <span className="timeline-dot" data-state={entry.state ?? ""} />
           <div className="timeline-body">
             {entry.kind === "user" && <UserMessage text={entry.text} />}
@@ -1617,6 +1713,10 @@ export const ChatPane = memo(function ChatPane({
   onFeedback,
 }: ChatPaneProps) {
   const menu = useMenu();
+  // One fact for every pane, like the editor's blame column: a tab behind must
+  // not keep stamping after the tab in front turned stamps off.
+  useSyncExternalStore(subscribeChatTimes, chatTimesVersion, chatTimesVersion);
+  const timesOn = chatTimesShown();
   const [items, setItems] = useState<ChatItem[]>([]);
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
     {},
@@ -1842,7 +1942,9 @@ export const ChatPane = memo(function ChatPane({
 
   const appendItem = useCallback((item: ChatItem) => {
     setItems((current) => {
-      const next = [...current, item];
+      // Stamped here rather than at each call site, so a new kind of live item
+      // cannot forget to. An item that already knows its own time keeps it.
+      const next = [...current, { atMs: Date.now(), ...item }];
       return next.length > MAX_ITEMS ? next.slice(next.length - MAX_ITEMS) : next;
     });
   }, []);
@@ -3037,6 +3139,12 @@ export const ChatPane = memo(function ChatPane({
   const logMenu = useCallback(
     (): MenuEntry[] => [
       {
+        label: "Show Times",
+        checked: timesOn,
+        run: () => setChatTimesShown(!timesOn),
+      },
+      "separator",
+      {
         label: "Copy Conversation",
         disabled: timeline.length === 0,
         run: () => void copyText(transcriptText()),
@@ -3053,7 +3161,7 @@ export const ChatPane = memo(function ChatPane({
         ? { label: "Interrupt Turn", accelerator: CHORD.dismiss, danger: true, run: () => void interrupt() }
         : { label: "Restart Session", run: () => void restart() },
     ],
-    [timeline.length, transcriptText, running, interrupt, restart],
+    [timeline.length, transcriptText, running, interrupt, restart, timesOn],
   );
 
   /** Right-click in the composer: what to do with the draft, then the field. */
@@ -3163,6 +3271,7 @@ export const ChatPane = memo(function ChatPane({
             panelContext={panelContext}
             logMenu={logMenu}
             level={level}
+            times={timesOn}
           />
 
           {running && !awaitingPermission && (

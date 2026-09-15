@@ -3,6 +3,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use ignore::WalkBuilder;
 use serde::Serialize;
 
@@ -264,6 +266,74 @@ pub fn read_text_file_meta(path: String, max_bytes: Option<u64>) -> Result<FileT
 
 /// Largest file the viewer will read, and so the largest one it can save back.
 const READ_BUDGET_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Largest binary preview the viewer will pull across the IPC boundary.
+///
+/// Higher than the text budget because a preview is drawn once and is not a
+/// buffer to edit, and finite because base64 costs a third again on top of the
+/// bytes themselves and the webview holds both.
+const PREVIEW_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A file's leading bytes, base64 for the webview, plus what was left behind.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBytes {
+    /// Base64 of the bytes that were read, which is at most the budget of them.
+    pub data: String,
+    /// Size on disk, which is what the bar reports and may exceed `data`.
+    pub size: u64,
+    /// Whether the file runs past what `data` holds.
+    pub truncated: bool,
+}
+
+/// Read a file's leading bytes, for the preview the text editor refuses to give.
+///
+/// Truncates where `read_text` refuses: a hex dump of the first page is worth
+/// showing for a file of any size, and the caller is told what it did not get.
+/// Non-regular files are still refused, for the reason `read_text` gives — a
+/// FIFO parks the worker thread until a writer that may never come shows up.
+#[tauri::command(async)]
+pub fn read_file_bytes(path: String, max_bytes: Option<u64>) -> Result<FileBytes, String> {
+    let path = Path::new(&path);
+    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("not a regular file".to_string());
+    }
+    let budget = max_bytes
+        .unwrap_or(PREVIEW_BUDGET_BYTES)
+        .min(PREVIEW_BUDGET_BYTES);
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(budget)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    // The stat is a snapshot and the read is not, so a file that grew between
+    // them reports the larger of the two rather than a size under its own bytes.
+    let size = metadata.len().max(bytes.len() as u64);
+    Ok(FileBytes {
+        truncated: size > bytes.len() as u64,
+        data: BASE64.encode(&bytes),
+        size,
+    })
+}
+
+/// Hand a file to the desktop's default application.
+///
+/// Goes through the opener plugin from here rather than from the webview: the
+/// JS command is gated by a path scope in the capability file, and the scope
+/// that would cover every repo on the machine is not a scope at all. The paths
+/// this sees came from the tree the user is already looking at.
+#[tauri::command(async)]
+pub fn open_in_default_app(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !Path::new(&path).exists() {
+        return Err("file is gone".to_string());
+    }
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
 
 /// Makes each in-flight save's scratch file unique, so two tabs saving into the
 /// same directory at once cannot write through one another's temp path.

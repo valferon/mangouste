@@ -76,6 +76,39 @@ fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `git` for another module, without making the helper itself public.
+///
+/// `changes.rs` runs the same shape of query against the same binary; three
+/// thin re-exports beat a second copy of the child-process plumbing and the
+/// `explain` wording that goes with it.
+pub(crate) fn git_out(cwd: &str, args: &[&str]) -> Result<String, String> {
+    git(cwd, args)
+}
+
+/// `git` where exit 1 means "the files differ" rather than a failure, which is
+/// what `diff --no-index` uses it for.
+pub(crate) fn git_diff_out(cwd: &str, args: &[&str]) -> Result<String, String> {
+    let output = crate::env::with_child_path(&mut Command::new("git"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(explain(&String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A patch for another module, budget-capped exactly like the ones this file
+/// serves.
+pub(crate) fn git_patch_out(
+    cwd: &str,
+    args: &[&str],
+    allow_diff_exit: bool,
+) -> Result<String, String> {
+    git_patch(cwd, args, allow_diff_exit)
+}
+
 /// What a history query is narrowed to. Every field is optional, and the ones
 /// that are set are AND-ed together.
 ///

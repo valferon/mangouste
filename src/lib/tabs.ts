@@ -56,6 +56,24 @@ export type Tab =
   | { id: string; kind: "file"; label: string; path: string; cwd: string }
   | { id: string; kind: "diff"; label: string; patch: string; cwd: string }
   | { id: string; kind: "history"; label: string; cwd: string }
+  /**
+   * A live diff of one session's work.
+   *
+   * Keyed by session rather than by repo, unlike the history and dashboard
+   * tabs: two sessions in one repo are two different answers to "what has this
+   * changed", and watching one while the other runs is the case the whole pane
+   * exists for. Carries the transcript path because that is what the write-set
+   * is folded from — the session id alone would mean a scan of the projects
+   * directory to find the file again.
+   */
+  | {
+      id: string;
+      kind: "changes";
+      label: string;
+      cwd: string;
+      file: string;
+      sessionId: string;
+    }
   | { id: string; kind: "dashboard"; label: string };
 
 /** The repo a tab belongs to, or null for the window-level dashboard. */
@@ -101,6 +119,9 @@ export type StoredTab =
   /** A history tab is its repo and nothing else: everything it shows is read
    *  back from git on open, so there is no derived state to go stale. */
   | { kind: "history"; cwd: string }
+  /** A changes tab restores: git and the transcript both outlive the window,
+   *  so nothing it shows is derived state that could come back stale. */
+  | { kind: "changes"; cwd: string; sessionId: string; file: string }
   | { kind: "dashboard" };
 
 /** The storable projection of a live tab, or null for what must not come back. */
@@ -124,11 +145,25 @@ export function toStoredTab(tab: Tab): StoredTab | null {
       return { kind: "file", cwd: tab.cwd, path: tab.path };
     case "history":
       return { kind: "history", cwd: tab.cwd };
+    case "changes":
+      return { kind: "changes", cwd: tab.cwd, sessionId: tab.sessionId, file: tab.file };
     case "dashboard":
       return { kind: "dashboard" };
     case "diff":
       return null;
   }
+}
+
+/**
+ * What a changes tab is called in the strip.
+ *
+ * The session id rather than its title, and for the same reason the labels here
+ * are re-derived rather than stored: a title is renamed by the CLI mid-session,
+ * and two sessions in one repo both reading "Changes" is a strip you cannot aim
+ * at. Six characters is what the rail already shows of an untitled session.
+ */
+export function changesTabLabel(sessionId: string): string {
+  return `Changes ${sessionId.slice(0, 6)}`;
 }
 
 /** Arrays and null both pass `typeof === "object"`; neither can hold a tab. */
@@ -165,6 +200,15 @@ export function isStoredTab(value: unknown): value is StoredTab {
       return typeof value.cwd === "string" && typeof value.path === "string";
     case "history":
       return typeof value.cwd === "string";
+    case "changes":
+      // The transcript path is required, not optional: without it the pane has
+      // nothing to fold a write-set from, and would restore as a tab that can
+      // only ever say "no changes".
+      return (
+        typeof value.cwd === "string" &&
+        typeof value.sessionId === "string" &&
+        typeof value.file === "string"
+      );
     case "dashboard":
       return true;
     default:
@@ -196,6 +240,8 @@ export function storedTabId(stored: StoredTab): string {
       return `file:${stored.path}`;
     case "history":
       return `history|${stored.cwd}`;
+    case "changes":
+      return `changes|${stored.cwd}|${stored.sessionId}`;
     case "dashboard":
       return "dashboard";
   }
@@ -232,7 +278,43 @@ export function restoreTab(stored: StoredTab): Tab {
         label: "History",
         cwd: stored.cwd,
       };
+    case "changes":
+      return {
+        kind: "changes",
+        id: storedTabId(stored),
+        label: changesTabLabel(stored.sessionId),
+        cwd: stored.cwd,
+        file: stored.file,
+        sessionId: stored.sessionId,
+      };
     case "dashboard":
       return { kind: "dashboard", id: storedTabId(stored), label: "Dashboard" };
   }
+}
+
+/**
+ * The tab that takes focus when the one in front is closed.
+ *
+ * `selectable` is the strip's own list *after* the removal — a tab from another
+ * repo is not in it, because focusing one leaves the centre pane blank. `mru`
+ * is every tab id in the order it was last in front, newest first, and is the
+ * whole point: closing a tab should land on the one you were reading before it,
+ * not on whatever happens to sit leftmost. Ids in `mru` that are no longer open
+ * are skipped rather than pruned, so the caller can keep an append-only list.
+ *
+ * The fallback — first chat, else first tab — is what runs when nothing in the
+ * strip has been in front this run: a freshly seeded session tab after the
+ * repo's last chat closed, or a restored strip whose remembered tab is the one
+ * being closed. Preferring a chat there keeps a repo from landing on a file
+ * viewer with no live session behind it.
+ */
+export function successorTab(
+  selectable: Tab[],
+  mru: readonly string[],
+): Tab | null {
+  for (const id of mru) {
+    const seen = selectable.find((tab) => tab.id === id);
+    if (seen) return seen;
+  }
+  return selectable.find((tab) => tab.kind === "chat") ?? selectable[0] ?? null;
 }

@@ -261,6 +261,45 @@ body {
   gap: 4px;
 }
 
+/* The branch, on the line under the pane header. Full width, so the name can
+   run out rather than being clipped to the two letters a shared header left. */
+.branch-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 8px 5px;
+}
+
+.branch-bar .branch-chip {
+  min-width: 0;
+  flex: 0 1 auto;
+  padding: 1px 4px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/* Clipped from the left: a long branch name is `feature/…/fix-scroll`, and the
+   half worth keeping is the end. */
+.branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.branch-track {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 .branch-chip .icon {
   font-size: 12px;
 }
@@ -317,37 +356,54 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   flex: 0 0 auto;
-  width: 44px;
+  width: 38px;
   padding-top: 4px;
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
 }
 
+/* The active view is marked by a filled pill rather than an edge bar. The bar
+   reads as "this edge of the window is selected", which is true of a tab strip
+   and not of a rail that also toggles the pane shut; a pill is the button
+   itself, which is the thing that is on. */
 .activity-item {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  height: 40px;
+  width: 30px;
+  height: 30px;
+  margin: 1px 0;
   padding: 0;
   border: none;
-  /* Reserved on every button, so activating one does not shift the icon. */
-  border-left: 2px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--fg-dim);
   cursor: pointer;
-  font-size: 20px;
+  font-size: 17px;
+  transition:
+    background 90ms ease,
+    color 90ms ease;
 }
 
 .activity-item:hover {
+  background: var(--bg-hover);
   color: var(--fg);
 }
 
 .activity-item[data-active="true"] {
-  color: var(--fg-bright);
-  border-left-color: var(--accent);
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+/* Keyboard focus has to be visible on a rail with no text: without this the
+   pill is the only affordance and it only appears once the view is already
+   open. */
+.activity-item:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 /* `display` is set inline — flex when active, none when not. */
@@ -394,7 +450,16 @@ body {
 .pane-header .actions {
   margin-left: auto;
   display: flex;
-  gap: 2px;
+  flex: 0 0 auto;
+  gap: 0;
+}
+
+/* Tighter than a body button. A pane header is 26px holding a title and up to
+   five actions, and at the default padding the five of them ate enough of the
+   line to clip the title to "SOURCE CO…". */
+.pane-header .actions .icon-button {
+  padding: 3px 3px;
+  width: 20px;
 }
 
 .pane-body {
@@ -434,7 +499,7 @@ body {
 .row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: var(--row-height);
   padding: 0 8px;
   white-space: nowrap;
@@ -451,10 +516,16 @@ body {
   color: var(--fg-bright);
 }
 
+/* A 12px slot every row keeps, directory or not, so the glyph column below it
+   is straight. Sized in px and centred as a flex box rather than a text cell:
+   the old `▸` was a font glyph, and its baseline moved with whatever face the
+   platform resolved. */
 .row .twisty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 12px;
   flex: 0 0 12px;
-  text-align: center;
   color: var(--fg-dim);
   font-size: 10px;
 }
@@ -473,6 +544,92 @@ body {
 
 .row.dir .label {
   color: var(--fg);
+}
+
+/* ---------- explorer: glyphs, chevrons, indent guides ---------- */
+
+/* File-type tones. An alias table over the theme's own accents, exactly as the
+   history graph's lanes are: a TypeScript blue hardcoded here would be the one
+   colour on screen that ignores the theme, and it sits badly on the light
+   palettes. `plain` and `locked` stay dim on purpose — an unrecognised file and
+   a generated lockfile are both things the eye should skip. */
+.tree-glyph {
+  display: inline-flex;
+  flex: 0 0 16px;
+  width: 16px;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: var(--fg-dim);
+}
+
+.tree-glyph[data-tone="folder"] {
+  color: var(--blue);
+}
+.tree-glyph[data-tone="code"] {
+  color: var(--blue);
+}
+.tree-glyph[data-tone="systems"] {
+  color: var(--orange);
+}
+.tree-glyph[data-tone="data"] {
+  color: var(--amber);
+}
+.tree-glyph[data-tone="doc"] {
+  color: var(--cyan);
+}
+.tree-glyph[data-tone="style"] {
+  color: var(--purple);
+}
+.tree-glyph[data-tone="script"] {
+  color: var(--green);
+}
+.tree-glyph[data-tone="media"] {
+  color: var(--purple);
+}
+.tree-glyph[data-tone="locked"],
+.tree-glyph[data-tone="plain"] {
+  color: var(--fg-dim);
+}
+
+/* A directory's name carries the weight; its children are the detail under it.
+   Without this a deep tree is a wall of one type size with no way in. */
+.tree-row.dir .label {
+  font-weight: 600;
+}
+
+/* Rotated rather than swapped for a second glyph, so the two states are the
+   same shape and the eye tracks the turn instead of re-reading the icon. */
+.tree-row .twisty svg {
+  transition: transform 100ms ease;
+}
+
+.tree-row .twisty[data-open="true"] svg {
+  transform: rotate(90deg);
+}
+
+/* One line per open directory, running the height of the rows it owns. `--guide`
+   is set inline per level — see `GUIDE_BASE` in FileTree.tsx, which puts it
+   under the chevron that opened the level rather than between two of them. */
+.tree-children {
+  position: relative;
+}
+
+.tree-children::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--guide);
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+/* The guide would otherwise draw over the selection and hover fills, which are
+   the two things in the pane that have to stay solid. */
+.tree-row {
+  position: relative;
 }
 
 .empty-note {
@@ -497,15 +654,61 @@ body {
   color: var(--chip-head-fg);
 }
 
+/* One letter, dim: the colour on the filename already said what changed, and a
+   second loud copy of it in the margin competes with the name for the eye. */
 .status-code {
   font-family: var(--font-mono);
-  width: 20px;
-  flex: 0 0 20px;
-  color: var(--amber);
+  width: 14px;
+  flex: 0 0 14px;
+  text-align: center;
+  color: var(--fg-dim);
 }
 
-.status-code[data-untracked="true"] {
+/* Status reads off the name, the way an IDE's change list does. Tones are the
+   theme's accents, so this follows a palette switch like everything else. */
+.scm-row[data-tone="added"] .label {
   color: var(--green);
+}
+.scm-row[data-tone="modified"] .label {
+  color: var(--blue);
+}
+.scm-row[data-tone="renamed"] .label {
+  color: var(--purple);
+}
+.scm-row[data-tone="conflict"] .label {
+  color: var(--red);
+}
+.scm-row[data-tone="ignored"] .label {
+  color: var(--fg-dim);
+}
+
+/* A deleted path is struck through as well as coloured: it is the one status
+   that means the row's subject is gone, and colour alone does not say that. */
+.scm-row[data-tone="deleted"] .label {
+  color: var(--red);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+/* The directory, after the name it qualifies. It gives up space first: if the
+   row cannot fit both, the filename is the half worth keeping. */
+.scm-dir {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* The name is the fixed half, so it never ellipsises while the path beside it
+   still has room to give. */
+.scm-row .label {
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 /* ---------- source control: commit box, groups, branch menu ---------- */
@@ -572,6 +775,7 @@ body {
    title is the part that gives way rather than pushing buttons off. */
 .pane-title {
   min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2534,6 +2738,24 @@ select {
   overflow-x: auto;
 }
 
+/* The diff a closed edit card shows in the flow.
+   No `IN` tag and no second border: it is not the card's contents spilling out,
+   it is the row saying what it is. Clicking anywhere on it opens the card,
+   which is where the untruncated diff and the result live. */
+.tool-diff-inline {
+  cursor: pointer;
+  padding: 2px 8px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-diff-inline .tool-diff {
+  padding: 0;
+}
+
+.tool-diff-more {
+  padding-top: 2px;
+}
+
 /* ---------- file editor ---------- */
 
 .editor {
@@ -2744,6 +2966,87 @@ select {
   background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+/* ---------- binary preview ---------- */
+
+/* The pane a file gets when it is not text. One scroller, because nothing in
+   here is aligned to anything beside it the way the editor's columns are. */
+.binary-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+/* Centred with room around it, and never scaled past its own pixels: a 16px
+   icon blown up to the pane width is a worse answer than a small sharp one. */
+.binary-image {
+  display: block;
+  margin: 16px auto;
+  max-width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
+  object-fit: contain;
+  /* A transparent PNG on the panel colour is a guessing game about which
+     pixels are the image. The check pattern is what every image viewer puts
+     behind one, and it is drawn from theme tokens so it moves with the rest. */
+  background-color: var(--bg-elevated);
+  background-image:
+    linear-gradient(45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--border) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--border) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+}
+
+.binary-hex {
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.binary-hex-row {
+  display: flex;
+  gap: 14px;
+}
+
+/* Tabular figures on both numeric columns: the offsets are read down the
+   column, and a proportional digit makes them ragged. */
+.binary-hex-offset {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Fixed to sixteen slots so a short final row does not pull the character
+   column left under it. */
+.binary-hex-bytes {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(16, 2ch);
+  gap: 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Padding bytes are most of what a dump holds and none of what is being looked
+   for. Dimmed, so the bytes that say something stand out of the field. */
+.binary-hex-byte[data-zero="true"] {
+  color: var(--fg-dim);
+}
+
+.binary-hex-text {
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
+
 /* ---------- tabs ---------- */
 
 .tab-strip {
@@ -2753,6 +3056,12 @@ select {
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+}
+
+/* The global bar is 10px, which inside a 35px strip eats a third of the tab
+   and clips its label. The strip is reached by wheel, drag and chord instead. */
+.tab-strip::-webkit-scrollbar {
+  height: 0;
 }
 
 .tab {
@@ -3365,7 +3674,6 @@ select {
   max-height: 45%;
   overflow-y: auto;
 }
-
 
 /* ---------- tool IN / OUT ---------- */
 
@@ -4433,6 +4741,35 @@ select {
 .timeline-body {
   flex: 1;
   min-width: 0;
+}
+
+/* The clock gutter, off to the right so the rail, the dots and the text all
+   keep the left edge they have without it. Absolute rather than a flex column:
+   a row's own padding holds the space, so a blank stamp costs no layout. */
+.timeline-time {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  width: 52px;
+  text-align: right;
+  /* One line per stamp: a 12-hour locale's "2:30 PM" must not fold in half. */
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-dim);
+  opacity: 0.75;
+  user-select: none;
+}
+
+/* Only on the first row of a day, above the time it belongs to. */
+.timeline-day {
+  display: block;
+  opacity: 0.8;
+}
+
+.timeline-row[data-times="true"] {
+  padding-right: 60px;
 }
 
 /* Dot states carry the same vocabulary as the session list. */
@@ -5647,4 +5984,115 @@ select {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+/* ---------- session changes ---------- */
+
+/* Two stacked regions, list over patch, with the patch taking the slack: the
+   list is a handful of rows and the diff is what you are actually reading. */
+.changes-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.changes-scopes {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Pushed to the far end: it is the footnote to the scopes, not a fourth one. */
+.changes-base {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Capped rather than proportional. A session that touched forty files must not
+   push the diff off the bottom of the window, and eleven rows is enough to see
+   the shape of the work before scrolling. */
+.changes-list {
+  overflow-y: auto;
+  max-height: 33vh;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.changes-row {
+  gap: 6px;
+}
+
+/* The tree's badge floats right by default. Here the badges qualify the path —
+   "new", "on disk" — so they belong beside it, and the auto margin is spent
+   once, on the age, which is the first thing that should be pushed away. */
+.changes-row .badge {
+  margin-left: 0;
+}
+
+/* Ahead of the counts and after everything else: when a row is too narrow for
+   all of it, the age is worth less than the path and more than nothing. */
+.changes-ago {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.changes-counts {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.changes-add {
+  color: var(--green);
+}
+
+.changes-del {
+  color: var(--red);
+}
+
+.changes-binary {
+  color: var(--fg-dim);
+}
+
+.changes-diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.changes-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.changes-diff-head .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The standing caveat that a scope narrows files and not hunks. Dim, because it
+   is true on every patch and shouting it every time would be noise. */
+.changes-note {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-style: italic;
 }
