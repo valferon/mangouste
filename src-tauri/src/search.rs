@@ -548,7 +548,7 @@ mod tests {
         SearchOptions::default()
     }
 
-    fn search(dir: &PathBuf, query: &str, options: SearchOptions) -> SearchOutcome {
+    fn search(dir: &std::path::Path, query: &str, options: SearchOptions) -> SearchOutcome {
         search_text(
             dir.to_string_lossy().into_owned(),
             query.to_string(),

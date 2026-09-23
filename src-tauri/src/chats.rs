@@ -1452,7 +1452,7 @@ pub fn start(
                         .filter(|p| !p.zombie && !baseline.contains(&p.pid))
                         .collect()
                 };
-                fresh.sort_by(|a, b| b.rank.cmp(&a.rank));
+                fresh.sort_by_key(|x| std::cmp::Reverse(x.rank));
                 let command = fresh.iter().find_map(|p| command_line_of(p.pid));
                 if command != last {
                     manager.emit(

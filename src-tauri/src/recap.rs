@@ -174,22 +174,13 @@ struct RecapAcc {
 }
 
 /// One transcript's resume point.
+#[derive(Default)]
 struct RecapScan {
     /// Bytes already folded in as whole lines.
     offset: u64,
     acc: RecapAcc,
     /// The walk stopped at `RECAP_CAP_BYTES` with the file still going.
     truncated: bool,
-}
-
-impl Default for RecapScan {
-    fn default() -> Self {
-        Self {
-            offset: 0,
-            acc: RecapAcc::default(),
-            truncated: false,
-        }
-    }
 }
 
 /// Per-transcript scan state.

@@ -351,21 +351,12 @@ impl FileStats {
 /// API response across one record per content block, and every one of those
 /// records repeats the same `usage` object verbatim. Adding them up inflates
 /// spend by the number of blocks per turn — a bit over 2x on this corpus.
+#[derive(Default)]
 struct FileScan {
     /// Bytes already consumed as complete lines.
     offset: u64,
     seen: HashSet<Box<str>>,
     stats: FileStats,
-}
-
-impl Default for FileScan {
-    fn default() -> Self {
-        Self {
-            offset: 0,
-            seen: HashSet::new(),
-            stats: FileStats::default(),
-        }
-    }
 }
 
 /// Incremental scan state for the whole corpus, one entry per transcript.
@@ -939,7 +930,7 @@ fn summarize(cache: &StatsCache) -> StatsSummary {
             }
         })
         .collect();
-    session_rows.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
+    session_rows.sort_by_key(|x| std::cmp::Reverse(x.last_ms));
 
     for row in &session_rows {
         if let Some(project) = projects.get_mut(&row.project_dir) {

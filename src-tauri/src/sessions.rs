@@ -465,7 +465,7 @@ fn probe_sidechain(transcript: &Path, session_id: &str, now: u64) -> SidechainPr
         });
     }
 
-    workflows.sort_by(|a, b| b.newest_mtime_ms.cmp(&a.newest_mtime_ms));
+    workflows.sort_by_key(|x| std::cmp::Reverse(x.newest_mtime_ms));
     SidechainProbe {
         newest_mtime_ms: newest,
         running: top.1,
@@ -539,7 +539,7 @@ fn scan_agent_dir(dir: &Path, now: u64) -> (u64, Vec<RunningAgent>) {
         });
     }
 
-    running.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    running.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
     (newest, running)
 }
 
@@ -1442,7 +1442,7 @@ pub fn list_sessions(
         // The conversational watermark, never mtime: a rename or a title
         // regeneration bumps mtime without adding conversation, which sorted
         // rows above the age they print.
-        sessions.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
+        sessions.sort_by_key(|x| std::cmp::Reverse(x.last_activity_ms));
 
         let cwd = sessions
             .iter()
