@@ -59,6 +59,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-targets }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -82,6 +83,15 @@ jobs:
 
       - name: vitest
         run: npm test
+
+      # Once, on the first Linux leg: the lints do not change per target, and
+      # left off CI they drifted until `-D warnings` failed on main.
+      - name: cargo fmt and clippy
+        if: matrix.os == 'ubuntu-24.04'
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: src-tauri
