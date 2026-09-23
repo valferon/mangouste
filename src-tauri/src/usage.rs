@@ -206,7 +206,9 @@ pub fn fetch_usage() -> Result<ClaudeUsage, String> {
         Err(ureq::Error::Status(429, _)) => {
             return Err("Rate limited by Anthropic; try again later".into());
         }
-        Err(ureq::Error::Status(code, _)) => return Err(format!("usage request failed: HTTP {code}")),
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(format!("usage request failed: HTTP {code}"))
+        }
         Err(e) => return Err(format!("usage request failed: {e}")),
     };
 

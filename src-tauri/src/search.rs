@@ -139,15 +139,30 @@ fn build_matcher(query: &str, options: &SearchOptions) -> Result<Regex, String> 
 ///
 /// Include globs are a whitelist — one of them present means everything else is
 /// excluded — which is exactly the "files to include" box's semantics.
-fn build_overrides(root: &PathBuf, options: &SearchOptions) -> Result<ignore::overrides::Override, String> {
+fn build_overrides(
+    root: &PathBuf,
+    options: &SearchOptions,
+) -> Result<ignore::overrides::Override, String> {
     let mut builder = OverrideBuilder::new(root);
     let mut any = false;
-    for glob in options.include.split(',').map(str::trim).filter(|g| !g.is_empty()) {
+    for glob in options
+        .include
+        .split(',')
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
         builder.add(glob).map_err(|e| e.to_string())?;
         any = true;
     }
-    for glob in options.exclude.split(',').map(str::trim).filter(|g| !g.is_empty()) {
-        builder.add(&format!("!{glob}")).map_err(|e| e.to_string())?;
+    for glob in options
+        .exclude
+        .split(',')
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        builder
+            .add(&format!("!{glob}"))
+            .map_err(|e| e.to_string())?;
         any = true;
     }
     if !any {
@@ -257,7 +272,11 @@ pub fn search_text(
         return Err(format!("not a directory: {root}"));
     }
     if query.is_empty() {
-        return Ok(SearchOutcome { files: Vec::new(), total_matches: 0, truncated: false });
+        return Ok(SearchOutcome {
+            files: Vec::new(),
+            total_matches: 0,
+            truncated: false,
+        });
     }
 
     let matcher = Arc::new(build_matcher(&query, &options)?);
@@ -490,7 +509,11 @@ pub fn replace_matches(
         match outcome {
             Ok(replaced) => {
                 replaced_total += replaced;
-                files.push(ReplaceResult { path: target.path, replaced, error: None });
+                files.push(ReplaceResult {
+                    path: target.path,
+                    replaced,
+                    error: None,
+                });
             }
             Err(error) => {
                 failed += 1;
@@ -503,7 +526,11 @@ pub fn replace_matches(
         }
     }
 
-    Ok(ReplaceOutcome { files, replaced: replaced_total, failed })
+    Ok(ReplaceOutcome {
+        files,
+        replaced: replaced_total,
+        failed,
+    })
 }
 
 #[cfg(test)]
@@ -522,7 +549,12 @@ mod tests {
     }
 
     fn search(dir: &PathBuf, query: &str, options: SearchOptions) -> SearchOutcome {
-        search_text(dir.to_string_lossy().into_owned(), query.to_string(), options).unwrap()
+        search_text(
+            dir.to_string_lossy().into_owned(),
+            query.to_string(),
+            options,
+        )
+        .unwrap()
     }
 
     /// The shape the pane draws a row from: which line, which column, and the
@@ -539,7 +571,10 @@ mod tests {
 
         let first = &found.files[0].matches[0];
         assert_eq!((first.line, first.column), (1, 7));
-        assert_eq!((&*first.before, &*first.matched, &*first.after), ("alpha ", "beta", ""));
+        assert_eq!(
+            (&*first.before, &*first.matched, &*first.after),
+            ("alpha ", "beta", "")
+        );
         // Byte offsets are absolute in the file, which is what replace keys off.
         assert_eq!((first.start, first.end), (6, 10));
         assert_eq!(found.files[0].matches[1].line, 3);
@@ -552,7 +587,10 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "Beta\nbeta\n").unwrap();
 
         assert_eq!(search(&dir, "beta", options()).total_matches, 2);
-        let strict = SearchOptions { case_sensitive: true, ..options() };
+        let strict = SearchOptions {
+            case_sensitive: true,
+            ..options()
+        };
         assert_eq!(search(&dir, "beta", strict).total_matches, 1);
     }
 
@@ -562,7 +600,10 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "cat concatenate cat.\n").unwrap();
 
         assert_eq!(search(&dir, "cat", options()).total_matches, 3);
-        let words = SearchOptions { whole_word: true, ..options() };
+        let words = SearchOptions {
+            whole_word: true,
+            ..options()
+        };
         assert_eq!(search(&dir, "cat", words).total_matches, 2);
     }
 
@@ -574,7 +615,10 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "abc\na.c\n").unwrap();
 
         assert_eq!(search(&dir, "a.c", options()).total_matches, 1);
-        let pattern = SearchOptions { regex: true, ..options() };
+        let pattern = SearchOptions {
+            regex: true,
+            ..options()
+        };
         assert_eq!(search(&dir, "a.c", pattern).total_matches, 2);
     }
 
@@ -585,7 +629,10 @@ mod tests {
         let dir = scratch("empty");
         std::fs::write(dir.join("a.txt"), "bbb\n").unwrap();
 
-        let pattern = SearchOptions { regex: true, ..options() };
+        let pattern = SearchOptions {
+            regex: true,
+            ..options()
+        };
         assert_eq!(search(&dir, "a*", pattern).total_matches, 0);
     }
 
@@ -599,7 +646,10 @@ mod tests {
 
         assert_eq!(search(&dir, "needle", options()).total_matches, 3);
 
-        let only_rust = SearchOptions { include: "*.rs".into(), ..options() };
+        let only_rust = SearchOptions {
+            include: "*.rs".into(),
+            ..options()
+        };
         let hit = search(&dir, "needle", only_rust);
         assert_eq!(hit.total_matches, 2);
 
@@ -632,7 +682,10 @@ mod tests {
         let dir = scratch("cap");
         std::fs::write(dir.join("a.txt"), "hit\n".repeat(50)).unwrap();
 
-        let capped = SearchOptions { max_matches: Some(10), ..options() };
+        let capped = SearchOptions {
+            max_matches: Some(10),
+            ..options()
+        };
         let found = search(&dir, "hit", capped);
         assert!(found.truncated, "a capped sweep must say it was capped");
         assert_eq!(found.total_matches, 10);
@@ -649,7 +702,11 @@ mod tests {
             "one".into(),
             options(),
             "1".into(),
-            vec![ReplaceTarget { path, modified_ms: None, spans: None }],
+            vec![ReplaceTarget {
+                path,
+                modified_ms: None,
+                spans: None,
+            }],
         )
         .unwrap();
 
@@ -692,12 +749,19 @@ mod tests {
         std::fs::write(&file, "foo=1\n").unwrap();
         let path = file.to_string_lossy().into_owned();
 
-        let pattern = SearchOptions { regex: true, ..options() };
+        let pattern = SearchOptions {
+            regex: true,
+            ..options()
+        };
         replace_matches(
             r"(\w+)=(\d+)".into(),
             pattern,
             "$2=$1".into(),
-            vec![ReplaceTarget { path: path.clone(), modified_ms: None, spans: None }],
+            vec![ReplaceTarget {
+                path: path.clone(),
+                modified_ms: None,
+                spans: None,
+            }],
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "1=foo\n");
@@ -707,7 +771,11 @@ mod tests {
             "cost".into(),
             options(),
             "$1".into(),
-            vec![ReplaceTarget { path, modified_ms: None, spans: None }],
+            vec![ReplaceTarget {
+                path,
+                modified_ms: None,
+                spans: None,
+            }],
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "$1\n");
@@ -724,8 +792,16 @@ mod tests {
         std::fs::write(&fresh, "needle\n").unwrap();
 
         let found = search(&dir, "needle", options());
-        let fresh_hit = found.files.iter().find(|f| f.relative == "fresh.txt").unwrap();
-        let stale_hit = found.files.iter().find(|f| f.relative == "stale.txt").unwrap();
+        let fresh_hit = found
+            .files
+            .iter()
+            .find(|f| f.relative == "fresh.txt")
+            .unwrap();
+        let stale_hit = found
+            .files
+            .iter()
+            .find(|f| f.relative == "stale.txt")
+            .unwrap();
 
         let outcome = replace_matches(
             "needle".into(),
@@ -756,7 +832,10 @@ mod tests {
     fn a_broken_pattern_is_an_error() {
         let dir = scratch("broken");
         std::fs::write(dir.join("a.txt"), "x\n").unwrap();
-        let pattern = SearchOptions { regex: true, ..options() };
+        let pattern = SearchOptions {
+            regex: true,
+            ..options()
+        };
         let refused = search_text(dir.to_string_lossy().into_owned(), "(".into(), pattern);
         assert!(refused.is_err());
     }

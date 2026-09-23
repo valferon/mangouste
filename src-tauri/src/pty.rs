@@ -129,7 +129,12 @@ pub fn pty_open(
     let instance = state.next_instance.fetch_add(1, Ordering::SeqCst) + 1;
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())?;
 
     let mut command = CommandBuilder::new(login_shell());
@@ -139,7 +144,10 @@ pub fn pty_open(
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
 
-    let child = pair.slave.spawn_command(command).map_err(|e| e.to_string())?;
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| e.to_string())?;
     // Dropping the slave lets the reader see EOF once the shell exits.
     drop(pair.slave);
 
@@ -240,7 +248,10 @@ pub fn pty_open(
             // The flag goes first, so a `pty_list` racing this cannot call a
             // terminal alive after the frontend has been told it exited.
             alive.store(false, Ordering::SeqCst);
-            let _ = app.emit(EVENT_EXIT, serde_json::json!({ "id": id, "instance": instance }));
+            let _ = app.emit(
+                EVENT_EXIT,
+                serde_json::json!({ "id": id, "instance": instance }),
+            );
             // Reap here, because nothing else does: the frontend only calls
             // `pty_close` when the pane unmounts, so a shell that exited by
             // itself would sit in the map as a zombie — holding a master fd and
@@ -253,7 +264,12 @@ pub fn pty_open(
         });
     }
 
-    Ok(TerminalInfo { id, instance, cwd, alive: true })
+    Ok(TerminalInfo {
+        id,
+        instance,
+        cwd,
+        alive: true,
+    })
 }
 
 /// Write keystrokes to a terminal. `data` is base64 so control bytes survive.
@@ -265,11 +281,7 @@ pub fn pty_open(
 /// full pipe, a stopped program) parks a worker for as long as it stays full.
 /// A handful of those and every other async command in the app waits with it.
 #[tauri::command]
-pub async fn pty_write(
-    state: State<'_, PtyState>,
-    id: String,
-    data: String,
-) -> Result<(), String> {
+pub async fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
     let bytes = BASE64.decode(data.as_bytes()).map_err(|e| e.to_string())?;
     let writer = {
         let terminals = state.terminals.lock();
@@ -296,7 +308,12 @@ pub fn pty_resize(
     let terminal = terminals.get(&id).ok_or("no such terminal")?;
     terminal
         .master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())
 }
 

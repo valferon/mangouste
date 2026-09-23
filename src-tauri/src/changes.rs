@@ -94,7 +94,16 @@ fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
 /// what `git commit` printed inside the session, and that commit can since have
 /// been amended, rebased away, or made in a different repo entirely.
 fn resolve(cwd: &str, rev: &str) -> Option<String> {
-    let out = git(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).ok()?;
+    let out = git(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .ok()?;
     let sha = out.trim();
     if sha.is_empty() {
         None
@@ -154,7 +163,9 @@ fn relative_paths(root: &Path, absolute: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for path in absolute {
         let candidate = PathBuf::from(path);
-        let Ok(relative) = candidate.strip_prefix(root) else { continue };
+        let Ok(relative) = candidate.strip_prefix(root) else {
+            continue;
+        };
         let text = relative.to_string_lossy().to_string();
         if !text.is_empty() {
             out.push(text);
@@ -174,7 +185,13 @@ fn untracked_among(cwd: &str, paths: &[String]) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args = vec!["status", "--porcelain=v1", "-z", "--untracked-files=all", "--"];
+    let mut args = vec![
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+    ];
     args.extend(paths.iter().map(String::as_str));
     let stdout = git(cwd, &args)?;
     Ok(stdout
@@ -207,7 +224,11 @@ fn untracked_numstat(cwd: &str, path: &str) -> (Option<u32>, Option<u32>) {
 fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges, String> {
     let paths = relative_paths(
         Path::new(root),
-        &writes.paths.iter().map(|w| w.path.clone()).collect::<Vec<_>>(),
+        &writes
+            .paths
+            .iter()
+            .map(|w| w.path.clone())
+            .collect::<Vec<_>>(),
     );
     let (base, base_label) = baseline(root, writes.first_commit.as_deref())?;
 
@@ -253,7 +274,14 @@ fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges,
         .filter_map(parse_numstat)
         .map(|(additions, deletions, path)| {
             let (last_touch_ms, touches) = touch(&path);
-            ChangedFile { path, additions, deletions, untracked: false, last_touch_ms, touches }
+            ChangedFile {
+                path,
+                additions,
+                deletions,
+                untracked: false,
+                last_touch_ms,
+                touches,
+            }
         })
         .collect();
 
@@ -270,12 +298,24 @@ fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges,
         });
     }
 
-    let additions = files.iter().filter_map(|f| f.additions).map(u64::from).sum();
-    let deletions = files.iter().filter_map(|f| f.deletions).map(u64::from).sum();
+    let additions = files
+        .iter()
+        .filter_map(|f| f.additions)
+        .map(u64::from)
+        .sum();
+    let deletions = files
+        .iter()
+        .filter_map(|f| f.deletions)
+        .map(u64::from)
+        .sum();
     // Newest write first: a pane watching a live session wants the file it just
     // touched at the top, and a file git found but the transcript cannot date
     // sorts to the bottom rather than to the top.
-    files.sort_by(|a, b| b.last_touch_ms.cmp(&a.last_touch_ms).then_with(|| a.path.cmp(&b.path)));
+    files.sort_by(|a, b| {
+        b.last_touch_ms
+            .cmp(&a.last_touch_ms)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let file_count = files.len() as u64;
     let unchanged = (paths.len() as u64).saturating_sub(file_count);
     files.truncate(MAX_FILES);
@@ -395,7 +435,11 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .expect("run git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
@@ -444,7 +488,11 @@ mod tests {
         assert_eq!(changes.base_label, "HEAD");
         assert_eq!(changes.additions, 2);
         assert_eq!(changes.deletions, 0);
-        let new_file = changes.files.iter().find(|f| f.path == "src/new.ts").expect("the new file");
+        let new_file = changes
+            .files
+            .iter()
+            .find(|f| f.path == "src/new.ts")
+            .expect("the new file");
         // An untracked file has no tracked side, so `git diff` alone would have
         // said nothing at all about the one file where every line is new.
         assert!(new_file.untracked);
@@ -461,12 +509,14 @@ mod tests {
         // The session's own commit, plus an edit it has not committed yet.
         write(&dir, "a.ts", "one\ntwo\n");
         run(&dir, &["commit", "--quiet", "-am", "the session's commit"]);
-        let session_sha = run(&dir, &["rev-parse", "--short", "HEAD"]).trim().to_string();
+        let session_sha = run(&dir, &["rev-parse", "--short", "HEAD"])
+            .trim()
+            .to_string();
         write(&dir, "a.ts", "one\ntwo\nthree\n");
 
         let root = dir.to_string_lossy().into_owned();
-        let changes = collect_changes(&root, &wrote(&dir, &["a.ts"], Some(&session_sha)))
-            .expect("scan");
+        let changes =
+            collect_changes(&root, &wrote(&dir, &["a.ts"], Some(&session_sha))).expect("scan");
 
         // Diffing against HEAD would have shown one line: the uncommitted one.
         // The session added two, and the second is only visible from before its
@@ -502,8 +552,8 @@ mod tests {
 
         // The sha the session's `git commit` printed, since amended away.
         let root = dir.to_string_lossy().into_owned();
-        let changes = collect_changes(&root, &wrote(&dir, &["a.ts"], Some("deadbee")))
-            .expect("scan");
+        let changes =
+            collect_changes(&root, &wrote(&dir, &["a.ts"], Some("deadbee"))).expect("scan");
         assert_eq!(changes.base_label, "HEAD");
         assert_eq!(changes.additions, 1);
     }

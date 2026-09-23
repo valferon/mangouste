@@ -390,7 +390,11 @@ impl ChatManager {
             let known: Vec<&str> = chats.keys().map(String::as_str).collect();
             format!(
                 "no chat `{chat_id}` (live: {})",
-                if known.is_empty() { "none".into() } else { known.join(", ") }
+                if known.is_empty() {
+                    "none".into()
+                } else {
+                    known.join(", ")
+                }
             )
         })?;
         if !chat.alive.load(Ordering::SeqCst) {
@@ -414,7 +418,11 @@ impl ChatManager {
                     }
                 }
                 (!chat.running.load(Ordering::SeqCst)).then(|| {
-                    (chat.pid, Arc::clone(&chat.baseline), Arc::clone(&chat.running))
+                    (
+                        chat.pid,
+                        Arc::clone(&chat.baseline),
+                        Arc::clone(&chat.running),
+                    )
                 })
             });
             // The baseline is read before `running` flips, outside the chats
@@ -427,7 +435,9 @@ impl ChatManager {
         let mut line = serde_json::to_string(frame).map_err(|e| e.to_string())?;
         line.push('\n');
         let mut stdin = stdin.lock();
-        stdin.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        stdin
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         stdin.flush().map_err(|e| e.to_string())
     }
 }
@@ -861,7 +871,11 @@ fn group_processes(pgid: u32) -> Vec<GroupProc> {
         return procs;
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         if pid == pgid {
@@ -895,7 +909,10 @@ fn group_processes(pgid: u32) -> Vec<GroupProc> {
 #[cfg(not(target_os = "linux"))]
 fn group_processes(pgid: u32) -> Vec<GroupProc> {
     let mut procs = Vec::new();
-    let Ok(output) = Command::new("ps").args(["-Ao", "pid=,pgid=,state=,etime="]).output() else {
+    let Ok(output) = Command::new("ps")
+        .args(["-Ao", "pid=,pgid=,state=,etime="])
+        .output()
+    else {
         return procs;
     };
     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -931,9 +948,9 @@ fn parse_etime(raw: &str) -> u64 {
         Some((days, rest)) => (days.parse::<u64>().unwrap_or(0), rest),
         None => (0, raw),
     };
-    let seconds = rest
-        .split(':')
-        .fold(0u64, |acc, part| acc * 60 + part.parse::<u64>().unwrap_or(0));
+    let seconds = rest.split(':').fold(0u64, |acc, part| {
+        acc * 60 + part.parse::<u64>().unwrap_or(0)
+    });
     days * 86_400 + seconds
 }
 
@@ -1090,14 +1107,13 @@ fn own_exe() -> Option<PathBuf> {
     if live.is_file() {
         return Some(live);
     }
-    eprintln!("mangouste: own binary is gone ({raw}); tool permission prompts are disabled until restart");
+    eprintln!(
+        "mangouste: own binary is gone ({raw}); tool permission prompts are disabled until restart"
+    );
     None
 }
 
-fn build_args(
-    options: &StartOptions,
-    permission_config: Option<&std::path::Path>,
-) -> Vec<String> {
+fn build_args(options: &StartOptions, permission_config: Option<&std::path::Path>) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
         "--verbose".into(),
@@ -1131,7 +1147,11 @@ fn build_args(
     }
     if options.debug {
         args.push("--debug-file".into());
-        args.push(debug_log_path(&options.chat_id).to_string_lossy().into_owned());
+        args.push(
+            debug_log_path(&options.chat_id)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     if let Some(extra) = &options.extra_args {
         args.extend(extra.iter().cloned());
@@ -1163,7 +1183,10 @@ pub fn start(
     if !manager.spawning.lock().insert(options.chat_id.clone()) {
         return Err(format!("chat `{}` is already starting", options.chat_id));
     }
-    let _reservation = SpawnReservation { manager, id: options.chat_id.clone() };
+    let _reservation = SpawnReservation {
+        manager,
+        id: options.chat_id.clone(),
+    };
     {
         let chats = manager.chats.lock();
         if let Some(chat) = chats.get(&options.chat_id) {
@@ -1306,7 +1329,12 @@ pub fn start(
                                 match title_state(&sid) {
                                     TitleState::Untitled => {
                                         titled.store(true, Ordering::SeqCst);
-                                        request_session_title(&stdin, &title_request_id, sid, prompt);
+                                        request_session_title(
+                                            &stdin,
+                                            &title_request_id,
+                                            sid,
+                                            prompt,
+                                        );
                                     }
                                     TitleState::Named => titled.store(true, Ordering::SeqCst),
                                     TitleState::Missing => {}
@@ -1419,7 +1447,10 @@ pub fn start(
                 let procs = group_processes(pid);
                 let mut fresh: Vec<&GroupProc> = {
                     let baseline = baseline.lock();
-                    procs.iter().filter(|p| !p.zombie && !baseline.contains(&p.pid)).collect()
+                    procs
+                        .iter()
+                        .filter(|p| !p.zombie && !baseline.contains(&p.pid))
+                        .collect()
                 };
                 fresh.sort_by(|a, b| b.rank.cmp(&a.rank));
                 let command = fresh.iter().find_map(|p| command_line_of(p.pid));
@@ -1472,7 +1503,9 @@ pub fn start(
                 offset += chunk.len() as u64;
                 carry.extend_from_slice(&chunk);
                 while let Some(newline) = carry.iter().position(|b| *b == b'\n') {
-                    let line = String::from_utf8_lossy(&carry[..newline]).trim_end().to_string();
+                    let line = String::from_utf8_lossy(&carry[..newline])
+                        .trim_end()
+                        .to_string();
                     carry.drain(..=newline);
                     if !line.is_empty() {
                         manager.emit(
@@ -1559,7 +1592,10 @@ mod tests {
         assert_eq!(parse_etime("05"), 5);
         assert_eq!(parse_etime("12:34"), 12 * 60 + 34);
         assert_eq!(parse_etime("01:02:03"), 3_600 + 2 * 60 + 3);
-        assert_eq!(parse_etime("2-03:04:05"), 2 * 86_400 + 3 * 3_600 + 4 * 60 + 5);
+        assert_eq!(
+            parse_etime("2-03:04:05"),
+            2 * 86_400 + 3 * 3_600 + 4 * 60 + 5
+        );
     }
 
     #[test]
@@ -1572,7 +1608,10 @@ mod tests {
 
     #[test]
     fn shape_command_collapses_and_caps() {
-        assert_eq!(shape_command("  git   status  ").as_deref(), Some("git status"));
+        assert_eq!(
+            shape_command("  git   status  ").as_deref(),
+            Some("git status")
+        );
         assert_eq!(shape_command("   "), None);
         assert_eq!(shape_command("claude --permission-server /tmp/s"), None);
         let long = "x".repeat(200);
@@ -1607,17 +1646,32 @@ mod tests {
                 "response": { "subtype": "success", "request_id": "t1", "response": inner }
             })
         };
-        assert_eq!(title_reply(&ours(json!({ "title": "Sidebar reorder" })), "t1"), TitleReply::Named);
+        assert_eq!(
+            title_reply(&ours(json!({ "title": "Sidebar reorder" })), "t1"),
+            TitleReply::Named
+        );
         // Under ten characters the CLI's generator answers with no title.
-        assert_eq!(title_reply(&ours(json!({ "title": null })), "t1"), TitleReply::Empty);
-        assert_eq!(title_reply(&ours(json!({ "title": "  " })), "t1"), TitleReply::Empty);
-        assert_eq!(title_reply(&ours(json!({ "title": "x" })), "t2"), TitleReply::Other);
+        assert_eq!(
+            title_reply(&ours(json!({ "title": null })), "t1"),
+            TitleReply::Empty
+        );
+        assert_eq!(
+            title_reply(&ours(json!({ "title": "  " })), "t1"),
+            TitleReply::Empty
+        );
+        assert_eq!(
+            title_reply(&ours(json!({ "title": "x" })), "t2"),
+            TitleReply::Other
+        );
         let error = json!({
             "type": "control_response",
             "response": { "subtype": "error", "request_id": "t1", "error": "unknown subtype" }
         });
         assert_eq!(title_reply(&error, "t1"), TitleReply::Empty);
-        assert_eq!(title_reply(&json!({ "type": "assistant" }), "t1"), TitleReply::Other);
+        assert_eq!(
+            title_reply(&json!({ "type": "assistant" }), "t1"),
+            TitleReply::Other
+        );
     }
 
     #[test]
@@ -1626,7 +1680,10 @@ mod tests {
             { "type": "image", "source": {} },
             { "type": "text", "text": "  why does   this\nfail?  " }
         ] } });
-        assert_eq!(user_text_of(&frame).as_deref(), Some("why does   this\nfail?"));
+        assert_eq!(
+            user_text_of(&frame).as_deref(),
+            Some("why does   this\nfail?")
+        );
         let image_only = json!({ "type": "user", "message": { "role": "user", "content": [
             { "type": "image", "source": {} }
         ] } });
@@ -1637,7 +1694,10 @@ mod tests {
 
     #[test]
     fn derived_title_collapses_and_cuts_at_a_word() {
-        assert_eq!(derive_title("  fix   the\nsidebar ").as_deref(), Some("fix the sidebar"));
+        assert_eq!(
+            derive_title("  fix   the\nsidebar ").as_deref(),
+            Some("fix the sidebar")
+        );
         let long = "word ".repeat(30);
         let title = derive_title(&long).expect("a title");
         assert!(title.chars().count() <= 61, "{title}");

@@ -393,7 +393,10 @@ pub fn git_tracking(cwd: String) -> Result<RepoStatus, String> {
 
     // `HEAD...@{u}` counts each side of the fork point: left is what is here and
     // not upstream, right is what is upstream and not here.
-    let counts = git(&cwd, &["rev-list", "--left-right", "--count", "HEAD...@{u}"])?;
+    let counts = git(
+        &cwd,
+        &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+    )?;
     let (ahead, behind) = parse_counts(&counts);
     status.upstream = Some(upstream);
     status.ahead = ahead;
@@ -438,7 +441,10 @@ const PATCH_BUDGET_BYTES: u64 = 2 * 1024 * 1024;
 /// `… patch cut off at` prefix and shows it as a footer, so keep the two in sync.
 /// No git output line can start with `…`, which makes the match unambiguous.
 fn patch_cut_marker() -> String {
-    format!("… patch cut off at {} MiB", PATCH_BUDGET_BYTES / (1024 * 1024))
+    format!(
+        "… patch cut off at {} MiB",
+        PATCH_BUDGET_BYTES / (1024 * 1024)
+    )
 }
 
 /// Run git for a patch, reading at most `PATCH_BUDGET_BYTES` of stdout.
@@ -509,7 +515,14 @@ pub fn git_show(cwd: String, sha: String) -> Result<String, String> {
     checked_sha(&sha)?;
     git_patch(
         &cwd,
-        &["show", "--stat", "--patch", "--no-color", "--end-of-options", &sha],
+        &[
+            "show",
+            "--stat",
+            "--patch",
+            "--no-color",
+            "--end-of-options",
+            &sha,
+        ],
         false,
     )
 }
@@ -628,7 +641,10 @@ fn parse_commit_files(out: &str) -> Vec<CommitFile> {
                 break;
             }
             let (original_path, path) = if renamed {
-                (Some(tokens[index + 1].to_string()), tokens[index + 2].to_string())
+                (
+                    Some(tokens[index + 1].to_string()),
+                    tokens[index + 2].to_string(),
+                )
             } else {
                 (None, tokens[index + 1].to_string())
             };
@@ -677,10 +693,7 @@ pub fn git_commit_detail(cwd: String, sha: String) -> Result<CommitDetail, Strin
         "--pretty=format:%H{sep}%h{sep}%an{sep}%ae{sep}%at{sep}%P{sep}%D{sep}%s{sep}%cn{sep}%ce{sep}%ct{sep}%b",
         sep = FIELD_SEPARATOR
     );
-    let header = git(
-        &cwd,
-        &["log", "-1", &format, "--end-of-options", &sha],
-    )?;
+    let header = git(&cwd, &["log", "-1", &format, "--end-of-options", &sha])?;
 
     // `splitn` and not `split`: the body is last precisely because it is the one
     // field that can hold anything, separator bytes included.
@@ -722,7 +735,12 @@ pub fn git_commit_detail(cwd: String, sha: String) -> Result<CommitDetail, Strin
 pub fn git_branches(cwd: String) -> Result<Vec<String>, String> {
     let stdout = git(
         &cwd,
-        &["branch", "--all", "--sort=-committerdate", "--format=%(refname:short)"],
+        &[
+            "branch",
+            "--all",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+        ],
     )?;
     Ok(stdout
         .lines()
@@ -1008,7 +1026,10 @@ pub struct BranchList {
 pub fn git_branch_list(cwd: String) -> Result<BranchList, String> {
     let format = "--format=%(refname:short)";
     let local = git(&cwd, &["branch", "--sort=-committerdate", format])?;
-    let remote = git(&cwd, &["branch", "--remotes", "--sort=-committerdate", format])?;
+    let remote = git(
+        &cwd,
+        &["branch", "--remotes", "--sort=-committerdate", format],
+    )?;
     let current = git(&cwd, &["branch", "--show-current"])
         .ok()
         .map(|s| s.trim().to_string())
@@ -1033,7 +1054,16 @@ pub fn git_branch_list(cwd: String) -> Result<BranchList, String> {
 
 /// Whether a local branch by this exact name exists.
 fn is_local_branch(cwd: &str, branch: &str) -> bool {
-    git(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
+    git(
+        cwd,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
 }
 
 /// For a remote-tracking name, the local branch name it corresponds to.
@@ -1107,7 +1137,11 @@ pub fn git_merge(cwd: String, branch: String) -> Result<String, String> {
 /// restore from, so it is removed instead. Which is which comes from the caller's
 /// own status read, passed as two separate lists so this never has to guess.
 #[tauri::command(async)]
-pub fn git_discard(cwd: String, tracked: Vec<String>, untracked: Vec<String>) -> Result<(), String> {
+pub fn git_discard(
+    cwd: String,
+    tracked: Vec<String>,
+    untracked: Vec<String>,
+) -> Result<(), String> {
     if tracked.is_empty() && untracked.is_empty() {
         return Err("no paths given".to_string());
     }
@@ -1274,8 +1308,20 @@ mod ref_tests {
 
     #[test]
     fn still_refuses_option_like_and_ranges() {
-        for bad in ["-x", "--upload-pack=evil", "a..b", "/abs", "a b", "a;b", "a\nb", ""] {
-            assert!(checked_ref(bad, "branch").is_err(), "{bad} should be refused");
+        for bad in [
+            "-x",
+            "--upload-pack=evil",
+            "a..b",
+            "/abs",
+            "a b",
+            "a;b",
+            "a\nb",
+            "",
+        ] {
+            assert!(
+                checked_ref(bad, "branch").is_err(),
+                "{bad} should be refused"
+            );
         }
     }
 }
@@ -1485,8 +1531,8 @@ mod tracking_tests {
         run(&dir, &["commit", "--quiet", "-m", "first"]);
         std::fs::write(dir.join("new.txt"), "hello\n").expect("write");
 
-        let error = git_blame(dir.join("new.txt").to_string_lossy().into_owned())
-            .expect_err("untracked");
+        let error =
+            git_blame(dir.join("new.txt").to_string_lossy().into_owned()).expect_err("untracked");
         assert!(error.contains("no such path"), "{error}");
     }
 
@@ -1528,11 +1574,14 @@ mod tracking_tests {
         commit(&dir, "first");
         std::fs::write(dir.join("g.txt"), "new\n").expect("write");
         run(&dir, &["add", "g.txt"]);
-        run(&dir, &["commit", "--quiet", "-m", "second", "-m", "why it was done"]);
+        run(
+            &dir,
+            &["commit", "--quiet", "-m", "second", "-m", "why it was done"],
+        );
         let sha = run(&dir, &["rev-parse", "HEAD"]).trim().to_string();
 
-        let detail = git_commit_detail(dir.to_string_lossy().into_owned(), sha.clone())
-            .expect("detail");
+        let detail =
+            git_commit_detail(dir.to_string_lossy().into_owned(), sha.clone()).expect("detail");
 
         assert_eq!(detail.commit.sha, sha);
         assert_eq!(detail.commit.subject, "second");
@@ -1572,7 +1621,10 @@ mod tracking_tests {
             None,
             None,
             Some(true),
-            Some(LogFilter { text: Some("fix(a.b)".into()), ..LogFilter::default() }),
+            Some(LogFilter {
+                text: Some("fix(a.b)".into()),
+                ..LogFilter::default()
+            }),
         )
         .expect("log");
         assert_eq!(matched.len(), 1);
@@ -1586,7 +1638,10 @@ mod tracking_tests {
             None,
             None,
             Some(true),
-            Some(LogFilter { text: Some("fix(axb)".into()), ..LogFilter::default() }),
+            Some(LogFilter {
+                text: Some("fix(axb)".into()),
+                ..LogFilter::default()
+            }),
         )
         .expect("log");
         assert!(none.is_empty(), "{none:?}");
@@ -1626,7 +1681,10 @@ mod tracking_tests {
             None,
             None,
             Some(true),
-            Some(LogFilter { path: Some("other.txt".into()), ..LogFilter::default() }),
+            Some(LogFilter {
+                path: Some("other.txt".into()),
+                ..LogFilter::default()
+            }),
         )
         .expect("log");
         assert_eq!(touched.len(), 1);

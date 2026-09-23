@@ -125,7 +125,10 @@ pub fn list_dir(
 pub fn discover_repos(root: String) -> Result<Vec<RepoInfo>, String> {
     let root = PathBuf::from(&root);
     let mut repos = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(&root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -383,7 +386,9 @@ pub(crate) fn save_text(
     if let Some(expected) = expected_modified_ms {
         let actual = modified_ms(&metadata);
         if actual != expected {
-            return Err(format!("changed on disk since it was opened (STALE:{actual})"));
+            return Err(format!(
+                "changed on disk since it was opened (STALE:{actual})"
+            ));
         }
     }
 
@@ -449,7 +454,10 @@ mod tests {
 
         let refused = write_text_file(path.clone(), "mine\n".into(), Some(opened.modified_ms + 1));
         assert!(refused.is_err(), "a mismatched mtime must not write");
-        assert!(refused.unwrap_err().contains("STALE:"), "the frontend keys off this marker");
+        assert!(
+            refused.unwrap_err().contains("STALE:"),
+            "the frontend keys off this marker"
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
 
         // The mtime it was actually read at goes through.
@@ -474,7 +482,10 @@ mod tests {
 
         write_text_file(link.to_string_lossy().into_owned(), "after\n".into(), None).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "after\n");
     }
 
@@ -490,11 +501,19 @@ mod tests {
         std::fs::write(&file, "#!/bin/sh\ntrue\n").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        write_text_file(file.to_string_lossy().into_owned(), "#!/bin/sh\nfalse\n".into(), None)
-            .unwrap();
+        write_text_file(
+            file.to_string_lossy().into_owned(),
+            "#!/bin/sh\nfalse\n".into(),
+            None,
+        )
+        .unwrap();
 
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755, "mode was not carried across the rename");
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "mode was not carried across the rename"
+        );
         // No scratch file left behind in the user's tree.
         let strays: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()

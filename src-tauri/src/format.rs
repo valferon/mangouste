@@ -47,11 +47,19 @@ struct Candidate {
 }
 
 const fn node(bin: &'static str, args: &'static [&'static str]) -> Candidate {
-    Candidate { bin, args, node: true }
+    Candidate {
+        bin,
+        args,
+        node: true,
+    }
 }
 
 const fn tool(bin: &'static str, args: &'static [&'static str]) -> Candidate {
-    Candidate { bin, args, node: false }
+    Candidate {
+        bin,
+        args,
+        node: false,
+    }
 }
 
 /// Extension → the formatters to try, in order. First one installed wins.
@@ -62,9 +70,8 @@ const fn tool(bin: &'static str, args: &'static [&'static str]) -> Candidate {
 const TABLE: &[(&[&str], &[Candidate])] = &[
     (
         &[
-            "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "json", "jsonc", "json5",
-            "css", "scss", "less", "html", "vue", "svelte", "md", "mdx", "yml", "yaml",
-            "graphql", "gql",
+            "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "json", "jsonc", "json5", "css",
+            "scss", "less", "html", "vue", "svelte", "md", "mdx", "yml", "yaml", "graphql", "gql",
         ],
         &[
             node("prettier", &["--stdin-filepath", "{path}"]),
@@ -85,10 +92,18 @@ const TABLE: &[(&[&str], &[Candidate])] = &[
         ],
     ),
     (&["toml"], &[tool("taplo", &["format", "-"])]),
-    (&["lua"], &[tool("stylua", &["--stdin-filepath", "{path}", "-"])]),
-    (&["sh", "bash", "zsh"], &[tool("shfmt", &["-filename", "{path}"])]),
     (
-        &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm", "java", "proto"],
+        &["lua"],
+        &[tool("stylua", &["--stdin-filepath", "{path}", "-"])],
+    ),
+    (
+        &["sh", "bash", "zsh"],
+        &[tool("shfmt", &["-filename", "{path}"])],
+    ),
+    (
+        &[
+            "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm", "java", "proto",
+        ],
         &[tool("clang-format", &["--assume-filename={path}"])],
     ),
 ];
@@ -218,7 +233,10 @@ fn break_line(out: &mut String, newline: &str, depth: usize, pending: &mut bool)
 /// `line L, column C` of `at`, so an error is something to act on.
 fn position(bytes: &[u8], at: usize) -> String {
     let line = 1 + bytes[..at].iter().filter(|byte| **byte == b'\n').count();
-    let start = bytes[..at].iter().rposition(|byte| *byte == b'\n').map_or(0, |i| i + 1);
+    let start = bytes[..at]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |i| i + 1);
     format!("line {line}, column {}", 1 + at - start)
 }
 
@@ -483,7 +501,10 @@ pub fn format_text(path: String, text: String) -> Result<Formatted, String> {
 
     // The file's own directory, so every formatter resolves its config the way
     // it would have if the user had run it from there themselves.
-    let cwd = file.parent().filter(|dir| dir.is_dir()).unwrap_or(Path::new("."));
+    let cwd = file
+        .parent()
+        .filter(|dir| dir.is_dir())
+        .unwrap_or(Path::new("."));
 
     for candidate in candidates {
         let resolved = candidate
@@ -538,7 +559,10 @@ pub fn format_text(path: String, text: String) -> Result<Formatted, String> {
     // Named so the message is something to act on: "no formatter" says nothing
     // about which one to install, and the install is the whole fix.
     let hint = if candidates.iter().any(|candidate| candidate.node) {
-        format!(" — install one in the repo (`npm i -D {}`) or on your PATH", looked[0])
+        format!(
+            " — install one in the repo (`npm i -D {}`) or on your PATH",
+            looked[0]
+        )
     } else {
         String::new()
     };
@@ -592,7 +616,10 @@ mod tests {
         let deep = dir.join("packages/web/src");
         std::fs::create_dir_all(&deep).unwrap();
 
-        assert_eq!(local_node_bin(&deep, "prettier"), Some(bin.join("prettier")));
+        assert_eq!(
+            local_node_bin(&deep, "prettier"),
+            Some(bin.join("prettier"))
+        );
         assert_eq!(local_node_bin(&deep, "biome"), None);
     }
 
@@ -618,7 +645,10 @@ mod tests {
     /// pasted into.
     #[test]
     fn the_stdin_header_is_dropped() {
-        assert_eq!(strip_stdin_header("stdin:\n\nfn main() {}\n"), "fn main() {}\n");
+        assert_eq!(
+            strip_stdin_header("stdin:\n\nfn main() {}\n"),
+            "fn main() {}\n"
+        );
         assert_eq!(strip_stdin_header("fn main() {}\n"), "fn main() {}\n");
         assert_eq!(strip_stdin_header("stdin: 1\n"), "stdin: 1\n");
     }
@@ -690,7 +720,11 @@ mod tests {
             .filter_map(|line| line.trim().split(':').next())
             .filter(|token| token.starts_with('"'))
             .collect();
-        assert_eq!(keys, ["\"z\"", "\"a\"", "\"s\"", "\"n\""], "keys were reordered");
+        assert_eq!(
+            keys,
+            ["\"z\"", "\"a\"", "\"s\"", "\"n\""],
+            "keys were reordered"
+        );
         assert!(formatted.contains("1e400"), "{formatted}");
         assert!(formatted.contains("-0,"), "{formatted}");
         assert!(formatted.contains("\\u00e9 \\\" {not:code}"), "{formatted}");
@@ -702,8 +736,7 @@ mod tests {
     fn json_keeps_comments_and_trailing_commas() {
         let formatted = reindent_json("{// why\n\"a\":1, /* and */ \"b\":2,}").unwrap();
         assert_eq!(
-            formatted,
-            "{\n  // why\n  \"a\": 1,\n  /* and */\n  \"b\": 2,\n}\n",
+            formatted, "{\n  // why\n  \"a\": 1,\n  /* and */\n  \"b\": 2,\n}\n",
             "{formatted}"
         );
         // json5: unquoted keys and single quotes are tokens like any other.
@@ -731,7 +764,10 @@ mod tests {
     /// Rewriting every line ending is not a formatting change anyone asked for.
     #[test]
     fn json_keeps_the_line_endings_it_arrived_with() {
-        assert_eq!(reindent_json("{\r\n\"a\":1}").unwrap(), "{\r\n  \"a\": 1\r\n}\r\n");
+        assert_eq!(
+            reindent_json("{\r\n\"a\":1}").unwrap(),
+            "{\r\n  \"a\": 1\r\n}\r\n"
+        );
     }
 
     /// Same bytes in, same JSON out. The indenter is not allowed to change what
@@ -759,7 +795,11 @@ mod tests {
     fn json_survives_every_file_in_the_repo() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut checked = 0;
-        for entry in ignore::WalkBuilder::new(&root).hidden(false).build().flatten() {
+        for entry in ignore::WalkBuilder::new(&root)
+            .hidden(false)
+            .build()
+            .flatten()
+        {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
@@ -825,7 +865,11 @@ mod tests {
         eprintln!("{}\n{:?}", formatted.formatter, formatted.text);
         assert_eq!(formatted.formatter, "gofmt");
         assert!(formatted.changed);
-        assert!(formatted.text.contains("func main() {"), "{:?}", formatted.text);
+        assert!(
+            formatted.text.contains("func main() {"),
+            "{:?}",
+            formatted.text
+        );
     }
 
     /// A buffer bigger than a pipe buffer, which is what the writer thread is
@@ -835,9 +879,9 @@ mod tests {
     fn a_buffer_larger_than_the_pipe_survives() {
         let dir = scratch("big");
         let text = "abcdefgh\n".repeat(40_000); // ~350KB, well past a 64KB pipe
-        // Through `sh` for the same reason as the test above: `/bin/sh` is the
-        // one path every unix promises, and a test binary that is only on some
-        // of them fails on a machine nobody ran it on.
+                                                // Through `sh` for the same reason as the test above: `/bin/sh` is the
+                                                // one path every unix promises, and a test binary that is only on some
+                                                // of them fails on a machine nobody ran it on.
         let args = vec!["-c".to_string(), "cat".to_string()];
         assert_eq!(run(Path::new("/bin/sh"), &args, &dir, &text).unwrap(), text);
     }

@@ -184,7 +184,11 @@ struct RecapScan {
 
 impl Default for RecapScan {
     fn default() -> Self {
-        Self { offset: 0, acc: RecapAcc::default(), truncated: false }
+        Self {
+            offset: 0,
+            acc: RecapAcc::default(),
+            truncated: false,
+        }
     }
 }
 
@@ -309,7 +313,9 @@ fn note_commits(text: &str, acc: &mut RecapAcc) {
         return;
     }
     for line in text.lines().take(COMMIT_SCAN_LINES) {
-        let Some(commit) = commit_from_line(line) else { continue };
+        let Some(commit) = commit_from_line(line) else {
+            continue;
+        };
         if acc.seen_commits.insert(commit.sha.clone()) {
             acc.commits.push(commit);
         }
@@ -337,22 +343,31 @@ fn fold_line(line: &str, acc: &mut RecapAcc) {
     if !interesting {
         return;
     }
-    let Ok(record) = serde_json::from_str::<Value>(line) else { return };
+    let Ok(record) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
     // A sidechain record in a parent transcript would credit the parent with an
     // agent's work twice — once here, once in the agent's own recap.
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
         return;
     }
-    let Some(message) = record.get("message") else { return };
+    let Some(message) = record.get("message") else {
+        return;
+    };
     let record_type = str_field(&record, "type").unwrap_or_default();
 
     if record_type == "assistant" {
-        let Some(blocks) = message.get("content").and_then(Value::as_array) else { return };
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            return;
+        };
         for block in blocks {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             *acc.tools.entry(name.to_string()).or_insert(0) += 1;
             acc.tool_calls += 1;
             let input = block.get("input").unwrap_or(&Value::Null);
@@ -438,7 +453,8 @@ fn fold_line(line: &str, acc: &mut RecapAcc) {
         acc.first_prompt = Some(prompt.clone());
     }
     acc.last_prompt = Some(prompt);
-    if let Some(at) = str_field(&record, "timestamp").map(|text| crate::stats::parse_iso_ms(&text)) {
+    if let Some(at) = str_field(&record, "timestamp").map(|text| crate::stats::parse_iso_ms(&text))
+    {
         // Monotonic on purpose: a transcript with a clock that jumped backwards
         // must not move the turn boundary backwards with it.
         acc.last_prompt_ms = acc.last_prompt_ms.max(at);
@@ -523,7 +539,10 @@ fn present(file: String, scan: &RecapScan, bytes_read: u64, scan_ms: u64) -> Ses
     let mut tools: Vec<NameCount> = acc
         .tools
         .iter()
-        .map(|(name, count)| NameCount { name: name.clone(), count: *count })
+        .map(|(name, count)| NameCount {
+            name: name.clone(),
+            count: *count,
+        })
         .collect();
     tools.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
     tools.truncate(RECAP_TOOLS);
@@ -537,7 +556,11 @@ fn present(file: String, scan: &RecapScan, bytes_read: u64, scan_ms: u64) -> Ses
             count: touch.count,
         })
         .collect();
-    agents.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.agent_type.cmp(&b.agent_type)));
+    agents.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.agent_type.cmp(&b.agent_type))
+    });
     agents.truncate(RECAP_AGENTS);
 
     SessionRecap {
@@ -624,7 +647,12 @@ pub fn session_recap(file: String, cache: State<'_, RecapCache>) -> Result<Sessi
     let entry = cache.entry(&path);
     let mut scan = entry.lock();
     let bytes_read = scan_file(&path, &mut scan).map_err(|e| e.to_string())?;
-    Ok(present(file, &scan, bytes_read, started.elapsed().as_millis() as u64))
+    Ok(present(
+        file,
+        &scan,
+        bytes_read,
+        started.elapsed().as_millis() as u64,
+    ))
 }
 
 #[cfg(test)]
@@ -648,11 +676,15 @@ mod tests {
 
         // A detached head and a root commit both put a space inside the brackets.
         assert_eq!(
-            commit_from_line("[detached HEAD e40f553] fix: a thing").expect("a commit").branch,
+            commit_from_line("[detached HEAD e40f553] fix: a thing")
+                .expect("a commit")
+                .branch,
             "detached HEAD"
         );
         assert_eq!(
-            commit_from_line("[main (root-commit) abc1234] first").expect("a commit").branch,
+            commit_from_line("[main (root-commit) abc1234] first")
+                .expect("a commit")
+                .branch,
             "main (root-commit)"
         );
         // Leading whitespace is git's own, on the summary line below the first.
@@ -672,7 +704,10 @@ mod tests {
             "[[main 15fd105]] nested",
             "1 file changed, 4 insertions(+)",
         ] {
-            assert!(commit_from_line(line).is_none(), "{line} parsed as a commit");
+            assert!(
+                commit_from_line(line).is_none(),
+                "{line} parsed as a commit"
+            );
         }
     }
 
@@ -695,7 +730,10 @@ mod tests {
         ]);
 
         assert_eq!(recap.prompts, 2);
-        assert_eq!(recap.first_prompt.as_deref(), Some("make the rail sortable"));
+        assert_eq!(
+            recap.first_prompt.as_deref(),
+            Some("make the rail sortable")
+        );
         assert_eq!(recap.last_prompt.as_deref(), Some("now ship it"));
 
         assert_eq!(recap.file_count, 2);
@@ -706,7 +744,11 @@ mod tests {
 
         assert_eq!(recap.commit_count, 1);
         assert_eq!(recap.commits[0].subject, "feat: a sortable rail");
-        assert_eq!(recap.branches, vec!["main", "release"], "in the order it saw them");
+        assert_eq!(
+            recap.branches,
+            vec!["main", "release"],
+            "in the order it saw them"
+        );
         assert_eq!(recap.tool_calls, 4);
         assert_eq!(recap.tools[0].name, "Edit");
         assert_eq!(recap.tools[0].count, 2);
@@ -723,8 +765,14 @@ mod tests {
         ]);
         assert_eq!(recap.agent_count, 2);
         assert_eq!(recap.agents.len(), 1, "one type, twice");
-        assert_eq!(recap.agents[0].description, "find the sort", "the newest ask");
-        assert_eq!(recap.file_count, 0, "the sidechain edit belongs to the agent");
+        assert_eq!(
+            recap.agents[0].description, "find the sort",
+            "the newest ask"
+        );
+        assert_eq!(
+            recap.file_count, 0,
+            "the sidechain edit belongs to the agent"
+        );
     }
 
     #[test]
@@ -752,14 +800,20 @@ mod tests {
 
         let rest = "ent\":\"two\"}}\n";
         std::fs::write(&path, format!("{first}{partial}{rest}")).expect("finish the line");
-        assert_eq!(scan_file(&path, &mut scan).expect("a scan") as usize, partial.len() + rest.len());
+        assert_eq!(
+            scan_file(&path, &mut scan).expect("a scan") as usize,
+            partial.len() + rest.len()
+        );
         assert_eq!(scan.acc.prompts, 2);
         assert_eq!(scan.acc.last_prompt.as_deref(), Some("two"));
 
         // A transcript that shrank is a different transcript.
         std::fs::write(&path, first).expect("rewrite shorter");
         scan_file(&path, &mut scan).expect("a scan");
-        assert_eq!(scan.acc.prompts, 1, "the accumulator was rebuilt, not appended to");
+        assert_eq!(
+            scan.acc.prompts, 1,
+            "the accumulator was rebuilt, not appended to"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -769,12 +823,18 @@ mod tests {
     #[test]
     #[ignore]
     fn recaps_local_corpus() {
-        let Some(root) = crate::sessions::projects_root() else { return };
+        let Some(root) = crate::sessions::projects_root() else {
+            return;
+        };
         let mut worst = (0u64, PathBuf::new());
         let mut total = 0u64;
         let mut files = 0u64;
         for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
-            for file in std::fs::read_dir(dir.path()).into_iter().flatten().flatten() {
+            for file in std::fs::read_dir(dir.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let path = file.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
@@ -802,6 +862,9 @@ mod tests {
                 }
             }
         }
-        eprintln!("{files} transcripts, {total}ms total, worst {}ms {:?}", worst.0, worst.1);
+        eprintln!(
+            "{files} transcripts, {total}ms total, worst {}ms {:?}",
+            worst.0, worst.1
+        );
     }
 }

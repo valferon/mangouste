@@ -108,8 +108,14 @@ const LIVENESS_SYSTEM_SUBTYPES: [&str; 2] = ["api_error", "model_refusal_fallbac
 /// flushed a moment ago, but nothing is running. An unknown or missing status is
 /// treated as live: the worst case is a stale node that ages out of the active
 /// window.
-const TERMINAL_WORKFLOW_STATUSES: [&str; 6] =
-    ["completed", "failed", "error", "cancelled", "killed", "stopped"];
+const TERMINAL_WORKFLOW_STATUSES: [&str; 6] = [
+    "completed",
+    "failed",
+    "error",
+    "cancelled",
+    "killed",
+    "stopped",
+];
 
 /// A backgrounded Bash command the transcript never saw finish.
 ///
@@ -339,7 +345,10 @@ pub(crate) fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
 /// True for the two record types a sample is mined for. A sample without one of
 /// these carries no title, prompt, model or count, so it is worth re-reading.
 fn is_conversational(record: &serde_json::Value) -> bool {
-    matches!(str_field(record, "type").as_deref(), Some("user") | Some("assistant"))
+    matches!(
+        str_field(record, "type").as_deref(),
+        Some("user") | Some("assistant")
+    )
 }
 
 /// Flatten a message's content to a short single-line preview.
@@ -412,7 +421,8 @@ fn probe_sidechain(transcript: &Path, session_id: &str, now: u64) -> SidechainPr
         if now.saturating_sub(run_newest) > ACTIVE_WINDOW_MS {
             continue;
         }
-        let record = read_workflow_record(&session_dir.join("workflows").join(format!("{run_id}.json")));
+        let record =
+            read_workflow_record(&session_dir.join("workflows").join(format!("{run_id}.json")));
         // A terminal run's fresh mtimes are only its agents' final flush.
         // Counting them as liveness held the session active for a whole window
         // after the workflow ended.
@@ -456,7 +466,11 @@ fn probe_sidechain(transcript: &Path, session_id: &str, now: u64) -> SidechainPr
     }
 
     workflows.sort_by(|a, b| b.newest_mtime_ms.cmp(&a.newest_mtime_ms));
-    SidechainProbe { newest_mtime_ms: newest, running: top.1, workflows }
+    SidechainProbe {
+        newest_mtime_ms: newest,
+        running: top.1,
+        workflows,
+    }
 }
 
 /// One flat directory of agent logs: newest mtime across them — bar a recent one
@@ -597,7 +611,9 @@ fn probe_background(pending: &[PendingTask]) -> Vec<BackgroundTask> {
     pending
         .iter()
         .filter_map(|task| {
-            let mtime = std::fs::metadata(&task.output_path).ok().and_then(mtime_ms)?;
+            let mtime = std::fs::metadata(&task.output_path)
+                .ok()
+                .and_then(mtime_ms)?;
             Some(BackgroundTask {
                 id: task.id.clone(),
                 label: task.label.clone(),
@@ -752,7 +768,10 @@ pub(crate) fn is_interrupt_marker(message: &serde_json::Value) -> bool {
         Some(serde_json::Value::String(text)) => starts(text),
         Some(serde_json::Value::Array(blocks)) => blocks.iter().any(|block| {
             block.get("type").and_then(|t| t.as_str()) == Some("text")
-                && block.get("text").and_then(|t| t.as_str()).is_some_and(starts)
+                && block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(starts)
         }),
         _ => false,
     }
@@ -819,7 +838,10 @@ fn background_launch(
     // The path runs to the sentence break, not to the next space: a cwd with a
     // space in it is still one path.
     let tail = rest.split_once(BACKGROUND_OUTPUT)?.1;
-    let end = tail.find(". ").or_else(|| tail.find(".\n")).unwrap_or(tail.len());
+    let end = tail
+        .find(". ")
+        .or_else(|| tail.find(".\n"))
+        .unwrap_or(tail.len());
     let output_path = tail[..end].trim().to_string();
     if output_path.is_empty() {
         return None;
@@ -827,7 +849,11 @@ fn background_launch(
     let label = str_field(block, "tool_use_id")
         .and_then(|call| launches.get(&call).cloned())
         .flatten();
-    Some(PendingTask { id, label, output_path })
+    Some(PendingTask {
+        id,
+        label,
+        output_path,
+    })
 }
 
 /// The task id a `<task-notification>` record is reporting on.
@@ -839,7 +865,10 @@ fn task_notification_id(text: &str) -> Option<String> {
     if !trimmed.starts_with("<task-notification") {
         return None;
     }
-    let (id, _) = trimmed.split_once("<task-id>")?.1.split_once("</task-id>")?;
+    let (id, _) = trimmed
+        .split_once("<task-id>")?
+        .1
+        .split_once("</task-id>")?;
     let id = id.trim();
     (!id.is_empty()).then(|| id.to_string())
 }
@@ -957,8 +986,9 @@ fn status_inputs(tail: &[serde_json::Value]) -> StatusInputs {
             // delivery. Either form proves the task is over.
             Some("queue-operation") => match {
                 note_activity(&mut inputs);
-                if let Some(done) =
-                    str_field(record, "content").as_deref().and_then(task_notification_id)
+                if let Some(done) = str_field(record, "content")
+                    .as_deref()
+                    .and_then(task_notification_id)
                 {
                     inputs.background_tasks.retain(|task| task.id != done);
                 }
@@ -1020,14 +1050,22 @@ fn format_timestamp_ms(ms: u64) -> String {
 
     // civil-from-days (Howard Hinnant), the other direction.
     let shifted = days + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = shifted - era * 146_097;
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_adjusted = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_adjusted + 2) / 5 + 1;
-    let month = if month_adjusted < 10 { month_adjusted + 3 } else { month_adjusted - 9 };
+    let month = if month_adjusted < 10 {
+        month_adjusted + 3
+    } else {
+        month_adjusted - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
 
     let (hour, minute, second) = (time / 3_600, (time % 3_600) / 60, time % 60);
@@ -1040,7 +1078,10 @@ fn format_timestamp_ms(ms: u64) -> String {
 /// bytes is the whole of what a uuid crate would bring.
 fn new_uuid() -> Option<String> {
     let mut bytes = [0u8; 16];
-    File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
+    File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -1080,7 +1121,10 @@ pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
     let Some(uuid) = new_uuid() else {
         return false;
     };
-    let newest = tail.iter().rev().find(|record| record.get("uuid").is_some());
+    let newest = tail
+        .iter()
+        .rev()
+        .find(|record| record.get("uuid").is_some());
     let mut record = serde_json::json!({
         "parentUuid": newest.and_then(|record| str_field(record, "uuid")),
         "isSidechain": false,
@@ -1348,7 +1392,9 @@ pub fn list_sessions(
                     SidechainProbe::default()
                 } else {
                     match probes.get(&path) {
-                        Some((at, probe)) if now.saturating_sub(*at) < PROBE_TTL_MS => probe.clone(),
+                        Some((at, probe)) if now.saturating_sub(*at) < PROBE_TTL_MS => {
+                            probe.clone()
+                        }
                         _ => {
                             let probe = probe_sidechain(&path, &cached.meta.id, now);
                             probes.insert(path.clone(), (now, probe.clone()));
@@ -1424,7 +1470,12 @@ pub fn list_sessions(
 
         groups.insert(
             dir_name.clone(),
-            ProjectGroup { dir_name, cwd, label, sessions },
+            ProjectGroup {
+                dir_name,
+                cwd,
+                label,
+                sessions,
+            },
         );
     }
 
@@ -1666,7 +1717,12 @@ pub fn read_session_window(
     }
     entries.append(&mut tail);
 
-    Ok(SessionWindow { entries, anchor, at_start, at_end })
+    Ok(SessionWindow {
+        entries,
+        anchor,
+        at_start,
+        at_end,
+    })
 }
 
 /* ---------- transcript content search ---------- */
@@ -1821,7 +1877,10 @@ fn search_terms(query: &str) -> Vec<String> {
 /// collapsed, with ellipses where it was cut.
 fn snippet_around(text: &str, terms: &[String]) -> Option<String> {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let at = terms.iter().filter_map(|t| find_ci(flat.as_bytes(), t.as_bytes())).min()?;
+    let at = terms
+        .iter()
+        .filter_map(|t| find_ci(flat.as_bytes(), t.as_bytes()))
+        .min()?;
     // Byte offset to char offset, then a char window: the transcript is UTF-8
     // and slicing it on a byte boundary would panic on any multi-byte match.
     let chars: Vec<char> = flat.chars().collect();
@@ -1840,7 +1899,12 @@ fn snippet_around(text: &str, terms: &[String]) -> Option<String> {
 }
 
 /// Scan one transcript. `None` when it does not satisfy `mode`.
-fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) -> Option<SessionHit> {
+fn search_one(
+    path: &Path,
+    dir_name: &str,
+    terms: &[String],
+    mode: MatchMode,
+) -> Option<SessionHit> {
     let file = File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file.take(SEARCH_FILE_CAP_BYTES));
     let mut line: Vec<u8> = Vec::new();
@@ -1878,7 +1942,9 @@ fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) ->
         if !is_conversational(&record) {
             continue;
         }
-        let Some(message) = record.get("message") else { continue };
+        let Some(message) = record.get("message") else {
+            continue;
+        };
         if is_synthetic_echo(message) {
             continue;
         }
@@ -1932,8 +1998,12 @@ fn search_one(path: &Path, dir_name: &str, terms: &[String], mode: MatchMode) ->
 
 /// Every transcript under the projects root, paired with its project dir name.
 fn all_transcripts() -> Vec<(PathBuf, String)> {
-    let Some(root) = projects_root() else { return Vec::new() };
-    let Ok(dirs) = std::fs::read_dir(&root) else { return Vec::new() };
+    let Some(root) = projects_root() else {
+        return Vec::new();
+    };
+    let Ok(dirs) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for dir in dirs.flatten() {
         let path = dir.path();
@@ -1941,7 +2011,9 @@ fn all_transcripts() -> Vec<(PathBuf, String)> {
             continue;
         }
         let dir_name = dir.file_name().to_string_lossy().to_string();
-        let Ok(files) = std::fs::read_dir(&path) else { continue };
+        let Ok(files) = std::fs::read_dir(&path) else {
+            continue;
+        };
         for file in files.flatten() {
             let file_path = file.path();
             if file_path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
@@ -1966,7 +2038,11 @@ pub fn search_sessions(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let mode = if any_term.unwrap_or(false) { MatchMode::Any } else { MatchMode::All };
+    let mode = if any_term.unwrap_or(false) {
+        MatchMode::Any
+    } else {
+        MatchMode::All
+    };
     let files = all_transcripts();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let hits = Mutex::new(Vec::<SessionHit>::new());
@@ -1976,7 +2052,9 @@ pub fn search_sessions(
         for _ in 0..threads {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((path, dir_name)) = files.get(index) else { break };
+                let Some((path, dir_name)) = files.get(index) else {
+                    break;
+                };
                 if let Some(hit) = search_one(path, dir_name, &terms, mode) {
                     hits.lock().push(hit);
                 }
@@ -2002,7 +2080,10 @@ mod search_tests {
     #[test]
     fn quoted_phrases_stay_one_term() {
         assert_eq!(search_terms("auth token"), vec!["auth", "token"]);
-        assert_eq!(search_terms("  \"rate limit\" retry "), vec!["rate limit", "retry"]);
+        assert_eq!(
+            search_terms("  \"rate limit\" retry "),
+            vec!["rate limit", "retry"]
+        );
         assert_eq!(search_terms("   "), Vec::<String>::new());
     }
 
@@ -2059,7 +2140,10 @@ mod search_tests {
                 checked += 1;
             }
         }
-        eprintln!("{checked} offsets across {} transcripts resolved", hits.len());
+        eprintln!(
+            "{checked} offsets across {} transcripts resolved",
+            hits.len()
+        );
     }
 
     /// Sweeps the real corpus. Ignored by default — it reads every transcript on
@@ -2074,7 +2158,10 @@ mod search_tests {
         for hit in &hits {
             eprintln!("  {} x{}", hit.id, hit.match_count);
             for snippet in &hit.snippets {
-                eprintln!("    @{} [{}] {}", snippet.offset, snippet.role, snippet.text);
+                eprintln!(
+                    "    @{} [{}] {}",
+                    snippet.offset, snippet.role, snippet.text
+                );
             }
         }
     }
@@ -2101,7 +2188,10 @@ mod search_tests {
         assert_eq!(hit.snippets.len(), 1);
         assert!(hit.snippets[0].text.contains("deadlocking"));
         assert_eq!(hit.snippets[0].role, "user");
-        assert_eq!(hit.snippets[0].offset, 0, "the spoken record is the first line");
+        assert_eq!(
+            hit.snippets[0].offset, 0,
+            "the spoken record is the first line"
+        );
         assert_eq!(hit.id, "11111111-2222-3333-4444-555555555555");
 
         // AND across terms holds within a file; ANY is the escalation's rule.
@@ -2138,7 +2228,11 @@ mod search_tests {
         for snippet in &hit.snippets {
             let from = &raw[snippet.offset as usize..];
             let line = from.lines().next().expect("a line");
-            assert!(line.contains("sharding"), "offset {} landed on {line}", snippet.offset);
+            assert!(
+                line.contains("sharding"),
+                "offset {} landed on {line}",
+                snippet.offset
+            );
         }
         assert_eq!(hit.snippets[0].role, "user");
         assert_eq!(hit.snippets[1].role, "assistant");
@@ -2183,7 +2277,11 @@ mod search_tests {
             .expect("a window");
         assert!(window.at_end);
         assert_eq!(window.anchor, window.entries.len(), "nothing to anchor on");
-        assert_eq!(window.entries.len(), 1, "the record before it is still shown");
+        assert_eq!(
+            window.entries.len(),
+            1,
+            "the record before it is still shown"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -2249,8 +2347,14 @@ mod status_tests {
 
     #[test]
     fn everything_else_still_ages_into_idle() {
-        assert_eq!(status(&ended("assistant", Some("end_turn")), IDLE_WINDOW_MS + 1), "idle");
-        assert_eq!(status(&ended("assistant", None), IDLE_WINDOW_MS + 1), "idle");
+        assert_eq!(
+            status(&ended("assistant", Some("end_turn")), IDLE_WINDOW_MS + 1),
+            "idle"
+        );
+        assert_eq!(
+            status(&ended("assistant", None), IDLE_WINDOW_MS + 1),
+            "idle"
+        );
         assert_eq!(status(&ended("user", None), IDLE_WINDOW_MS + 1), "idle");
     }
 
@@ -2308,12 +2412,24 @@ mod status_tests {
         // Past the grace with nothing written either side, the likelier story
         // is a dead window: no notice is ever recorded for that.
         assert_eq!(
-            classify(&clean, NOW - BACKGROUND_TASK_GRACE_MS - 1, 0, &quiet_task, NOW),
+            classify(
+                &clean,
+                NOW - BACKGROUND_TASK_GRACE_MS - 1,
+                0,
+                &quiet_task,
+                NOW
+            ),
             "finished"
         );
         // Unless the command itself is still writing, which is proof enough.
         assert_eq!(
-            classify(&clean, NOW - BACKGROUND_TASK_GRACE_MS - 1, 0, &task(1_000), NOW),
+            classify(
+                &clean,
+                NOW - BACKGROUND_TASK_GRACE_MS - 1,
+                0,
+                &task(1_000),
+                NOW
+            ),
             "active"
         );
     }
@@ -2349,7 +2465,10 @@ mod status_tests {
         let open = status_inputs(&[call.clone(), launch("bdvk6z2m9")]);
         assert_eq!(open.background_tasks.len(), 1);
         assert_eq!(open.background_tasks[0].id, "bdvk6z2m9");
-        assert_eq!(open.background_tasks[0].output_path, "/tmp/claude-1000/-repo/sess/tasks/bdvk6z2m9.output");
+        assert_eq!(
+            open.background_tasks[0].output_path,
+            "/tmp/claude-1000/-repo/sess/tasks/bdvk6z2m9.output"
+        );
         // The label comes from the call the marker answers.
         assert_eq!(open.background_tasks[0].label.as_deref(), Some("Rebuild"));
 
@@ -2360,7 +2479,10 @@ mod status_tests {
                 "<task-notification>\n<task-id>bdvk6z2m9</task-id>\n<status>completed</status>\n</task-notification>"}]},
         });
         let closed = status_inputs(&[call.clone(), launch("bdvk6z2m9"), notice.clone()]);
-        assert!(closed.background_tasks.is_empty(), "the notice closes the task out");
+        assert!(
+            closed.background_tasks.is_empty(),
+            "the notice closes the task out"
+        );
         // And it stays synthetic: it is not a turn and must not move the watermark.
         assert_eq!(
             closed.ended_at_ms,
@@ -2376,12 +2498,18 @@ mod status_tests {
             "content": "<task-notification>\n<task-id>bdvk6z2m9</task-id>\n<status>completed</status>\n</task-notification>",
         });
         let queued_only = status_inputs(&[call.clone(), launch("bdvk6z2m9"), queued]);
-        assert!(queued_only.background_tasks.is_empty(), "the queued notice closes it too");
+        assert!(
+            queued_only.background_tasks.is_empty(),
+            "the queued notice closes it too"
+        );
 
         // A notice for one task leaves another running.
         let two = status_inputs(&[call, launch("bdvk6z2m9"), launch("bnqto21na"), notice]);
         assert_eq!(
-            two.background_tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            two.background_tasks
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["bnqto21na"]
         );
     }
@@ -2411,7 +2539,10 @@ mod status_tests {
     #[test]
     fn pause_turn_is_not_a_clean_end() {
         // The harness auto-continues, so the turn is still in flight.
-        assert_eq!(status(&ended("assistant", Some("pause_turn")), 1_000), "active");
+        assert_eq!(
+            status(&ended("assistant", Some("pause_turn")), 1_000),
+            "active"
+        );
     }
 
     #[test]
@@ -2491,7 +2622,10 @@ mod status_tests {
         let before = read_session(&path, "-home-val-repo").expect("parsed");
         assert_eq!(status(&before.inputs, 1_000), "active");
 
-        assert!(append_interrupt_marker(&path, "2f8c1d40-0000-4000-8000-000000000001"));
+        assert!(append_interrupt_marker(
+            &path,
+            "2f8c1d40-0000-4000-8000-000000000001"
+        ));
         let after = read_session(&path, "-home-val-repo").expect("parsed");
         assert!(after.inputs.interrupted);
         assert_eq!(status(&after.inputs, 1_000), "interrupted");
@@ -2520,7 +2654,10 @@ mod status_tests {
 
         // A second kill for the same chat — a window close inside an app quit —
         // must not append a turn that says the same thing twice.
-        assert!(!append_interrupt_marker(&path, "2f8c1d40-0000-4000-8000-000000000001"));
+        assert!(!append_interrupt_marker(
+            &path,
+            "2f8c1d40-0000-4000-8000-000000000001"
+        ));
         assert_eq!(
             parsed_lines(&std::fs::read_to_string(&path).expect("read back")).len(),
             3
@@ -2531,12 +2668,17 @@ mod status_tests {
 
     #[test]
     fn both_marker_wordings_are_recognised_in_either_content_shape() {
-        for text in ["[Request interrupted by user]", "[Request interrupted by user for tool use]"] {
+        for text in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
             assert!(is_interrupt_marker(&serde_json::json!({"content": text})));
             assert!(is_interrupt_marker(
                 &serde_json::json!({"content": [{"type": "text", "text": text}]})
             ));
         }
-        assert!(!is_interrupt_marker(&serde_json::json!({"content": "interrupt the turn"})));
+        assert!(!is_interrupt_marker(
+            &serde_json::json!({"content": "interrupt the turn"})
+        ));
     }
 }

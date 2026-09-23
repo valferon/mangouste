@@ -477,7 +477,10 @@ fn ingest_line(line: &str, scan: &mut FileScan) {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
-            let name = block.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             *scan.stats.tools.entry(name.to_string()).or_insert(0) += 1;
         }
     }
@@ -814,7 +817,11 @@ fn summarize(cache: &StatsCache) -> StatsSummary {
         // below holds it. Held across the walk it would block every other
         // caller for as long as a cold corpus read takes; `scan_guard` above
         // serialises walks without doing that to readers of the map.
-        let mut scan = cache.files.lock().remove(&transcript.path).unwrap_or_default();
+        let mut scan = cache
+            .files
+            .lock()
+            .remove(&transcript.path)
+            .unwrap_or_default();
         match scan_file(&transcript.path, &mut scan) {
             Ok(0) => {}
             Ok(read) => {
@@ -900,7 +907,10 @@ fn summarize(cache: &StatsCache) -> StatsSummary {
     // entry is back in the map by here — the loop returns each one before
     // moving on, error path included — and `scan_guard` rules out another walk
     // holding one out, so nothing escapes this by being checked out.
-    cache.files.lock().retain(|path, _| live_paths.contains(path));
+    cache
+        .files
+        .lock()
+        .retain(|path, _| live_paths.contains(path));
 
     let mut session_rows: Vec<SessionStats> = sessions
         .into_iter()
@@ -1032,7 +1042,10 @@ mod tests {
         assert_eq!(totals.cache_write_1h, 500);
         // Tool calls are partitioned across records, so all of them count.
         assert_eq!(scan.stats.tools.values().sum::<u64>(), 2);
-        assert_eq!(scan.stats.first_ms, parse_iso_ms("2026-08-22T20:14:59.987Z"));
+        assert_eq!(
+            scan.stats.first_ms,
+            parse_iso_ms("2026-08-22T20:14:59.987Z")
+        );
     }
 
     #[test]
@@ -1103,7 +1116,13 @@ mod tests {
             eprintln!("  mcp {} — {} calls", server.server, server.calls);
         }
         let second = summarize(&cache);
-        eprintln!("warm: {} files re-read, {} ms", second.files_read, second.scan_ms);
-        assert_eq!(second.tokens.total, first.tokens.total, "warm rescan drifted");
+        eprintln!(
+            "warm: {} files re-read, {} ms",
+            second.files_read, second.scan_ms
+        );
+        assert_eq!(
+            second.tokens.total, first.tokens.total,
+            "warm rescan drifted"
+        );
     }
 }

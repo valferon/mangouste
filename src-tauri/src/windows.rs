@@ -40,7 +40,10 @@ const DEFAULT_SIZE: (f64, f64) = (1600.0, 1000.0);
 /// brings back `main`'s. A gap left by a closed window is the whole point.
 fn next_label(taken: &[String]) -> String {
     let mut n = 2;
-    while taken.iter().any(|label| label == &format!("{LABEL_PREFIX}{n}")) {
+    while taken
+        .iter()
+        .any(|label| label == &format!("{LABEL_PREFIX}{n}"))
+    {
         n += 1;
     }
     format!("{LABEL_PREFIX}{n}")

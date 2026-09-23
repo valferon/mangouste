@@ -6,8 +6,8 @@ mod env;
 mod fileops;
 mod format;
 mod git;
-mod primary;
 mod permission;
+mod primary;
 mod pty;
 mod recap;
 mod search;
@@ -101,7 +101,11 @@ fn mac_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         name: Some(package.name.clone()),
         version: Some(package.version.to_string()),
         copyright: config.bundle.copyright.clone(),
-        authors: config.bundle.publisher.clone().map(|publisher| vec![publisher]),
+        authors: config
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
         ..Default::default()
     };
 

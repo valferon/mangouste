@@ -120,7 +120,6 @@ pub fn clipboard_set(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
-
 /// An image lifted off the system clipboard, ready to send as a content block.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,9 +154,8 @@ pub fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
 
     let width = image.width as u32;
     let height = image.height as u32;
-    let buffer =
-        image::RgbaImage::from_raw(width, height, image.bytes.into_owned())
-            .ok_or("clipboard image had an unexpected buffer size")?;
+    let buffer = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())
+        .ok_or("clipboard image had an unexpected buffer size")?;
 
     // Downscale before encoding: cheaper to encode and far cheaper to send.
     let scaled = if width.max(height) > MAX_EDGE {

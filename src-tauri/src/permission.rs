@@ -251,7 +251,13 @@ where
             // One thread per ask: each blocks until someone decides, and asks
             // can legitimately overlap when the model batches tool calls.
             std::thread::spawn(move || {
-                handle_ask(state, emit.as_ref(), owns_chat.as_ref(), on_show.as_ref(), stream)
+                handle_ask(
+                    state,
+                    emit.as_ref(),
+                    owns_chat.as_ref(),
+                    on_show.as_ref(),
+                    stream,
+                )
             });
         }
     });
@@ -368,7 +374,9 @@ fn handle_ask<F, G, H>(
             .unwrap_or_else(|| request.input.clone());
     } else {
         reply["message"] = serde_json::Value::String(
-            decision.message.unwrap_or_else(|| "Denied in mangouste".into()),
+            decision
+                .message
+                .unwrap_or_else(|| "Denied in mangouste".into()),
         );
     }
 
@@ -479,7 +487,10 @@ fn ask_app(
     // pane that is actually asking rather than to whichever one looks busy.
     let mut ask = arguments.clone();
     if let (Some(object), Some(chat_id)) = (ask.as_object_mut(), chat_id) {
-        object.insert("chatId".into(), serde_json::Value::String(chat_id.to_string()));
+        object.insert(
+            "chatId".into(),
+            serde_json::Value::String(chat_id.to_string()),
+        );
     }
     if writeln!(stream, "{ask}").is_err() {
         return deny("could not reach mangouste");

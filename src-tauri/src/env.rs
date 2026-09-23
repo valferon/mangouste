@@ -71,9 +71,8 @@ fn account_shell() -> Option<String> {
     // "UserShell: /bin/zsh"
     let text = String::from_utf8_lossy(&output.stdout);
     let shell = text.split_once(':')?.1.trim().to_string();
-    let usable = !shell.is_empty()
-        && shell.starts_with('/')
-        && std::path::Path::new(&shell).is_file();
+    let usable =
+        !shell.is_empty() && shell.starts_with('/') && std::path::Path::new(&shell).is_file();
     usable.then_some(shell)
 }
 
