@@ -199,6 +199,23 @@ pub struct RecapCache {
     files: Mutex<HashMap<PathBuf, Arc<Mutex<RecapScan>>>>,
 }
 
+impl RecapCache {
+    /// This transcript's own lock, created on first sight.
+    ///
+    /// A first sight is also when transcripts deleted since are dropped: nothing
+    /// else ever prunes this map, and it would otherwise hold every session ever
+    /// opened for the life of the process. Only on a miss, so the common call is
+    /// still one lookup.
+    fn entry(&self, path: &Path) -> Arc<Mutex<RecapScan>> {
+        let mut files = self.files.lock();
+        if let Some(entry) = files.get(path) {
+            return Arc::clone(entry);
+        }
+        files.retain(|known, _| known.exists());
+        Arc::clone(files.entry(path.to_path_buf()).or_default())
+    }
+}
+
 /// The value of a top-level JSON string field, without parsing the record.
 ///
 /// Every record carries `gitBranch`, so parsing each one to read it would mean
@@ -573,7 +590,7 @@ pub struct SessionWrites {
 /// pays only for the bytes appended since the first.
 pub fn session_writes(file: &Path, cache: &RecapCache) -> Result<SessionWrites, String> {
     let path = PathBuf::from(file);
-    let entry = cache.files.lock().entry(path.clone()).or_default().clone();
+    let entry = cache.entry(&path);
     let mut scan = entry.lock();
     scan_file(&path, &mut scan).map_err(|e| e.to_string())?;
     Ok(SessionWrites {
@@ -604,7 +621,7 @@ pub fn session_recap(file: String, cache: State<'_, RecapCache>) -> Result<Sessi
     let started = Instant::now();
     // Outer lock held only to hand out this transcript's own lock; see the
     // comment on `RecapCache`.
-    let entry = cache.files.lock().entry(path.clone()).or_default().clone();
+    let entry = cache.entry(&path);
     let mut scan = entry.lock();
     let bytes_read = scan_file(&path, &mut scan).map_err(|e| e.to_string())?;
     Ok(present(file, &scan, bytes_read, started.elapsed().as_millis() as u64))

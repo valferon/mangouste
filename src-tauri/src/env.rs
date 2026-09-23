@@ -18,7 +18,7 @@
 //! reached only on macOS, so a typo in them is a build error on either host.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -86,11 +86,26 @@ fn account_shell() -> Option<String> {
 fn probe_login_path() -> Option<String> {
     let shell = user_shell();
     let script = format!("printf '{MARKER}%s{MARKER}' \"$PATH\"");
+    let child = Command::new(&shell)
+        .args(["-ilc", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(Command::new(&shell).args(["-ilc", &script]).output());
+        let _ = tx.send(child.wait_with_output());
     });
-    let output = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;
+    let Ok(output) = rx.recv_timeout(PROBE_TIMEOUT) else {
+        // A `.zshrc` that hangs would otherwise outlive the probe, and the
+        // waiting thread with it. The kill lets `wait_with_output` return and
+        // reap it.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        return None;
+    };
+    let output = output.ok()?;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     let path = text.split(MARKER).nth(1)?.trim().to_string();
     (!path.is_empty()).then_some(path)

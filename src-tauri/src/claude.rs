@@ -25,51 +25,63 @@ pub fn claude_start(
     chats::start(&manager, window.label(), options)
 }
 
-/// Send a user turn. `text` goes through as a single text block.
+/// Write one frame on a blocking thread.
 ///
-/// `async` so the stdin write runs off the main thread: a pasted image is
-/// base64 well past the pipe buffer, and the write parks until the CLI drains.
-#[tauri::command(async)]
-pub fn claude_send(
+/// Not `command(async)`: that runs a sync body on a runtime worker, and a pasted
+/// image is base64 well past the pipe buffer, so the write parks until the CLI
+/// drains. A few of those and every other async command waits with them — the
+/// same reason `pty_write` hands its write off.
+async fn send_blocking(
+    manager: &Arc<ChatManager>,
+    chat_id: String,
+    frame: Value,
+) -> Result<(), String> {
+    let manager = Arc::clone(manager);
+    tauri::async_runtime::spawn_blocking(move || manager.send_frame(&chat_id, &frame))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Send a user turn. `text` goes through as a single text block.
+#[tauri::command]
+pub async fn claude_send(
     manager: State<'_, Arc<ChatManager>>,
     chat_id: String,
     text: String,
 ) -> Result<(), String> {
-    manager.send_frame(
-        &chat_id,
-        &json!({
-            "type": "user",
-            "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
-        }),
-    )
+    let frame = json!({
+        "type": "user",
+        "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
+    });
+    send_blocking(&manager, chat_id, frame).await
 }
 
 /// Send an already-formed frame, for shapes the UI builds itself (images).
-/// `async` for the same reason as `claude_send`.
-#[tauri::command(async)]
-pub fn claude_send_raw(
+#[tauri::command]
+pub async fn claude_send_raw(
     manager: State<'_, Arc<ChatManager>>,
     chat_id: String,
     frame: Value,
 ) -> Result<(), String> {
-    manager.send_frame(&chat_id, &frame)
+    send_blocking(&manager, chat_id, frame).await
 }
 
 /// Interrupt the current turn without killing the process.
+///
+/// Off the main thread like the sends: an interrupt is most wanted exactly when
+/// a big write is stuck on this chat's stdin, and it would wait on that lock.
 #[tauri::command]
-pub fn claude_interrupt(
+pub async fn claude_interrupt(
     manager: State<'_, Arc<ChatManager>>,
     chat_id: String,
     request_id: String,
 ) -> Result<(), String> {
-    manager.send_frame(
-        &chat_id,
-        &json!({
-            "type": "control_request",
-            "request_id": request_id,
-            "request": { "subtype": "interrupt" }
-        }),
-    )
+    let frame = json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "interrupt" }
+    });
+    send_blocking(&manager, chat_id, frame).await
 }
 
 /// Kill whatever is under this id and spawn fresh.

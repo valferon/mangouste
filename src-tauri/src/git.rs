@@ -851,9 +851,14 @@ fn checked_ref(name: &str, what: &str) -> Result<(), String> {
     if name.starts_with('-') || name.contains("..") || name.starts_with('/') {
         return Err(format!("not a {what}: {name}"));
     }
+    // Non-ASCII passes: git allows any UTF-8 in a ref name, and the branch
+    // lists hand those back, so refusing them here left `função/x` listed but
+    // impossible to check out. No shell is involved; the byte test is for
+    // what git itself would reject, and the leading-dash check above is the
+    // one that matters for argument injection.
     let ok = name
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"/-_.+@".contains(&b));
+        .all(|b| !b.is_ascii() || b.is_ascii_alphanumeric() || b"/-_.+@".contains(&b));
     if ok {
         Ok(())
     } else {
@@ -1255,6 +1260,24 @@ pub fn git_blame(path: String) -> Result<Blame, String> {
     }
 
     Ok(Blame { commits, lines })
+}
+
+#[cfg(test)]
+mod ref_tests {
+    use super::checked_ref;
+
+    #[test]
+    fn accepts_unicode_branch_names() {
+        assert!(checked_ref("função/x", "branch").is_ok());
+        assert!(checked_ref("feature/日本", "branch").is_ok());
+    }
+
+    #[test]
+    fn still_refuses_option_like_and_ranges() {
+        for bad in ["-x", "--upload-pack=evil", "a..b", "/abs", "a b", "a;b", "a\nb", ""] {
+            assert!(checked_ref(bad, "branch").is_err(), "{bad} should be refused");
+        }
+    }
 }
 
 #[cfg(test)]

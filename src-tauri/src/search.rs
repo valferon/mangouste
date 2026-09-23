@@ -280,7 +280,10 @@ pub fn search_text(
         .git_exclude(respect_gitignore)
         .parents(respect_gitignore)
         .follow_links(false)
-        .overrides(overrides);
+        .overrides(overrides)
+        // "Show hidden" means dotfiles, not git's own store: nothing in there is
+        // worth a hit, and a Replace All over it would corrupt the repository.
+        .filter_entry(|entry| entry.file_name() != ".git");
     // More threads than this buys nothing: the sweep is IO-bound long before the
     // matcher is the bottleneck.
     if let Ok(cores) = std::thread::available_parallelism() {

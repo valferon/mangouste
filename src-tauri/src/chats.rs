@@ -175,6 +175,9 @@ struct Chat {
     /// child. After that the pid may be recycled, so signalling it is unsafe.
     reaped: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
+    /// Group members already alive when the current turn began, which the tool
+    /// liveness thread leaves out. Taken once per turn in `send_frame`.
+    baseline: Arc<Mutex<HashSet<u32>>>,
     /// The entry outlives the process so a later send can say "exited with 1"
     /// rather than "no such chat", which reads as a routing bug.
     exit_code: Arc<Mutex<Option<Option<i32>>>>,
@@ -403,14 +406,22 @@ impl ChatManager {
         let stdin = self.stdin_handle(chat_id)?;
         // A user frame opens a turn; track it so a pane can show "working…".
         if frame.get("type").and_then(|v| v.as_str()) == Some("user") {
-            if let Some(chat) = self.chats.lock().get(chat_id) {
-                chat.running.store(true, Ordering::SeqCst);
+            let opening = self.chats.lock().get(chat_id).and_then(|chat| {
                 if !chat.titled.load(Ordering::SeqCst) {
                     let mut candidate = chat.title_candidate.lock();
                     if candidate.is_none() {
                         *candidate = user_text_of(frame);
                     }
                 }
+                (!chat.running.load(Ordering::SeqCst)).then(|| {
+                    (chat.pid, Arc::clone(&chat.baseline), Arc::clone(&chat.running))
+                })
+            });
+            // The baseline is read before `running` flips, outside the chats
+            // lock: off Linux the scan is a `ps` spawn.
+            if let Some((pid, baseline, running)) = opening {
+                *baseline.lock() = group_processes(pid).iter().map(|p| p.pid).collect();
+                running.store(true, Ordering::SeqCst);
             }
         }
         let mut line = serde_json::to_string(frame).map_err(|e| e.to_string())?;
@@ -1380,21 +1391,23 @@ pub fn start(
     }
 
     // Tool liveness: name what is actually executing while a turn is running.
-    // The baseline is refreshed on every idle tick, so session-lifetime helpers
-    // (MCP servers, the permission bridge) accumulate into it and only work
-    // started during the turn is ever reported.
+    // The baseline is taken as each turn opens (see `send_frame`), so
+    // session-lifetime helpers (MCP servers, the permission bridge) accumulate
+    // into it and only work started during the turn is ever reported. Idle
+    // ticks scan nothing: with many chats open, a per-second process-table walk
+    // each — a `ps` spawn each off Linux — bought nothing between turns.
+    let baseline = Arc::new(Mutex::new(HashSet::<u32>::new()));
     {
         let manager = Arc::clone(manager);
         let chat_id = options.chat_id.clone();
         let alive = Arc::clone(&alive);
         let running = Arc::clone(&running);
+        let baseline = Arc::clone(&baseline);
         std::thread::spawn(move || {
-            let mut baseline: HashSet<u32> = HashSet::new();
             let mut last: Option<String> = None;
             while alive.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 if !running.load(Ordering::SeqCst) {
-                    baseline = group_processes(pid).iter().map(|p| p.pid).collect();
                     if last.take().is_some() {
                         manager.emit(
                             EVENT_TOOL_ACTIVITY,
@@ -1404,10 +1417,10 @@ pub fn start(
                     continue;
                 }
                 let procs = group_processes(pid);
-                let mut fresh: Vec<&GroupProc> = procs
-                    .iter()
-                    .filter(|p| !p.zombie && !baseline.contains(&p.pid))
-                    .collect();
+                let mut fresh: Vec<&GroupProc> = {
+                    let baseline = baseline.lock();
+                    procs.iter().filter(|p| !p.zombie && !baseline.contains(&p.pid)).collect()
+                };
                 fresh.sort_by(|a, b| b.rank.cmp(&a.rank));
                 let command = fresh.iter().find_map(|p| command_line_of(p.pid));
                 if command != last {
@@ -1484,6 +1497,7 @@ pub fn start(
         alive,
         reaped,
         running,
+        baseline,
         exit_code,
         title_candidate,
         titled,

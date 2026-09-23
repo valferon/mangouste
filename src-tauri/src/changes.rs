@@ -232,11 +232,18 @@ fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges,
     args.extend(paths.iter().map(String::as_str));
     let numstat = git(root, &args)?;
 
+    // Exact on the relative path: a suffix match would hand `packages/web/src/index.ts`
+    // the touches of `src/index.ts`, whichever the write-set listed first.
+    let root_path = Path::new(root);
     let touch = |path: &str| -> (u64, u64) {
         writes
             .paths
             .iter()
-            .find(|write| write.path.ends_with(path))
+            .find(|write| {
+                Path::new(&write.path)
+                    .strip_prefix(root_path)
+                    .is_ok_and(|rel| rel == Path::new(path))
+            })
             .map(|write| (write.last_ms, write.changes))
             .unwrap_or((0, 0))
     };
