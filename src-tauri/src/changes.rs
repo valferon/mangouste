@@ -500,6 +500,41 @@ mod tests {
     }
 
     #[test]
+    fn touches_belong_to_the_exact_path_not_a_suffix() {
+        let dir = repo("suffix");
+        write(&dir, "src/index.ts", "a\n");
+        write(&dir, "packages/web/src/index.ts", "b\n");
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "--quiet", "-m", "base"]);
+        write(&dir, "src/index.ts", "a\nmore\n");
+        write(&dir, "packages/web/src/index.ts", "b\nmore\n");
+
+        // The deeper path listed first: a suffix match found it for both.
+        let entry = |path: &str, changes, last_ms| crate::recap::SessionWrite {
+            path: dir.join(path).to_string_lossy().into_owned(),
+            changes,
+            last_ms,
+        };
+        let writes = SessionWrites {
+            paths: vec![
+                entry("packages/web/src/index.ts", 3, 5_000),
+                entry("src/index.ts", 1, 1_000),
+            ],
+            first_commit: None,
+            last_prompt_ms: 900,
+        };
+        let root = dir.to_string_lossy().into_owned();
+        let changes = collect_changes(&root, &writes).expect("scan");
+
+        let touches = |path: &str| {
+            let file = changes.files.iter().find(|f| f.path == path).expect(path);
+            (file.touches, file.last_touch_ms)
+        };
+        assert_eq!(touches("src/index.ts"), (1, 1_000));
+        assert_eq!(touches("packages/web/src/index.ts"), (3, 5_000));
+    }
+
+    #[test]
     fn keeps_work_the_session_has_already_committed() {
         let dir = repo("committed");
         write(&dir, "a.ts", "one\n");

@@ -580,6 +580,25 @@ mod tests {
         assert_eq!(found.files[0].matches[1].line, 3);
     }
 
+    /// Hidden files are opt-in, and git's own store stays out even then: a
+    /// Replace All over `.git/config` would corrupt the repository.
+    #[test]
+    fn show_hidden_finds_dotfiles_but_never_git_internals() {
+        let dir = scratch("hidden");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/config"), "needle\n").unwrap();
+        std::fs::write(dir.join(".env"), "needle\n").unwrap();
+
+        assert_eq!(search(&dir, "needle", options()).total_matches, 0);
+        let hidden = SearchOptions {
+            show_hidden: true,
+            ..options()
+        };
+        let found = search(&dir, "needle", hidden);
+        let files: Vec<&str> = found.files.iter().map(|f| f.relative.as_str()).collect();
+        assert_eq!(files, vec![".env"]);
+    }
+
     /// Case-insensitive by default, like every editor's find box.
     #[test]
     fn case_sensitivity_is_a_toggle() {

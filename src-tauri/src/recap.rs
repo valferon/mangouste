@@ -767,6 +767,34 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_forgets_transcripts_that_are_gone() {
+        let dir = std::env::temp_dir().join("mangouste-recap-prune");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (gone, kept, new) = (
+            dir.join("gone.jsonl"),
+            dir.join("kept.jsonl"),
+            dir.join("new.jsonl"),
+        );
+        for path in [&gone, &kept, &new] {
+            std::fs::write(path, "").expect("write");
+        }
+
+        let cache = RecapCache::default();
+        cache.entry(&gone);
+        cache.entry(&kept);
+        std::fs::remove_file(&gone).expect("delete");
+        // A hit prunes nothing; only a miss pays for the sweep.
+        cache.entry(&kept);
+        assert_eq!(cache.files.lock().len(), 2);
+        cache.entry(&new);
+
+        let mut known: Vec<PathBuf> = cache.files.lock().keys().cloned().collect();
+        known.sort();
+        assert_eq!(known, vec![kept, new]);
+    }
+
+    #[test]
     fn resumes_where_the_last_read_stopped() {
         let dir = std::env::temp_dir().join("mangouste-recap-test");
         std::fs::create_dir_all(&dir).expect("temp dir");

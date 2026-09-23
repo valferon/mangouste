@@ -63,7 +63,9 @@ import { highlightCode, highlightLines, languageForPath, TOOL_HIGHLIGHT_MAX } fr
 import { revealer } from "../lib/reveal";
 import {
   classifyOutput,
+  mergeToolResults,
   parseNumberedLines,
+  toolResultText,
   type NumberedLine,
   type NumberedText,
 } from "../lib/toolOutput";
@@ -385,42 +387,6 @@ const isToolUse = (block: ContentBlock): block is ToolUseBlock =>
 const isToolResult = (block: ContentBlock): block is ToolResultBlock =>
   block.type === "tool_result" && typeof (block as ToolResultBlock).tool_use_id === "string";
 
-/** Flatten a tool_result payload to displayable text. */
-function toolResultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) =>
-        typeof part === "string"
-          ? part
-          : typeof part === "object" && part && "text" in part
-            ? String((part as { text: unknown }).text)
-            : JSON.stringify(part),
-      )
-      .join("\n");
-  }
-  return content === undefined ? "" : JSON.stringify(content, null, 2);
-}
-
-type ToolResults = Record<string, { text: string; isError: boolean }>;
-
-/**
- * Fold live results into the map, dropping the oldest past `MAX_TOOL_RESULTS`.
- * Insertion order is age order here: tool ids are never integer-like keys.
- */
-function mergeToolResults(current: ToolResults, results: ToolResultBlock[]): ToolResults {
-  const next = { ...current };
-  for (const result of results) {
-    next[result.tool_use_id] = {
-      text: toolResultText(result.content),
-      isError: Boolean(result.is_error),
-    };
-  }
-  const keys = Object.keys(next);
-  if (keys.length <= MAX_TOOL_RESULTS) return next;
-  for (const key of keys.slice(0, keys.length - MAX_TOOL_RESULTS)) delete next[key];
-  return next;
-}
 
 /**
  * Render a tool's input for the IN pane.
@@ -2571,7 +2537,7 @@ export const ChatPane = memo(function ChatPane({
           // the main thread's tool had returned because someone else's did.
           if (typeof frame.parent_tool_use_id === "string") {
             if (results.length > 0) {
-              setToolResults((current) => mergeToolResults(current, results));
+              setToolResults((current) => mergeToolResults(current, results, MAX_TOOL_RESULTS));
             }
             return;
           }
@@ -2579,7 +2545,7 @@ export const ChatPane = memo(function ChatPane({
             setPhase("receiving");
             setPendingTool(null);
             setToolActivity(null);
-            setToolResults((current) => mergeToolResults(current, results));
+            setToolResults((current) => mergeToolResults(current, results, MAX_TOOL_RESULTS));
           }
           return;
         }

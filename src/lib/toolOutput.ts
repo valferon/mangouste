@@ -8,6 +8,8 @@
  * can be tested without a DOM.
  */
 
+import type { ToolResultBlock } from "./types";
+
 /* ---------- Read ---------- */
 
 export interface NumberedLine {
@@ -111,4 +113,49 @@ export function classifyOutput(text: string): ClassifiedOutput {
   const json = asJson(body);
   if (json !== null) return { shape: { kind: "code", language: "json", text: json }, trailer };
   return { shape: { kind: "plain", text: body }, trailer };
+}
+
+/* ---------- live results ---------- */
+
+/** Flatten a tool_result payload to displayable text. */
+export function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : typeof part === "object" && part && "text" in part
+            ? String((part as { text: unknown }).text)
+            : JSON.stringify(part),
+      )
+      .join("\n");
+  }
+  return content === undefined ? "" : JSON.stringify(content, null, 2);
+}
+
+export type ToolResults = Record<string, { text: string; isError: boolean }>;
+
+/**
+ * Fold live results into the map, dropping the oldest past `max`.
+ *
+ * Insertion order is age order here: tool ids are never integer-like keys, so
+ * the object keeps them in the order they arrived.
+ */
+export function mergeToolResults(
+  current: ToolResults,
+  results: ToolResultBlock[],
+  max: number,
+): ToolResults {
+  const next = { ...current };
+  for (const result of results) {
+    next[result.tool_use_id] = {
+      text: toolResultText(result.content),
+      isError: Boolean(result.is_error),
+    };
+  }
+  const keys = Object.keys(next);
+  if (keys.length <= max) return next;
+  for (const key of keys.slice(0, keys.length - max)) delete next[key];
+  return next;
 }

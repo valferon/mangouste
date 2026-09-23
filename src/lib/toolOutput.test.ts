@@ -3,9 +3,12 @@ import {
   asJson,
   classifyOutput,
   looksLikeDiff,
+  mergeToolResults,
   parseNumberedLines,
   splitTrailer,
+  toolResultText,
 } from "./toolOutput";
+import type { ToolResultBlock } from "./types";
 
 describe("parseNumberedLines", () => {
   it("reads cat -n style output, either separator", () => {
@@ -101,5 +104,43 @@ describe("classifyOutput", () => {
     const out = classifyOutput('{"a":1}\nShell cwd was reset to /x');
     expect(out.shape.kind).toBe("code");
     expect(out.trailer).toBe("Shell cwd was reset to /x");
+  });
+});
+
+describe("mergeToolResults", () => {
+  const result = (id: string, content: unknown = id, isError = false): ToolResultBlock => ({
+    type: "tool_result",
+    tool_use_id: id,
+    content,
+    is_error: isError,
+  });
+
+  it("adds results without touching the map it was given", () => {
+    const current = { a: { text: "a", isError: false } };
+    const next = mergeToolResults(current, [result("b", "out", true)], 10);
+    expect(next).toEqual({ a: { text: "a", isError: false }, b: { text: "out", isError: true } });
+    expect(current).toEqual({ a: { text: "a", isError: false } });
+  });
+
+  it("drops the oldest past the cap, a long session's first reads first", () => {
+    let map = {};
+    for (const id of ["toolu_1", "toolu_2", "toolu_3", "toolu_4"]) {
+      map = mergeToolResults(map, [result(id)], 3);
+    }
+    expect(Object.keys(map)).toEqual(["toolu_2", "toolu_3", "toolu_4"]);
+  });
+
+  it("an update to a kept id does not count twice", () => {
+    let map = mergeToolResults({}, [result("x"), result("y")], 2);
+    map = mergeToolResults(map, [result("x", "again")], 2);
+    expect(Object.keys(map).sort()).toEqual(["x", "y"]);
+  });
+});
+
+describe("toolResultText", () => {
+  it("joins text parts and leaves other shapes readable", () => {
+    expect(toolResultText("plain")).toBe("plain");
+    expect(toolResultText([{ type: "text", text: "one" }, "two"])).toBe("one\ntwo");
+    expect(toolResultText(undefined)).toBe("");
   });
 });
