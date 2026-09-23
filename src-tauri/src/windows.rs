@@ -46,6 +46,20 @@ fn next_label(taken: &[String]) -> String {
     format!("{LABEL_PREFIX}{n}")
 }
 
+/// How a window is named to the user: "window 2", counting `main` as the first.
+///
+/// Mirrors `windowName` in `src/lib/windowScope.ts`, and exists because the
+/// backend has to name a window too — a refusal that said `window-2` would be
+/// naming an internal label at somebody reading an error message.
+pub fn window_name(label: &str) -> String {
+    let number = label
+        .strip_prefix(LABEL_PREFIX)
+        .and_then(|n| n.parse::<u32>().ok())
+        .filter(|n| *n > 1)
+        .unwrap_or(1);
+    format!("window {number}")
+}
+
 /// Open another window onto this process.
 ///
 /// Sync on purpose: window creation is main-loop work on every platform this
@@ -85,6 +99,26 @@ pub fn open_window(app: AppHandle, window: Window) -> Result<String, String> {
     Ok(label)
 }
 
+/// Raise an existing window by label.
+///
+/// The other half of session ownership: the rail in one window lists sessions
+/// another window is running, and clicking one of those brings that window
+/// forward rather than opening a second pane onto its process. Unminimised
+/// first, since a window the user shrank is exactly the one they lost the
+/// session in.
+///
+/// A label with no window behind it is an error rather than a silent no-op: the
+/// caller asked for a window it believed was there, and swallowing that would
+/// look like a click that did nothing.
+#[tauri::command]
+pub fn focus_window(app: AppHandle, label: String) -> Result<(), String> {
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| format!("no window `{label}`"))?;
+    let _ = window.unminimize();
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +136,14 @@ mod tests {
             "window-3".to_string(),
         ];
         assert_eq!(next_label(&taken), "window-4");
+    }
+
+    #[test]
+    fn windows_are_named_as_a_person_counts_them() {
+        assert_eq!(window_name(MAIN_WINDOW), "window 1");
+        assert_eq!(window_name("window-2"), "window 2");
+        // A label with no number behind it still has to name something.
+        assert_eq!(window_name("window-"), "window 1");
     }
 
     /// The reuse that makes a returning window find its own stored layout.

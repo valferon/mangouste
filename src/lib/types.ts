@@ -419,6 +419,25 @@ export interface LogFilter {
   text?: string;
   path?: string;
   branch?: string;
+  /** Narrow the walk to one range, e.g. the commits a pull brought in. */
+  range?: LogRange;
+}
+
+/** `from..to`: reachable from `to`, not from `from`. Both are revisions. */
+export interface LogRange {
+  from: string;
+  to: string;
+}
+
+/** What a pull did, so the commits it took on can be read rather than guessed. */
+export interface PullOutcome {
+  /** git's own combined output. */
+  output: string;
+  /** HEAD either side of the pull; null on a repo with no commits. */
+  before: string | null;
+  after: string | null;
+  /** The commits between the two, newest first. Empty when already up to date. */
+  commits: Commit[];
 }
 
 export interface FileStatus {
@@ -472,6 +491,8 @@ export interface ChatStatus {
   chatId: string;
   /** Monotonic spawn id, used to discard events from a superseded process. */
   instance: number;
+  /** Label of the window that owns this chat: `main`, or `window-2` and up. */
+  owner: string;
   cwd: string;
   sessionId: string | null;
   pid: number | null;

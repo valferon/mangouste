@@ -131,6 +131,13 @@ pub struct ChatStatus {
     /// Monotonic id for this spawn, so a late stop from a torn-down component
     /// is recognised as stale rather than killing its replacement.
     pub instance: u64,
+    /// Label of the window this chat belongs to.
+    ///
+    /// Reported so a second window can tell its own work from the other one's:
+    /// a session is owned by the window that raised it, and clicking it in the
+    /// rail of a window that does not own it raises the one that does rather
+    /// than opening a second pane onto the same process.
+    pub owner: String,
     pub cwd: String,
     pub session_id: Option<String>,
     pub pid: Option<u32>,
@@ -183,6 +190,7 @@ impl Chat {
         ChatStatus {
             chat_id: chat_id.to_string(),
             instance: self.instance,
+            owner: self.owner.clone(),
             cwd: self.cwd.clone(),
             session_id: self.session_id.lock().clone(),
             pid: Some(self.pid),
@@ -197,6 +205,17 @@ impl Chat {
 }
 
 /* ---------- manager ---------- */
+
+/// Whether a chat is the one holding `session_id`.
+///
+/// Two ways in, because a chat learns its uuid at two different moments. A
+/// resumed session carries it in the id from the first frame; a chat opened as
+/// "New session" is `…|new-3` until the CLI announces one, and only the
+/// reported uuid says which session that turned out to be. Pure, so the pairing
+/// can be tested without a child process behind it.
+fn holds_session(chat_id: &str, reported: Option<&str>, session_id: &str) -> bool {
+    reported == Some(session_id) || chat_id.ends_with(&format!("|{session_id}"))
+}
 
 #[derive(Default)]
 pub struct ChatManager {
@@ -251,14 +270,49 @@ impl ChatManager {
 
     /// Kill one chat. With `instance`, only if it still refers to that spawn.
     pub fn kill(&self, chat_id: &str, instance: Option<u64>) {
+        let _ = self.kill_scoped(chat_id, instance, None);
+    }
+
+    /// Kill one chat, but only if `owner` is the window holding it.
+    ///
+    /// The ownership test runs under the same lock as the removal, which is the
+    /// whole reason this exists rather than a check at the call site: between a
+    /// caller reading ownership and acting on it, the chat can have died and
+    /// another window spawned its own under the same id — and killing *that*
+    /// one is exactly the cross-window interruption ownership is for.
+    pub fn kill_for(
+        &self,
+        chat_id: &str,
+        instance: Option<u64>,
+        owner: &str,
+    ) -> Result<(), String> {
+        self.kill_scoped(chat_id, instance, Some(owner))
+    }
+
+    /// The body of both. `owner` of `None` kills whoever holds it, which is what
+    /// a window closing and the process exiting both mean.
+    fn kill_scoped(
+        &self,
+        chat_id: &str,
+        instance: Option<u64>,
+        owner: Option<&str>,
+    ) -> Result<(), String> {
         let mut chats = self.chats.lock();
         if let Some(chat) = chats.get(chat_id) {
             if instance.is_some_and(|wanted| wanted != chat.instance) {
-                return;
+                return Ok(());
+            }
+            if let Some(owner) = owner {
+                if chat.alive.load(Ordering::SeqCst) && chat.owner != owner {
+                    return Err(format!(
+                        "this session is open in {}",
+                        crate::windows::window_name(&chat.owner)
+                    ));
+                }
             }
         }
         let Some(chat) = chats.remove(chat_id) else {
-            return;
+            return Ok(());
         };
         drop(chats);
         // Pending prompts die with the chat: a bridge thread parked on one
@@ -294,6 +348,25 @@ impl ChatManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Which window holds the live chat for this session, if any.
+    ///
+    /// Matched on the uuid the CLI reported rather than on the chat id: a tab
+    /// opened as "New session" has no uuid in its id and learns one later, and
+    /// that session is exactly as owned as a resumed one. The chat id is still
+    /// checked, for the window between a resume being asked for and the CLI
+    /// announcing the session back.
+    pub fn owner_of_session(&self, session_id: &str) -> Option<String> {
+        self.chats
+            .lock()
+            .iter()
+            .find(|(chat_id, chat)| {
+                chat.alive.load(Ordering::SeqCst)
+                    && holds_session(chat_id, chat.session_id.lock().as_deref(), session_id)
+            })
+            .map(|(_, chat)| chat.owner.clone())
     }
 
     pub fn statuses(&self) -> Vec<ChatStatus> {
@@ -1083,6 +1156,19 @@ pub fn start(
     {
         let chats = manager.chats.lock();
         if let Some(chat) = chats.get(&options.chat_id) {
+            if chat.alive.load(Ordering::SeqCst) && chat.owner != owner {
+                // A session belongs to one window. Attaching from another puts
+                // two composers on one stdin and leaves the chat dying with a
+                // window the user is not looking at — which is how a session
+                // "went unresponsive" while its other pane was mid-turn. The
+                // rail raises the owning window instead; this refuses the cases
+                // that do not go through it, chiefly a restored tab strip that
+                // still lists a session the other window has since opened.
+                return Err(format!(
+                    "this session is open in {}",
+                    crate::windows::window_name(&chat.owner)
+                ));
+            }
             if chat.alive.load(Ordering::SeqCst) {
                 let pending = manager
                     .permission
@@ -1094,7 +1180,9 @@ pub fn start(
             }
         }
     }
-    // Not live: clear any dead entry before spawning over it.
+    // Not live: clear any dead entry before spawning over it. A dead chat is
+    // nobody's — its window may even be gone — so whichever window asks next
+    // gets it, and becomes its owner by spawning the process it refers to.
     manager.kill(&options.chat_id, None);
 
     let instance = manager.next_instance.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1419,6 +1507,37 @@ mod tests {
             extra_args: None,
             debug: false,
         }
+    }
+
+    const SESSION: &str = "279b648d-896f-4ac8-9101-604cf933626f";
+
+    #[test]
+    fn a_resumed_chat_holds_the_session_named_in_its_id() {
+        let id = format!("chat|/home/user/demo|{SESSION}");
+        assert!(holds_session(&id, None, SESSION));
+    }
+
+    #[test]
+    fn a_new_chat_holds_the_session_the_cli_reported() {
+        // The id says `new-3` forever; the uuid only ever arrives over stdout.
+        let id = "chat|/home/user/demo|window-2:new-3";
+        assert!(holds_session(id, Some(SESSION), SESSION));
+    }
+
+    #[test]
+    fn a_chat_on_another_session_is_not_a_match() {
+        let other = "0f4c1d40-0000-4000-8000-000000000001";
+        let id = format!("chat|/home/user/demo|{other}");
+        assert!(!holds_session(&id, Some(other), SESSION));
+        assert!(!holds_session("chat|/home/user/demo|new-1", None, SESSION));
+    }
+
+    /// The suffix is matched with its separator, so a session whose uuid ends
+    /// another one's text cannot claim it.
+    #[test]
+    fn the_id_match_is_on_a_whole_segment() {
+        let id = format!("chat|/home/user/demo|x{SESSION}");
+        assert!(!holds_session(&id, None, SESSION));
     }
 
     #[test]

@@ -36,7 +36,9 @@ import {
 import { PaneBoundary } from "./panes/PaneBoundary";
 import {
   claudeKill,
+  claudeStatus,
   discoverRepos,
+  focusWindow,
   homeDir,
   onSessionTransition,
   openExternal,
@@ -44,6 +46,7 @@ import {
   postNotification,
   renameSession,
   revealPath,
+  sessionOwner,
 } from "./lib/ipc";
 import {
   DEFAULT_ALERT_PREFS,
@@ -53,6 +56,8 @@ import {
 } from "./lib/alerts";
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
+import { isUnder, repointPath } from "./lib/fileOps";
+import { baseName } from "./lib/paths";
 import {
   FilesIcon,
   FindReplaceIcon,
@@ -96,7 +101,7 @@ import {
   type ChatTab,
   type Tab,
 } from "./lib/tabs";
-import type { ProjectGroup, RepoInfo, SessionMeta } from "./lib/types";
+import type { ProjectGroup, PullOutcome, RepoInfo, SessionMeta } from "./lib/types";
 import {
   applyZoom,
   closeWindow,
@@ -117,10 +122,19 @@ import {
   FEEDBACK_LEVELS,
   type FeedbackLevel,
 } from "./lib/feedback";
-import { idScope } from "./lib/windowScope";
+import {
+  idScope,
+  isMainWindow,
+  windowLabel,
+  windowName,
+  windowTint,
+} from "./lib/windowScope";
 
 /* Persisted keys all come from the catalogue in `lib/persist.ts`, so a reset or
    a migration can enumerate them without grepping for string literals. */
+/** How often the rail re-asks which window owns which live session. */
+const OWNER_POLL_MS = 2_000;
+
 const WORKSPACE_KEY = KEYS.state.workspaceRoot;
 const PERMISSION_MODE_KEY = KEYS.prefs.permissionMode;
 const MODEL_KEY = KEYS.prefs.model;
@@ -827,6 +841,20 @@ function Workbench() {
   // Stamp the stored theme before first paint so there is no dark/light flash.
   useEffect(() => applyTheme(theme), [theme]);
 
+  /**
+   * Paint this window in its own colour.
+   *
+   * Two windows onto the same repos look identical, and which one a session
+   * belongs to is not cosmetic here — it is the window that will answer its
+   * permission prompts and the one whose close ends it. The status bar is
+   * already the accent bar, so tinting that is the whole marker. Written once
+   * as an inline custom property: it is mixed *with* `--accent`, so it follows
+   * the theme without being recomputed when the theme changes.
+   */
+  useEffect(() => {
+    document.documentElement.style.setProperty("--window-accent", windowTint(windowLabel()));
+  }, []);
+
   useEffect(() => {
     writeString(PERMISSION_MODE_KEY, permissionMode);
   }, [permissionMode]);
@@ -872,6 +900,47 @@ function Workbench() {
   useEffect(() => {
     if (activeRepo) writeString(ACTIVE_REPO_KEY, activeRepo);
   }, [activeRepo]);
+
+  /**
+   * Which window is running each live session, for the dot in the rail.
+   *
+   * Polled rather than pushed: ownership only changes when a chat starts or
+   * ends, both of which are rare enough that a slow tick is cheaper than an
+   * event per window per chat, and a dot that is two seconds stale costs
+   * nothing. The authoritative answer for a *click* is asked for on the click
+   * itself — this map only decides what is drawn.
+   */
+  const [sessionOwners, setSessionOwners] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let stopped = false;
+    const scan = async () => {
+      let statuses;
+      try {
+        statuses = await claudeStatus();
+      } catch {
+        return;
+      }
+      if (stopped) return;
+      const next = new Map<string, string>();
+      for (const status of statuses) {
+        if (status.alive && status.sessionId) next.set(status.sessionId, status.owner);
+      }
+      // Replaced only when something actually moved: the rail is memoised on
+      // this map, and a fresh Map every tick would re-render every row.
+      setSessionOwners((current) =>
+        current.size === next.size &&
+        [...next].every(([session, owner]) => current.get(session) === owner)
+          ? current
+          : next,
+      );
+    };
+    void scan();
+    const timer = setInterval(() => void scan(), OWNER_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   const handleGroups = useCallback((groups: ProjectGroup[]) => {
     setSessionGroups(groups);
@@ -1287,6 +1356,40 @@ function Workbench() {
   }, []);
 
   /**
+   * Open what a pull just brought in.
+   *
+   * A pull is the one moment the repo changes under you without your having
+   * written any of it, and "Fast-forward, 17 files changed" is not an answer to
+   * what happened. This opens the range as its own history tab: the same graph,
+   * the same messages, the same per-file patches, over the commits HEAD moved
+   * across and nothing else.
+   *
+   * Keyed by the range, so pulling twice leaves two reviews rather than one
+   * that quietly replaced the other, and a pull that brought nothing opens
+   * nothing at all.
+   */
+  const openPullReview = useCallback((cwd: string, outcome: PullOutcome) => {
+    const { before, after, commits } = outcome;
+    if (cwd === "" || before === null || after === null || commits.length === 0) return;
+    const id = `history|${cwd}|${before}..${after}`;
+    setTabs((current) =>
+      current.some((tab) => tab.id === id)
+        ? current
+        : [
+            ...current,
+            {
+              id,
+              kind: "history",
+              label: `Pulled ${commits.length}`,
+              cwd,
+              range: { from: before, to: after },
+            },
+          ],
+    );
+    setActiveTab(id);
+  }, []);
+
+  /**
    * Watch what one session is doing to the code.
    *
    * One tab per session rather than per repo: two sessions in one repo are two
@@ -1497,6 +1600,82 @@ function Workbench() {
   );
 
   /**
+   * Follow a renamed or moved path with whatever is open over it.
+   *
+   * A file tab's id *is* its path (`file:/repo/a.ts`), so a rename has to
+   * rewrite the id as well as the label, and everything else keyed by id — the
+   * active tab, the recently-visited stack — has to be rewritten with it.
+   * Leaving the tab pointed at the old path would give the editor a buffer it
+   * can read but never save.
+   *
+   * Only clean buffers get here: the tree refuses to move a path with unsaved
+   * edits under it, which is why the saver map can simply be re-keyed.
+   */
+  const handlePathRenamed = useCallback((from: string, to: string) => {
+    const moved = (path: string) => repointPath(path, from, to);
+    setTabs((current) =>
+      current.map((tab) => {
+        if (tab.kind !== "file") return tab;
+        const path = moved(tab.path);
+        return path === null
+          ? tab
+          : { ...tab, id: `file:${path}`, path, label: baseName(path) };
+      }),
+    );
+    setActiveTab((current) => {
+      if (!current.startsWith("file:")) return current;
+      const path = moved(current.slice("file:".length));
+      return path === null ? current : `file:${path}`;
+    });
+    tabHistoryRef.current = tabHistoryRef.current.map((id) => {
+      if (!id.startsWith("file:")) return id;
+      const path = moved(id.slice("file:".length));
+      return path === null ? id : `file:${path}`;
+    });
+    setSelectedFile((current) => (current === null ? current : moved(current) ?? current));
+    // Nothing to do for the saver and formatter maps: `FileView` registers and
+    // deregisters itself against the path it was given, and its cleanup runs
+    // with the old path in hand — see the effects keyed on `path` in Viewer.
+  }, []);
+
+  /*
+   * What a rename costs the editor, and why it is left as is.
+   *
+   * A file tab's key is its id, and its id follows its path, so a rename
+   * remounts the editor. The buffer is safe — the tree refuses to rename a path
+   * with unsaved edits under it — but the native undo stack, the caret and the
+   * scroll position all reset, as if the file had been closed and reopened.
+   * Keeping them would mean teaching `FileView` that a path change can be the
+   * same file under a new name, and that is the one component where a
+   * speculative change risks the stale-write guard the whole editor is built
+   * around. Reopening a just-renamed file is the cheap workaround.
+   */
+
+  /** Close what was open over a deleted path, and anything under it. */
+  const handlePathDeleted = useCallback(
+    (path: string) => {
+      for (const tab of tabsRef.current) {
+        if (tab.kind === "file" && isUnder(tab.path, path)) forceCloseTab(tab.id);
+      }
+      setSelectedFile((current) => (current && isUnder(current, path) ? null : current));
+    },
+    [forceCloseTab],
+  );
+
+  /**
+   * Whether a path, or anything under it, has edits the tree would destroy.
+   *
+   * Reads the ref and not the state so the callback stays stable: taking
+   * `dirtyFiles` as a dependency would re-render the whole explorer on every
+   * keystroke in the editor.
+   */
+  const hasUnsavedEdits = useCallback(
+    (path: string) =>
+      Object.entries(dirtyFilesRef.current).some(([file, dirty]) => dirty && isUnder(file, path)),
+    [],
+  );
+
+  /**
    * Close chat tabs whose session has been quiet for two days, or been archived.
    *
    * Riding on `sessionGroups` rather than a timer of its own, because that is
@@ -1545,6 +1724,29 @@ function Workbench() {
 
   const resumeSessionFromSidebar = useCallback(
     async (session: SessionMeta, anchor?: number) => {
+      // A session belongs to the window that raised it. The rail lists every
+      // session on disk, so a click here can land on one another window is
+      // running — and opening it would attach a second pane to that process:
+      // two composers on one stdin, and a kill the moment the other window
+      // closes. Raise the window that owns it instead, which is where the
+      // conversation already is. Asked of Rust on the click rather than read
+      // from the polled map, so the answer is the live one.
+      let owner: string | null = null;
+      try {
+        owner = await sessionOwner(session.id);
+      } catch {
+        // No answer is not a reason to refuse the click: fall through and open
+        // it here, which is what this did before ownership existed.
+      }
+      if (owner && owner !== windowLabel()) {
+        try {
+          await focusWindow(owner);
+          return;
+        } catch {
+          // The window went away between the two calls; its chat died with it,
+          // so opening the session here is now the right thing.
+        }
+      }
       // A session belongs to the directory it was started in; follow it there so
       // the file tree and git panes stay in sync with the chat.
       const cwd = session.cwd ? await repoRoot(session.cwd) : activeRepo;
@@ -2196,7 +2398,15 @@ function Workbench() {
           >
             {activeRepo && (
               <PaneBoundary label="explorer">
-                <FileTree root={activeRepo} onOpenFile={openFileHere} selectedPath={selectedFile} />
+                <FileTree
+                  root={activeRepo}
+                  onOpenFile={openFileHere}
+                  selectedPath={selectedFile}
+                  onPathRenamed={handlePathRenamed}
+                  onPathDeleted={handlePathDeleted}
+                  hasUnsavedEdits={hasUnsavedEdits}
+                  refreshToken={gitRefresh}
+                />
               </PaneBoundary>
             )}
           </div>
@@ -2227,6 +2437,7 @@ function Workbench() {
                   visible={sidebarView === "git"}
                   onShowDiff={showDiffHere}
                   onOpenFile={openFileHere}
+                  onPulled={(outcome) => openPullReview(activeRepo, outcome)}
                 />
               </PaneBoundary>
             )}
@@ -2542,6 +2753,10 @@ function Workbench() {
                       cwd={tab.cwd}
                       visible={tab.id === activeTab}
                       refreshToken={gitRefresh}
+                      range={tab.range}
+                      rangeNote={
+                        tab.range && `Pulled into ${baseName(tab.cwd)}, newest first`
+                      }
                       onShowDiff={showDiffHere}
                       onOpenFile={openFileHere}
                     />
@@ -2630,6 +2845,7 @@ function Workbench() {
           <SessionsPane
             activeSessionId={liveSessionId}
             activeCwd={activeRepo}
+            sessionOwners={sessionOwners}
             onGroups={handleGroups}
             onSelectRepo={handleSelectRepo}
             onResume={handleResume}
@@ -2760,8 +2976,16 @@ function Workbench() {
           cwd={activeRepo}
           watch={upstreamWatch}
           onChanged={bumpGitRefresh}
+          onPulled={(outcome) => openPullReview(activeRepo, outcome)}
           onNotice={setSystemMessage}
         />
+        {/* Which window this is, drawn only past the first: the colour of the
+            bar says two windows are not the same one, and this says which. */}
+        {!isMainWindow() && (
+          <span className="status-window" title="Sessions started here belong to this window">
+            {windowName(windowLabel())}
+          </span>
+        )}
         <span className="status-repo">{activeRepo || "no repo"}</span>
         {liveSessionId && <span>session {liveSessionId.slice(0, 8)}</span>}
         {/* The technical answer to "why is nothing moving"; click for the

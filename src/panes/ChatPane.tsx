@@ -229,7 +229,27 @@ type ChatItem = { key: string; atMs?: number } & (
   // the command; the panel fetches its own data, so an answer arriving does not
   // re-render the timeline.
   | { kind: "panel"; command: NativeCommand; args: string }
+  /**
+   * Something the pane did to its own process, said out loud.
+   *
+   * The composer's switches change a running session over the control channel,
+   * and until this row existed the only evidence was the button highlighting
+   * itself — indistinguishable from a switch the CLI refused. `action` carries
+   * the one gesture that would finish the job, for the cases the live process
+   * cannot do: the CLI will not raise a session to `bypassPermissions` unless it
+   * was launched there, so the offer is a restart, which resumes the same
+   * session id and keeps the transcript.
+   */
+  | { kind: "notice"; text: string; tone: NoticeTone; action?: NoticeAction | null }
 );
+
+type NoticeTone = "info" | "warn";
+
+/** Named rather than a closure so an item stays plain data, like every other. */
+interface NoticeAction {
+  label: string;
+  kind: "restart";
+}
 
 /** Everything a control panel needs that is not in its timeline entry. */
 interface PanelContext {
@@ -261,6 +281,18 @@ const MODE_LABELS: Record<(typeof PERMISSION_MODES)[number], string> = {
   plan: "plan",
   bypassPermissions: "bypass",
 };
+
+/**
+ * The strip's short name for a mode.
+ *
+ * Takes a plain string because the modes that arrive from the CLI are whatever
+ * it sends, not our literal union — an unknown one is shown as it came rather
+ * than swallowed.
+ */
+const modeLabel = (mode: string): string => (MODE_LABELS as Record<string, string>)[mode] ?? mode;
+
+/** The readable half of a rejection, for a row a person has to act on. */
+const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
  * CLI `--model` aliases, plus a sentinel for "don't pass the flag at all".
@@ -1205,6 +1237,7 @@ type TimelineEntry = { key: string; state?: string; atMs?: number } & (
   | { kind: "unknown"; block: ContentBlock }
   | { kind: "permission"; request: PermissionRequest; decided: string | null }
   | { kind: "panel"; command: NativeCommand; args: string }
+  | { kind: "notice"; text: string; tone: NoticeTone; action?: NoticeAction | null }
   | {
       kind: "result";
       text: string;
@@ -1239,6 +1272,10 @@ function entryText(entry: TimelineEntry): string | null {
       return JSON.stringify(entry.block, null, 2);
     case "result":
       return entry.text || null;
+    // Prose about the session rather than part of it, but short and worth
+    // pasting into a bug report — which is mostly what it is written for.
+    case "notice":
+      return entry.text;
     default:
       return null;
   }
@@ -1352,6 +1389,18 @@ function toTimeline(
           command: item.command,
           args: item.args,
           state: "done",
+        });
+        break;
+      case "notice":
+        push({
+          kind: "notice",
+          key: item.key,
+          text: item.text,
+          tone: item.tone,
+          action: item.action ?? null,
+          // A warning is not an error: nothing failed in the pane, the CLI
+          // declined something the user can still get another way.
+          state: item.tone === "warn" ? "waiting" : "done",
         });
         break;
       case "result":
@@ -1531,6 +1580,8 @@ const Timeline = memo(function Timeline({
   anchorKey,
   onOpenFile,
   onDecide,
+  onNoticeAction,
+  noticeActionsReady,
   panelContext,
   logMenu,
   level,
@@ -1554,6 +1605,16 @@ const Timeline = memo(function Timeline({
     /** Edited arguments, which is how an answered question travels back. */
     updatedInput?: unknown,
   ) => Promise<void>;
+  /** Run a notice's offer — currently only "restart to apply". */
+  onNoticeAction: (action: NoticeAction) => void;
+  /**
+   * Whether that offer can be taken right now.
+   *
+   * A restart kills the process, so it is held back while a turn is in flight:
+   * the mode is already armed for the next spawn, and losing an answer halfway
+   * through to apply it is never what the click meant.
+   */
+  noticeActionsReady: boolean;
   panelContext: PanelContext;
   /** The chat-wide entries a row's menu ends with. */
   logMenu: () => MenuEntry[];
@@ -1655,6 +1716,26 @@ const Timeline = memo(function Timeline({
 
             {entry.kind === "permission" && (
               <PermissionCard entry={entry} onDecide={onDecide} />
+            )}
+
+            {entry.kind === "notice" && (
+              <div className="chat-notice" data-tone={entry.tone}>
+                <span className="chat-notice-text">{entry.text}</span>
+                {entry.action && (
+                  <button
+                    className="toggle-button chat-notice-action"
+                    disabled={!noticeActionsReady}
+                    title={
+                      noticeActionsReady
+                        ? "Restart this session — it resumes the same session id, so the transcript stays"
+                        : "Finish or stop the current turn first"
+                    }
+                    onClick={() => onNoticeAction(entry.action as NoticeAction)}
+                  >
+                    {entry.action.label}
+                  </button>
+                )}
+              </div>
             )}
 
             {entry.kind === "result" && (
@@ -1768,6 +1849,14 @@ export const ChatPane = memo(function ChatPane({
    */
   const permissionModeRef = useRef(defaultPermissionMode);
   const [spawnedPermissionMode, setSpawnedPermissionMode] = useState(defaultPermissionMode);
+  /**
+   * The mode the transcript has already announced.
+   *
+   * The CLI restates the mode on `init` and on every change, including changes
+   * this pane asked for, so without a record of what was already said an
+   * accepted pick would print twice and a spawn would print once for nothing.
+   */
+  const noticedModeRef = useRef(defaultPermissionMode);
   /**
    * Chosen `--model` alias, and the one the live process actually got.
    *
@@ -2154,6 +2243,8 @@ export const ChatPane = memo(function ChatPane({
     setPhase(resumeTarget ? "attaching" : "starting claude");
     const spawnMode = permissionModeRef.current;
     setSpawnedPermissionMode(spawnMode);
+    // The new process announces this mode on `init`; it is not news.
+    noticedModeRef.current = spawnMode;
     const spawnModelAlias = modelAliasRef.current;
     setSpawnedModelAlias(spawnModelAlias);
     const spawnLevel = levelRef.current;
@@ -2185,7 +2276,10 @@ export const ChatPane = memo(function ChatPane({
         setRunning(status.running);
         // The live process may predate this pane, so the mode it was actually
         // spawned with is the backend's answer, not our local guess.
-        if (status.permissionMode) setSpawnedPermissionMode(status.permissionMode);
+        if (status.permissionMode) {
+          setSpawnedPermissionMode(status.permissionMode);
+          noticedModeRef.current = status.permissionMode;
+        }
         // Announce the client and read back its catalog. Optional on the wire
         // and safe on an attach — a process that is already initialized answers
         // with its current state instead of re-running session setup — so both
@@ -2312,6 +2406,30 @@ export const ChatPane = memo(function ChatPane({
         case "system":
           if (frame.subtype === "init") {
             onSystemMessageRef.current(`session ${String(frame.session_id ?? "").slice(0, 8)} · ${cwd}`);
+          }
+          // The CLI announces the mode it is actually running under — on `init`,
+          // and again in a `status` frame every time it moves. It moves without
+          // being asked by this pane: an approved plan drops the session back to
+          // `default`, and a terminal attached to the same process can set it
+          // too. Without this the strip keeps showing the mode we last picked,
+          // which is the stale half of "switching modes does nothing".
+          if (typeof frame.permissionMode === "string" && frame.permissionMode) {
+            const announced = frame.permissionMode;
+            permissionModeRef.current = announced;
+            setPermissionMode(announced);
+            setSpawnedPermissionMode(announced);
+            if (noticedModeRef.current !== announced) {
+              // Only the moves nobody in this pane asked for reach here with
+              // something new to say: a pick of our own records itself when its
+              // control request comes back, and a spawn records its own mode.
+              noticedModeRef.current = announced;
+              appendItem({
+                kind: "notice",
+                key: nextKey(),
+                text: `permission mode: ${modeLabel(announced)} — changed by the session.`,
+                tone: "info",
+              });
+            }
           }
           return;
 
@@ -2981,7 +3099,9 @@ export const ChatPane = memo(function ChatPane({
       await claudeInterrupt(chatId, `interrupt-${Date.now()}`);
     } catch {
       // The interrupt frame could not be written, so the process is the problem.
-      await claudeKill(chatId);
+      // A refusal here is swallowed: the kill is ownership-checked in Rust, and
+      // a pane that cannot end its own chat has nothing further to try.
+      await claudeKill(chatId).catch(() => {});
     }
     setRunning(false);
   }, [chatId]);
@@ -3005,6 +3125,27 @@ export const ChatPane = memo(function ChatPane({
   useEffect(() => {
     onStats({ sessionId, model, contextTokens, costUsd });
   }, [onStats, sessionId, model, contextTokens, costUsd]);
+
+  /**
+   * Say what just happened to the session, in the transcript.
+   *
+   * The strip's highlight is where a pick lands, but a highlight cannot tell
+   * "the live process took this" from "the CLI refused and it is armed for the
+   * next spawn" — and those read identically to anyone who just clicked.
+   */
+  const emitNotice = useCallback(
+    (text: string, tone: NoticeTone = "info", action: NoticeAction | null = null) => {
+      appendItem({ kind: "notice", key: nextKey(), text, tone, action });
+    },
+    [appendItem],
+  );
+
+  const runNoticeAction = useCallback(
+    (action: NoticeAction) => {
+      if (action.kind === "restart") void restart();
+    },
+    [restart],
+  );
 
   /*
    * A control request moved the live process, so the composer switch that arms
@@ -3039,18 +3180,27 @@ export const ChatPane = memo(function ChatPane({
       modelAliasRef.current = alias;
       setModelAlias(alias);
       onModel(alias);
-      if (!alive) return;
+      if (!alive) {
+        emitNotice(`model armed: ${alias} — applies when this session starts.`);
+        return;
+      }
       void controlSetModel(chatId, alias === MODEL_DEFAULT ? null : alias)
         .then((result) => {
           const applied = result.model ?? alias;
           logDebug(chatId, "control", `set_model · ${applied}`);
           setSpawnedModelAlias(alias);
+          emitNotice(`model: ${applied} — applied to the running session.`);
         })
         .catch((e) => {
           logDebug(chatId, "control", `set_model failed: ${String(e)}`);
+          emitNotice(
+            `Could not switch to ${alias} on the running session: ${errorText(e)}`,
+            "warn",
+            { label: "Restart to apply", kind: "restart" },
+          );
         });
     },
-    [alive, chatId, onModel],
+    [alive, chatId, emitNotice, onModel],
   );
 
   /**
@@ -3065,15 +3215,30 @@ export const ChatPane = memo(function ChatPane({
       levelRef.current = next;
       setLevel(next);
       onFeedback(next);
+      // Everything but subagent forwarding is a rendering choice this pane makes
+      // on frames it already has, so most of a level change is live at once and
+      // only the flag half waits. Say which half was just bought.
+      emitNotice(
+        feedbackNeedsRestart(spawnedLevel, next)
+          ? `verbosity: ${next} — subagent forwarding applies on restart, the rest is live.`
+          : `verbosity: ${next}.`,
+      );
     },
-    [onFeedback],
+    [emitNotice, onFeedback, spawnedLevel],
   );
 
   const pickPermissionMode = useCallback(
     (mode: string) => {
       permissionModeRef.current = mode;
       setPermissionMode(mode);
-      if (!alive) return;
+      // Claimed before the request goes out, not after it answers: the CLI's
+      // own `status` frame for this change can land first, and it would
+      // otherwise be reported as a move the session made on its own.
+      noticedModeRef.current = mode;
+      if (!alive) {
+        emitNotice(`permission mode armed: ${modeLabel(mode)} — applies when this session starts.`);
+        return;
+      }
       void controlSetPermissionMode(chatId, mode)
         .then((result) => {
           const applied = result.mode ?? mode;
@@ -3081,12 +3246,25 @@ export const ChatPane = memo(function ChatPane({
           permissionModeRef.current = applied;
           setPermissionMode(applied);
           setSpawnedPermissionMode(applied);
+          noticedModeRef.current = applied;
+          emitNotice(`permission mode: ${modeLabel(applied)} — applied to the running session.`);
         })
         .catch((e) => {
           logDebug(chatId, "control", `set_permission_mode failed: ${String(e)}`);
+          // The pick stays armed for the next spawn — the strip's pending badge
+          // says so — but a refusal that only reached the debug log read as the
+          // switch doing nothing at all. The one people hit is
+          // `bypassPermissions`, which the CLI will not raise a process into
+          // unless it was launched there; a restart resumes the same session id,
+          // so taking the offer costs the transcript nothing.
+          emitNotice(
+            `Could not switch to ${modeLabel(mode)} on the running session: ${errorText(e)}`,
+            "warn",
+            { label: "Restart to apply", kind: "restart" },
+          );
         });
     },
-    [alive, chatId],
+    [alive, chatId, emitNotice],
   );
 
   const panelContext = useMemo<PanelContext>(
@@ -3268,6 +3446,8 @@ export const ChatPane = memo(function ChatPane({
             anchorKey={anchored?.key ?? null}
             onOpenFile={onOpenFile}
             onDecide={decide}
+            onNoticeAction={runNoticeAction}
+            noticeActionsReady={!running}
             panelContext={panelContext}
             logMenu={logMenu}
             level={level}

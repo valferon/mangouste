@@ -179,6 +179,19 @@ describe("toStoredTab -> restoreTab", () => {
     expect(restoreTab(stored as StoredTab)).toEqual(historyTab);
   });
 
+  it("does not store a pull review", () => {
+    // A range tab is derived twice over: it is a patch-shaped view of two shas
+    // the branch has already moved past, and it shares the plain history tab's
+    // id, so restoring one would collide with it.
+    const review: Tab = {
+      ...historyTab,
+      id: "history|/repos/mangouste|aaa..bbb",
+      label: "Pulled 4",
+      range: { from: "aaa", to: "bbb" },
+    };
+    expect(toStoredTab(review)).toBeNull();
+  });
+
   it("round trips the dashboard", () => {
     const stored = toStoredTab(dashboardTab);
     expect(stored).not.toBeNull();

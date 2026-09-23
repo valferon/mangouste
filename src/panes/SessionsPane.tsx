@@ -41,6 +41,7 @@ import { KEYS, readEnum, writeString } from "../lib/persist";
 import { SESSION_SORTS, sortSessions, type SessionSort } from "../lib/sessionOrder";
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
+import { windowLabel, windowName, windowTint } from "../lib/windowScope";
 import type {
   BackgroundTask,
   ProjectGroup,
@@ -60,6 +61,13 @@ interface SessionsPaneProps {
    * of the tail, which is the difference between finding a match and reading it.
    */
   onResume: (session: SessionMeta, anchor?: number) => void;
+  /**
+   * Which window is running each live session, by session id.
+   *
+   * Only the rows another window owns are marked: this window's own work needs
+   * no explanation, and a dot on every live row would be noise.
+   */
+  sessionOwners: Map<string, string>;
   onNewSession: (cwd: string) => void;
   /** Clicking a group label switches the sidebars to that repo. */
   onSelectRepo: (cwd: string) => void;
@@ -412,6 +420,7 @@ const RecapBlock = memo(function RecapBlock({
  */
 export const SessionsPane = memo(function SessionsPane({
   activeSessionId,
+  sessionOwners,
   onResume,
   onNewSession,
   onSelectRepo,
@@ -1238,6 +1247,12 @@ export const SessionsPane = memo(function SessionsPane({
                     .join(" · ");
                   const showFanout = working > 0 && (fanoutOverride.get(session.id) ?? true);
                   const heat = heatLevel(session);
+                  // Owned elsewhere: the row still opens, it just opens over
+                  // there. Marked in that window's own colour, which is the
+                  // colour of its status bar — the mark and the place it sends
+                  // you are the same thing.
+                  const owner = sessionOwners.get(session.id);
+                  const elsewhere = owner && owner !== windowLabel() ? owner : null;
                   return (
                     <Fragment key={session.id}>
                       <div
@@ -1258,6 +1273,7 @@ export const SessionsPane = memo(function SessionsPane({
                           hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
                           `${status} · ${shortAge(session.lastActivityMs)} ago`,
                           workingLabel || null,
+                          elsewhere ? `running in ${windowName(elsewhere)} — click to raise it` : null,
                           pinned ? "pinned — kept through every filter" : null,
                           markedUnread ? "marked unread" : null,
                           session.gitBranch,
@@ -1311,6 +1327,13 @@ export const SessionsPane = memo(function SessionsPane({
                           <span className="heat-badge" title={HEAT_TOOLTIPS[heat]}>
                             {HEAT_BADGES[heat]}
                           </span>
+                        )}
+                        {elsewhere && (
+                          <span
+                            className="window-dot"
+                            style={{ background: windowTint(elsewhere) }}
+                            title={`Running in ${windowName(elsewhere)} — click to raise it`}
+                          />
                         )}
                         <span className="age">{shortAge(session.lastActivityMs)}</span>
                         <span className="row-actions">

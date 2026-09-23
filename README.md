@@ -53,6 +53,12 @@ unattended at any moment:
 - **Sessions this window did not start still count.** The rail reads the
   transcripts on disk, so a `claude` in a bare terminal, or one from last week,
   sits in the same list as the panes here.
+- **A session belongs to one window.** With a second window open, each one
+  paints its status bar in its own colour, and a session is owned by the window
+  that started it — the one that answers its permission prompts and whose close
+  ends it. Sessions another window is running carry a dot in that window's
+  colour, and clicking one raises that window instead of opening a second pane
+  onto the same process.
 - **Nothing unmounts when hidden.** A turn keeps streaming in a chat tab you are
   not looking at, an unsaved buffer survives a tab switch, and each repo's shells
   keep their scrollback while another repo is in front.
@@ -534,6 +540,62 @@ patch is derived output that would otherwise sit whole in `localStorage`, and
 "New session" tabs that never got a session id — with no session to resume and
 no transcript to render, restoring one would be a blank pane pretending to be
 history.
+
+### Editing the tree
+
+The Explorer writes as well as reads. New file, new folder, rename, move,
+duplicate, cut, copy, paste and delete are on every row's context menu; the two
+create actions are also buttons in the pane header, aimed at the directory of
+whatever is selected rather than always at the repo root. Dragging a row onto a
+folder moves it, and dropping onto a file means "beside this one", which is the
+folder that file sits in.
+
+Names are typed into the tree, not into a dialog: a name only makes sense next
+to its siblings and a modal covers them. Enter commits, Escape cancels, and
+clicking away cancels too, because a stray click that creates a file called
+`use` costs more than three keystrokes do. A typed name can be a path, so
+`api/routes/users.ts` in one go creates the two directories above it and opens
+the file; the directories it just made are expanded, or the tree would look like
+nothing happened.
+
+Six Rust commands back all of it (`src-tauri/src/fileops.rs`), kept apart from
+the read side because every one of them is destructive in a way a listing never
+is. They share two guards: a path has to be absolute and free of `..`, since the
+frontend only ever passes paths it read out of a directory listing, and anything
+removable can be neither the filesystem root nor the home directory. Creates use
+`create_new`, so the existence check and the creation are one syscall and "New
+File" over an existing name cannot silently truncate it. A rename refuses an
+occupied target instead of taking `fs::rename`'s default of replacing it without
+a word, and falls back to copy-and-remove on EXDEV so a drag onto another mount
+still works. A delete reads its metadata without following links, because
+`remove_dir_all` down a symlink would empty the directory it points at. A copy
+carries the mode across (a duplicated script that lost its executable bit looks
+fine and fails when it runs) and recreates a symlink as a link rather than
+following it.
+
+Deletes are permanent. There is no trash and no undo, so the confirm dialog is
+the only warning, and it says so.
+
+Two things the tree refuses rather than gets wrong. A move or a delete is
+blocked while anything under the path has unsaved editor changes, since once the
+path is gone that buffer's save has nowhere to land. And a rename that lands is
+followed by every tab that was open over it: a file tab's id *is* its path, so
+the id, the label, the active tab and the recently-visited stack are all
+rewritten, descendants of a renamed folder included. A delete closes them
+instead.
+
+One cost worth knowing about: a file tab's key is its id and its id follows its
+path, so renaming a file that is open remounts its editor. The buffer is safe
+(the rename was refused if it had unsaved edits) but the undo stack, the caret
+and the scroll position reset, as though the file had been closed and reopened.
+Keeping them would mean teaching the editor that a path change can be the same
+file under a new name, which is the one place a speculative change risks the
+stale-write guard the editor is built around.
+
+Directory listings are sequenced per directory. Two operations touching one
+folder issue two listings, Rust answers them on a thread pool in whatever order
+it likes, and without the sequence the older question's answer can land last and
+leave the tree showing a folder state that matches neither write.
 
 ### Find and replace
 
@@ -1099,8 +1161,9 @@ looking at.
 
 Rust owns the parsing and the process handling, and has the older suite:
 `cargo test`, over the transcript scanner, the stats accumulator, the `ps`
-shapes, the login-shell PATH probe, the workspace writer, the formatter
-resolution and the find-and-replace matcher. No count here: it went stale on the
+shapes, the login-shell PATH probe, the workspace writer, the tree's own
+create/rename/delete/copy guards, the formatter resolution and the
+find-and-replace matcher. No count here: it went stale on the
 commit after it was written.
 
 The frontend suite is `npm test` (vitest, node environment, no jsdom) and
@@ -1302,9 +1365,6 @@ backend.
   tool" state, but prose still appears when the turn settles, not as it arrives
 - Quick-open over file names. The palette ranks repos and sessions; `search_files`
   is wired to the composer's `@` mention menu instead
-- New file, rename and delete in the tree. Every filesystem write goes through
-  the editor or through claude, and the context menus deliberately kept it that
-  way — see Menus above
 - Updating itself. The app notices a new release and shows its notes; installing
   one is a download in a browser. See Knowing there is a newer mangouste above
   for why, and what it would cost to change

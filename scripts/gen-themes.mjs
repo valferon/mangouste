@@ -27,6 +27,7 @@ import { dirname, join, resolve } from "node:path";
 const ROOTS = [
   process.argv[2],
   "/usr/share/code/resources/app/extensions",
+  "/usr/share/codium/resources/app/extensions",
   "/usr/share/code-insiders/resources/app/extensions",
   "/snap/code/current/usr/share/code/resources/app/extensions",
   "/Applications/Visual Studio Code.app/Contents/Resources/app/extensions",
@@ -44,8 +45,9 @@ if (!root) {
 /**
  * id, label, kind, and where the palette comes from. Order is menu order.
  *
- * `file` is under the VS Code install unless it starts with `vendor/`, which is
- * this repo. A vendored `uiTheme: vs-dark` extension paints over VS Code's dark
+ * `file` is under the VS Code install unless it starts with `vendor/` or
+ * `themes/`, which are this repo: a marketplace theme kept verbatim, and a
+ * palette of our own with no licensed original to vendor. A vendored `uiTheme: vs-dark` extension paints over VS Code's dark
  * workbench defaults, so `base` names the bundled theme that fills in whatever
  * colours it does not set — the fallback VS Code itself applies. Token rules
  * are never inherited from the base: VS Code adds none, and neither does this.
@@ -69,11 +71,15 @@ const THEMES = [
   { id: "light-modern", label: "Light Modern", kind: "light", file: "theme-defaults/themes/light_modern.json" },
   { id: "solarized-light", label: "Solarized Light", kind: "light", file: "theme-solarized-light/themes/solarized-light-color-theme.json" },
   { id: "quiet-light", label: "Quiet Light", kind: "light", file: "theme-quietlight/themes/quietlight-color-theme.json" },
+  { id: "monokai-sun", label: "Monokai Sun", kind: "light", file: "themes/monokai-sun/monokai-sun-color-theme.json" },
   { id: "hc-light", label: "High Contrast Light", kind: "light", file: "theme-defaults/themes/hc_light.json" },
 ];
 
-/** Resolve a THEMES `file`: the repo for vendored themes, the install for the rest. */
-const locate = (file) => (file.startsWith("vendor/") ? resolve(file) : join(root, file));
+/** Resolve a THEMES `file`: the repo for vendored and first-party themes, the
+    install for the rest. */
+const IN_REPO = ["vendor/", "themes/"];
+const locate = (file) =>
+  IN_REPO.some((prefix) => file.startsWith(prefix)) ? resolve(file) : join(root, file);
 
 /* ---------- colour arithmetic ---------- */
 
@@ -453,7 +459,15 @@ function build({ id, label, kind, file, base }) {
       "--chip-fg": info.fg,
       "--chip-head-bg": head.bg,
       "--chip-head-fg": head.fg,
-      "--status-idle": mix(dim, bg, 0.45),
+      // The quiet end of the session list: done and seen, a grey glyph rather
+      // than a coloured one. Fading `dim` most of the way to the background is
+      // what makes it quiet, but on a low-contrast ground — Monokai Sun's warm
+      // paper, where a warm grey shares the background's hue — that fade alone
+      // lands near 2.5:1 and the reviewed tail stops being legible at glyph
+      // size. It is floored at the same 3.0 the coloured states are held to, so
+      // quiet stays a matter of chroma (grey against green, amber, blue) rather
+      // than of being too faint to read.
+      "--status-idle": readable(mix(dim, bg, 0.45), bg, kind, 3.0),
       "--track": alpha(toward, 0.12),
       "--scrollbar-thumb": alpha(toward, 0.35),
       "--scrollbar-thumb-hover": alpha(toward, 0.55),
@@ -553,7 +567,8 @@ const out =
   `   upstream palettes those themes package; Monokai++ (MIT, Davide Casella)\n` +
   `   and One Monokai (MIT, Joshua Azemoh) come from the copies of their\n` +
   `   extensions vendored under vendor/themes/. Only the mapping onto this\n` +
-  `   app's tokens is ours; the colours are theirs.\n\n` +
+  `   app's tokens is ours; the colours are theirs. Monokai Sun is ours, from\n` +
+  `   themes/ — see the README there.\n\n` +
   `   Fonts and metrics are NOT here — they live in styles.css, which is what a\n` +
   `   theme switch must leave alone. */\n\n` +
   `/* Default, and what \`follow desktop\` paints when the desktop is dark. */\n` +

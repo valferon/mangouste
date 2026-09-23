@@ -3,6 +3,7 @@ mod changes;
 mod chats;
 mod claude;
 mod env;
+mod fileops;
 mod format;
 mod git;
 mod primary;
@@ -298,6 +299,7 @@ pub fn run() {
             claude::claude_detach,
             claude::claude_kill,
             claude::claude_status,
+            claude::session_owner,
             // terminal
             pty::pty_open,
             pty::pty_write,
@@ -314,6 +316,13 @@ pub fn run() {
             workspace::open_in_default_app,
             workspace::write_text_file,
             workspace::home_dir,
+            // mutating the tree itself
+            fileops::create_file,
+            fileops::create_dir,
+            fileops::rename_path,
+            fileops::delete_path,
+            fileops::copy_path,
+            fileops::duplicate_path,
             format::format_text,
             // find and replace across the repo
             search::search_text,
@@ -343,6 +352,7 @@ pub fn run() {
             git::git_merge,
             // windows
             windows::open_window,
+            windows::focus_window,
             // updates
             update::fetch_release,
             // usage

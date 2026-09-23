@@ -24,6 +24,21 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 /** Matches `windows::MAIN_WINDOW` in Rust, and `tauri.conf.json`. */
 const MAIN = "main";
 
+/** Matches `windows::LABEL_PREFIX` in Rust. */
+const LABEL_PREFIX = "window-";
+
+/**
+ * One colour per window past the first.
+ *
+ * Mixed with the theme's accent rather than used raw, so a window keeps looking
+ * like the theme it is drawn in and is still told apart at a glance — the status
+ * bar is the accent bar, and which colour it is painted in is the cheapest
+ * possible answer to "which window am I typing into". The main window keeps the
+ * accent untouched: the window that has always been there should not change
+ * colour because a second one was opened.
+ */
+const TINTS = ["#c2571f", "#1f7f63", "#6f4bd8", "#a82a4f", "#2a6fb8"];
+
 /**
  * Suffix for a stored key belonging to `label`.
  *
@@ -81,4 +96,36 @@ export function idScope(): string {
 /** For tests: forget what was detected. */
 export function resetWindowScopeCache(): void {
   cached = undefined;
+}
+
+/**
+ * This window's number, as a person would count them: `main` is 1.
+ *
+ * Pure over the label for its test, and tolerant of a label it cannot parse —
+ * a colour is not worth throwing over.
+ */
+export function windowNumber(label: string): number {
+  if (!label.startsWith(LABEL_PREFIX)) return 1;
+  const parsed = Number.parseInt(label.slice(LABEL_PREFIX.length), 10);
+  return Number.isFinite(parsed) && parsed > 1 ? parsed : 1;
+}
+
+/**
+ * The colour standing for `label`, as a CSS value.
+ *
+ * Usable anywhere a colour is: the status bar of the window itself, and the dot
+ * in another window's rail marking the sessions this one is running. Labels
+ * past the palette wrap rather than run out, which is the right failure for a
+ * sixth window — two windows sharing a colour is a nuisance, an uncoloured one
+ * is a hole.
+ */
+export function windowTint(label: string): string {
+  if (label === MAIN) return "var(--accent)";
+  const tint = TINTS[(windowNumber(label) - 2) % TINTS.length];
+  return `color-mix(in srgb, ${tint} 62%, var(--accent))`;
+}
+
+/** How a window is named in the UI: "window 2", and "this window" for main. */
+export function windowName(label: string): string {
+  return label === MAIN ? "window 1" : `window ${windowNumber(label)}`;
 }

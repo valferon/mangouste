@@ -6,6 +6,7 @@
  */
 
 import type { SessionSurface } from "./sessionSurface";
+import type { LogRange } from "./types";
 
 /**
  * A chat tab is one `claude` process.
@@ -55,7 +56,20 @@ export type Tab =
   | ChatTab
   | { id: string; kind: "file"; label: string; path: string; cwd: string }
   | { id: string; kind: "diff"; label: string; patch: string; cwd: string }
-  | { id: string; kind: "history"; label: string; cwd: string }
+  /**
+   * The repo's history, or one range of it.
+   *
+   * `range` is what a pull opens: the same pane, walking `before..after`
+   * instead of every ref, so the commits that just arrived are read with the
+   * graph, the messages and the per-file patches the history view already has.
+   */
+  | {
+      id: string;
+      kind: "history";
+      label: string;
+      cwd: string;
+      range?: LogRange;
+    }
   /**
    * A live diff of one session's work.
    *
@@ -144,7 +158,11 @@ export function toStoredTab(tab: Tab): StoredTab | null {
     case "file":
       return { kind: "file", cwd: tab.cwd, path: tab.path };
     case "history":
-      return { kind: "history", cwd: tab.cwd };
+      // A range tab is a review of one pull, the same way a diff tab is a
+      // patch: derived, and stale the moment the branch moves on. It also
+      // shares its repo's id, so restoring one would collide with the plain
+      // history tab it was opened alongside.
+      return tab.range ? null : { kind: "history", cwd: tab.cwd };
     case "changes":
       return { kind: "changes", cwd: tab.cwd, sessionId: tab.sessionId, file: tab.file };
     case "dashboard":

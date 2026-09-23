@@ -82,7 +82,10 @@ pub fn claude_restart(
     window: Window,
     options: StartOptions,
 ) -> Result<ChatStatus, String> {
-    manager.kill(&options.chat_id, None);
+    // Restarting someone else's chat would kill a turn in a window the user is
+    // not looking at, which is the one thing ownership exists to prevent. The
+    // test is inside the kill, so nothing can spawn under this id between them.
+    manager.kill_for(&options.chat_id, None, window.label())?;
     chats::start(&manager, window.label(), options)
 }
 
@@ -100,11 +103,13 @@ pub fn claude_detach(_chat_id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn claude_kill(
     manager: State<'_, Arc<ChatManager>>,
+    window: Window,
     chat_id: String,
     instance: Option<u64>,
 ) -> Result<(), String> {
-    manager.kill(&chat_id, instance);
-    Ok(())
+    // Owned by the asking window, for the same reason as `claude_restart`: a
+    // pane can only end the session its own window is running.
+    manager.kill_for(&chat_id, instance, window.label())
 }
 
 /// Answer a pending tool-permission prompt.
@@ -119,4 +124,17 @@ pub fn permission_respond(
 #[tauri::command]
 pub fn claude_status(manager: State<'_, Arc<ChatManager>>) -> Vec<ChatStatus> {
     manager.statuses()
+}
+
+/// Which window owns the live chat for this session, if one does.
+///
+/// The rail lists every session on disk, not this window's, so a click can land
+/// on work another window is running. Opening it here would attach a second
+/// pane to one process — two composers on one stdin, and a kill when the other
+/// window closes. The window that owns it is raised instead, and this is what
+/// says which one that is. `None` means nothing live holds the session, so this
+/// window is free to resume it.
+#[tauri::command]
+pub fn session_owner(manager: State<'_, Arc<ChatManager>>, session_id: String) -> Option<String> {
+    manager.owner_of_session(&session_id)
 }

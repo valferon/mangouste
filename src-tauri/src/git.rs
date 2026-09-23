@@ -126,6 +126,21 @@ pub struct LogFilter {
     pub path: Option<String>,
     /// Walk from this ref instead of from every ref.
     pub branch: Option<String>,
+    /// Walk one range — what a pull brought in, say — instead of a branch.
+    pub range: Option<LogRange>,
+}
+
+/// `from..to`: the commits reachable from `to` and not from `from`.
+///
+/// Two fields rather than one string because the string would have to be
+/// pulled apart again to be validated, and `checked_ref` rejects a `..` on
+/// purpose: a range is built here, out of two names each checked on its own,
+/// so nothing the frontend sends can smuggle in a second revision.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogRange {
+    pub from: String,
+    pub to: String,
 }
 
 /// A filter field with something in it, or None. The pane sends the empty
@@ -184,16 +199,24 @@ pub fn git_log(
         args.push(format!("--grep={text}"));
     }
 
-    // A branch narrows the walk to one starting point, which is the opposite of
-    // `--all`; asking for both would widen it straight back out again.
-    match filled(&filter.branch) {
-        Some(branch) => {
+    // A range or a branch narrows the walk to one starting point, which is the
+    // opposite of `--all`; asking for both would widen it straight back out
+    // again. A range wins: it is the more specific question, and the only pane
+    // that asks it is showing one particular set of commits.
+    match (&filter.range, filled(&filter.branch)) {
+        (Some(range), _) => {
+            checked_ref(&range.from, "revision")?;
+            checked_ref(&range.to, "revision")?;
+            args.push("--end-of-options".into());
+            args.push(format!("{}..{}", range.from, range.to));
+        }
+        (None, Some(branch)) => {
             checked_ref(branch, "branch")?;
             args.push("--end-of-options".into());
             args.push(branch.to_string());
         }
-        None if all_branches.unwrap_or(true) => args.push("--all".into()),
-        None => {}
+        (None, None) if all_branches.unwrap_or(true) => args.push("--all".into()),
+        (None, None) => {}
     }
 
     // Last, and after `--`, so a path beginning with a dash stays a path.
@@ -855,19 +878,83 @@ pub fn git_fetch(cwd: String, remote: Option<String>) -> Result<String, String> 
     git_network(&cwd, &args)
 }
 
-/// Pull the current branch's upstream.
+/// What a pull did: git's words, and the commits it moved HEAD over.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullOutcome {
+    /// git's own combined output, which the panes show verbatim.
+    pub output: String,
+    /// HEAD before the pull, so the range can be re-opened later. `None` on a
+    /// repo with no commits yet.
+    pub before: Option<String>,
+    /// HEAD after it, and `None` for the same reason.
+    pub after: Option<String>,
+    /// The commits between the two, newest first. Empty when already up to date.
+    pub commits: Vec<Commit>,
+}
+
+/// Commits a pull is willing to list. Past this it is a history, not a review.
+const PULL_REVIEW_LIMIT: usize = 500;
+
+/// Pull the current branch's upstream, and say what arrived.
 ///
 /// `--ff-only` by default: a pull that would have to merge, on a repo whose
 /// worktree the user is mid-edit in, is exactly the case where an implicit
 /// merge commit is the wrong answer. Pass `rebase` for the other behaviour.
+///
+/// HEAD is read either side so the caller can show the commits it just took
+/// on. Reading it before rather than deriving it afterwards from the reflog is
+/// what makes the answer exact: `@{1}` is whatever last moved HEAD, which on a
+/// repo someone is also using from a terminal is not necessarily this pull.
+///
+/// After a `--rebase` pull the range also contains the local commits that were
+/// replayed onto the new upstream — they are new commits, with new shas, and
+/// nothing short of comparing patches tells them from the ones that came down
+/// the wire. The fast-forward default has no such ambiguity.
 #[tauri::command(async)]
-pub fn git_pull(cwd: String, rebase: Option<bool>) -> Result<String, String> {
+pub fn git_pull(cwd: String, rebase: Option<bool>) -> Result<PullOutcome, String> {
     let args: &[&str] = if rebase.unwrap_or(false) {
         &["pull", "--rebase"]
     } else {
         &["pull", "--ff-only"]
     };
-    git_network(&cwd, args)
+    let before = head_sha(&cwd);
+    let output = git_network(&cwd, args)?;
+    let after = head_sha(&cwd);
+
+    // A pull that changed nothing, or a repo whose first commit this is: either
+    // way there is no range to walk, and `git log` must not be asked for one.
+    let commits = match (&before, &after) {
+        (Some(from), Some(to)) if from != to => git_log(
+            cwd,
+            Some(PULL_REVIEW_LIMIT),
+            None,
+            Some(false),
+            Some(LogFilter {
+                range: Some(LogRange {
+                    from: from.clone(),
+                    to: to.clone(),
+                }),
+                ..LogFilter::default()
+            }),
+        )
+        .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    Ok(PullOutcome {
+        output,
+        before,
+        after,
+        commits,
+    })
+}
+
+/// The sha HEAD points at, or None on a repo without commits.
+fn head_sha(cwd: &str) -> Option<String> {
+    let sha = git(cwd, &["rev-parse", "HEAD"]).ok()?;
+    let sha = sha.trim();
+    (!sha.is_empty()).then(|| sha.to_string())
 }
 
 /// The remote to push a new branch to: `origin` when it exists, else the first

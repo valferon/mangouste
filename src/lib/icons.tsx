@@ -1,4 +1,4 @@
-import type { SVGProps } from "react";
+import type { HTMLAttributes, SVGProps } from "react";
 import type { SessionStatus } from "./types";
 
 /**
@@ -9,6 +9,10 @@ import type { SessionStatus } from "./types";
  * and a dependency-free module keeps the bundle a single JS file.
  */
 type IconProps = SVGProps<SVGSVGElement>;
+
+/** A glyph keeps its own class and takes the caller's on top, so a per-site rule
+ *  (`.recap-glyph`) can retune one placement without losing the shared one. */
+const cx = (own: string, extra?: string) => (extra ? `${own} ${extra}` : own);
 
 function Icon({ children, className, ...rest }: IconProps) {
   return (
@@ -371,26 +375,47 @@ export function MarkAllReadIcon(props: IconProps) {
 }
 
 /**
+ * The moving half of `StatusGlyph`: a rail and a bead on it. Which way the bead
+ * travels, how big it is and where the rail sits are all the stylesheet's, keyed
+ * off `data-status`, so the two live states share this one element.
+ */
+function MotionGlyph({ className, ...rest }: HTMLAttributes<HTMLSpanElement>) {
+  return (
+    <span {...rest} className={className} aria-hidden="true">
+      <span className="glyph-rail" />
+      <span className="glyph-bead" />
+    </span>
+  );
+}
+
+/**
  * Session status, one glyph per state.
  *
- * Shape carries the meaning and colour only reinforces it, so the five states
+ * Shape carries the meaning and colour only reinforces it, so the six states
  * stay apart for anyone who cannot separate the palette — and at the 13 px this
- * renders at, a silhouette is legible where a hue shift is not. The `.glyph-ring`
- * class is what the stylesheet animates for the two live states.
+ * renders at, a silhouette is legible where a hue shift is not.
+ *
+ * The two states that are still moving are built from HTML spans rather than
+ * SVG. Two reasons, and both are about being seen from across the rail. A hue
+ * on a light ground can only be so loud — a more vivid colour on paper is a
+ * lighter one, so chroma and contrast trade against each other — which leaves
+ * mass and motion as the levers that actually carry: a filled bead puts far
+ * more colour on screen than a 1.4 px stroke does. And the motion has to be a
+ * real translation, which WebKitGTK will not reliably animate on an SVG child;
+ * that is the same limitation that already makes the app rotate a whole <svg>
+ * rather than a group inside one. A bead in an HTML span animates as written.
  */
 export function StatusGlyph({ status, ...rest }: { status: SessionStatus } & IconProps) {
-  const props = { ...rest, className: "status-glyph", "data-status": status };
+  const props = { ...rest, className: cx("status-glyph", rest.className), "data-status": status };
+  // `rest` is typed for an <svg> because most states are one; the two that are
+  // not take the same caller-supplied className and nothing else.
+  const span = props as unknown as HTMLAttributes<HTMLSpanElement>;
   switch (status) {
-    // A turn is in flight: solid core, spinner arc. The stylesheet rotates the
-    // whole <svg> — WebKitGTK animates transforms on the HTML-level element
-    // reliably where it will not on an SVG child.
+    // A turn is in flight: a bead shuttling end to end along its rail, the way
+    // a scanner head sweeps. Horizontal travel, so it reads as "going" rather
+    // than as "waiting", and it is the only state that moves sideways.
     case "active":
-      return (
-        <Icon {...props}>
-          <path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2" className="glyph-ring" />
-          <circle cx="8" cy="8" r="3.2" fill="currentColor" stroke="none" />
-        </Icon>
-      );
+      return <MotionGlyph {...span} />;
     // Blocked on you. A target, because this is the one state you must act on.
     case "awaiting":
       return (
@@ -400,16 +425,12 @@ export function StatusGlyph({ status, ...rest }: { status: SessionStatus } & Ico
           <circle cx="8" cy="8" r="1.3" fill="currentColor" stroke="none" />
         </Icon>
       );
-    // Ended cleanly, but you have not looked at it since. Same silhouette as
-    // finished — the turn ended either way — with the ring that says it wants you.
+    // Ended cleanly, but you have not looked at it since: a bead bouncing on
+    // its floor, squashing where it lands. Vertical against active's horizontal,
+    // so the two live states are told apart by the axis they move on before the
+    // colour is read at all.
     case "pendingReview":
-      return (
-        <Icon {...props}>
-          <circle cx="8" cy="8" r="6.9" className="glyph-ring" />
-          <circle cx="8" cy="8" r="4.6" fill="currentColor" stroke="none" />
-          <path d="M5.9 8.2 7.4 9.7 10.2 6.5" stroke="var(--bg-elevated)" />
-        </Icon>
-      );
+      return <MotionGlyph {...span} />;
     // Ended cleanly and you have seen it.
     case "finished":
       return (
@@ -443,7 +464,7 @@ export function StatusGlyph({ status, ...rest }: { status: SessionStatus } & Ico
  * animates while it works, matching the session glyphs above.
  */
 export function SubagentGlyph({ running, ...rest }: { running: boolean } & IconProps) {
-  const props = { ...rest, className: "subagent-glyph", "data-running": running };
+  const props = { ...rest, className: cx("subagent-glyph", rest.className), "data-running": running };
   return (
     <Icon {...props}>
       {running && <circle cx="8" cy="8" r="5.6" className="glyph-ring" />}
@@ -457,7 +478,7 @@ export function SubagentGlyph({ running, ...rest }: { running: boolean } & IconP
  * an agent and not a run — it is a command line the session let go of.
  */
 export function BackgroundTaskGlyph(props: IconProps) {
-  const merged = { ...props, className: "task-glyph" };
+  const merged = { ...props, className: cx("task-glyph", props.className) };
   return (
     <Icon {...merged}>
       <path d="M3.4 4.4 6.4 8l-3 3.6" />
@@ -468,7 +489,7 @@ export function BackgroundTaskGlyph(props: IconProps) {
 
 /** A Workflow-tool run: the parent of a group of agent rows. */
 export function WorkflowGlyph(props: IconProps) {
-  const merged = { ...props, className: "workflow-glyph" };
+  const merged = { ...props, className: cx("workflow-glyph", props.className) };
   return (
     <Icon {...merged}>
       <rect x="2.2" y="2.2" width="5" height="5" rx="1.2" />
@@ -512,6 +533,29 @@ export function CollapseAllIcon(props: IconProps) {
       <path d="M2.5 8h11" />
       <path d="M5.6 4.6 8 2.2l2.4 2.4" />
       <path d="M5.6 11.4 8 13.8l2.4-2.4" />
+    </Icon>
+  );
+}
+
+/** New file: a page with a plus where its corner fold would be. */
+export function NewFileIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9.2 1.9H4.3a1 1 0 0 0-1 1v10.2a1 1 0 0 0 1 1h4.1" />
+      <path d="M9.2 1.9 12.7 5.4v2" />
+      <path d="M12 9.4v4.2" />
+      <path d="M9.9 11.5h4.2" />
+    </Icon>
+  );
+}
+
+/** New folder: the tree's own folder shape with a plus inside it. */
+export function NewFolderIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14.3 8.4V4.6a.9.9 0 0 0-.9-.9H7.3L5.8 1.9H2.6a.9.9 0 0 0-.9.9v9a.9.9 0 0 0 .9.9h5.3" />
+      <path d="M11.8 9.4v4.2" />
+      <path d="M9.7 11.5h4.2" />
     </Icon>
   );
 }

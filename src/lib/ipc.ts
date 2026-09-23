@@ -19,6 +19,7 @@ import type {
   Formatted,
   LogFilter,
   ProjectGroup,
+  PullOutcome,
   Release,
   ReplaceOutcome,
   RepoInfo,
@@ -215,8 +216,17 @@ export const claudeDetach = (chatId: string) => invoke<void>("claude_detach", { 
  */
 export const claudeKill = (chatId: string, instance?: number) =>
   invoke<void>("claude_kill", { chatId, instance });
-/** Every chat this window owns, whether or not a pane is watching it. */
+/** Every live chat in the process, each one naming the window that owns it. */
 export const claudeStatus = () => invoke<ChatStatus[]>("claude_status");
+/**
+ * Which window is running this session, or `null` if none is.
+ *
+ * Asked before opening a session from the rail: a session belongs to the window
+ * that raised it, and a click in any other window raises that one instead of
+ * putting a second pane on the same process.
+ */
+export const sessionOwner = (sessionId: string) =>
+  invoke<string | null>("session_owner", { sessionId });
 
 export const onClaudeMessage = (
   handler: (event: { chatId: string; instance: number; payload: ClaudeFrame }) => void,
@@ -355,6 +365,43 @@ export const formatText = (path: string, text: string) =>
   invoke<Formatted>("format_text", { path, text });
 export const homeDir = () => invoke<string | null>("home_dir");
 
+/* ---------- mutating the tree ---------- */
+
+/**
+ * Create an empty file. Missing parent directories are made on the way.
+ *
+ * Rejects with "already exists" rather than truncating whatever is there, so a
+ * name typed over an existing file cannot silently empty it.
+ */
+export const createFile = (path: string) => invoke<null>("create_file", { path });
+
+/** Create a directory, parents included. Rejects if the leaf name is taken. */
+export const createDir = (path: string) => invoke<null>("create_dir", { path });
+
+/**
+ * Rename or move an entry.
+ *
+ * One command for both because they are one syscall: a rename that changes the
+ * parent *is* a move. Rejects rather than overwriting the target, and falls
+ * back to copy-and-remove when the two paths are on different filesystems.
+ */
+export const renamePath = (from: string, to: string) =>
+  invoke<null>("rename_path", { from, to });
+
+/** Delete an entry, recursively for a directory. Permanent: no trash, no undo. */
+export const deletePath = (path: string) => invoke<null>("delete_path", { path });
+
+/** Copy an entry to a named target. Rejects if the target is taken. */
+export const copyPath = (from: string, to: string) => invoke<null>("copy_path", { from, to });
+
+/**
+ * Copy an entry beside itself, resolving to the path that was made.
+ *
+ * The free name is picked on the Rust side: picking it means testing what
+ * exists, and a caller that tests and then copies can lose that race.
+ */
+export const duplicatePath = (path: string) => invoke<string>("duplicate_path", { path });
+
 /* ---------- find and replace ---------- */
 
 /**
@@ -453,9 +500,14 @@ export const gitDiscard = (cwd: string, tracked: string[], untracked: string[]) 
    shows verbatim — a push rejection reads better in git's words than in ours. */
 export const gitFetch = (cwd: string, remote?: string) =>
   invoke<string>("git_fetch", { cwd, remote });
-/** Fast-forward only unless `rebase` is set, so no implicit merge commit. */
+/**
+ * Fast-forward only unless `rebase` is set, so no implicit merge commit.
+ *
+ * Resolves to git's output *and* the commits HEAD moved over, which is what
+ * lets a pull be reviewed rather than just reported.
+ */
 export const gitPull = (cwd: string, rebase = false) =>
-  invoke<string>("git_pull", { cwd, rebase });
+  invoke<PullOutcome>("git_pull", { cwd, rebase });
 export const gitPush = (cwd: string, setUpstream = false) =>
   invoke<string>("git_push", { cwd, setUpstream });
 
@@ -477,6 +529,15 @@ export const gitMerge = (cwd: string, branch: string) =>
  * ones are already taken.
  */
 export const openWindow = () => invoke<string>("open_window");
+
+/**
+ * Raise the window with this label.
+ *
+ * What a click on another window's session does: the work is already open over
+ * there, so the answer to "show me it" is that window, not a second pane onto
+ * its process.
+ */
+export const focusWindow = (label: string) => invoke<void>("focus_window", { label });
 
 /* ---------- dashboard statistics ---------- */
 

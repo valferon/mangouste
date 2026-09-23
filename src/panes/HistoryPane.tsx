@@ -6,7 +6,15 @@ import { ClearIcon, ExpandIcon, HistoryIcon, RefreshIcon } from "../lib/icons";
 import { gitBranchList, gitCommitDetail, gitLog, gitShow, gitShowFile, revealPath } from "../lib/ipc";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
-import type { BranchList, Commit, CommitDetail, CommitFile, LogFilter } from "../lib/types";
+import { collapseRefs, describeRefs, type CommitRef } from "../lib/refs";
+import type {
+  BranchList,
+  Commit,
+  CommitDetail,
+  CommitFile,
+  LogFilter,
+  LogRange,
+} from "../lib/types";
 
 interface HistoryPaneProps {
   cwd: string;
@@ -21,6 +29,18 @@ interface HistoryPaneProps {
    * make.
    */
   layout?: "sidebar" | "tab";
+  /**
+   * Show one range — `from..to` — instead of the whole repo.
+   *
+   * What a pull opens: the same list, the same graph and the same per-file
+   * patches, walking only the commits HEAD moved over. The branch picker goes
+   * with it, since the range already is the starting point, and the message,
+   * author and path boxes stay: "which of these touched the migrations" is a
+   * fair question to ask of what just arrived.
+   */
+  range?: LogRange;
+  /** One line above the list saying what the range is. Range mode only. */
+  rangeNote?: string;
   /** Open a patch in a tab of its own. */
   onShowDiff: (title: string, patch: string) => void;
   /** Open the working-tree copy of a path in an editor tab. */
@@ -52,24 +72,40 @@ const DEBOUNCE_MS = 250;
  *  drawn to it, and a row taller than its SVG would break every line in two. */
 const ROW_HEIGHT = 24;
 
-/** Horizontal pitch of one graph lane. */
-const LANE_WIDTH = 14;
+/**
+ * Horizontal pitch of one graph lane, and how many lanes get drawn.
+ *
+ * Both are per layout because both are a share of the row's width: at rail
+ * width a ten-lane graph is a third of the pane spent on lines, and the subject
+ * is what the eye is actually down here for. Beyond the cap the graph is
+ * clipped, not re-laid-out — the lane a commit is in stays the lane it is in,
+ * so scrolling does not shuffle the columns.
+ */
+const LANE_WIDTH = { sidebar: 11, tab: 14 } as const;
+const MAX_LANES = { sidebar: 6, tab: 10 } as const;
 
 /**
- * Lanes drawn before the column stops widening.
+ * Ref chips a row draws before the rest become a `+N`.
  *
- * A repo with forty concurrent branches would otherwise push the subject off
- * the right-hand side to draw lines nobody can follow anyway. Beyond this the
- * graph is clipped, not re-laid-out — the lane a commit is in stays the lane it
- * is in, so scrolling does not shuffle the columns.
+ * A commit at the tip of a branch that has been pushed carries three refs
+ * before anyone has tagged it, and at rail width three chips *are* the row.
+ * One chip, plus a count that names the others on hover, still says which
+ * commit this is.
  */
-const MAX_LANES = 10;
+const REF_CHIPS = { sidebar: 1, tab: 3 } as const;
 
 /** Changed files rendered for one commit; the rest are counted, not listed. */
 const FILE_LIMIT = 500;
 
-/** Centre of a lane, in the graph column's own coordinates. */
-const laneX = (lane: number): number => lane * LANE_WIDTH + LANE_WIDTH / 2;
+/**
+ * Centre of a lane, in the graph column's own coordinates.
+ *
+ * Lanes past the cap are drawn in the last one rather than off the edge: a row
+ * whose node fell outside the SVG used to render as a subject with no dot
+ * beside it, which reads as a bug rather than as a graph that ran out of room.
+ */
+const laneX = (lane: number, pitch: number, cap: number): number =>
+  Math.min(lane, cap - 1) * pitch + pitch / 2;
 
 /**
  * One edge as an SVG path.
@@ -78,10 +114,10 @@ const laneX = (lane: number): number => lane * LANE_WIDTH + LANE_WIDTH / 2;
  * starts there. The curves are cubics with their control points on the vertical,
  * which is what makes a branch leave its parent as a bend rather than a corner.
  */
-function edgePath(edge: GraphEdge): string {
+function edgePath(edge: GraphEdge, pitch: number, cap: number): string {
   const mid = ROW_HEIGHT / 2;
-  const from = laneX(edge.from);
-  const to = laneX(edge.to);
+  const from = laneX(edge.from, pitch, cap);
+  const to = laneX(edge.to, pitch, cap);
   if (edge.kind === "pass") return `M ${from} 0 L ${to} ${ROW_HEIGHT}`;
   if (edge.kind === "in") {
     if (from === to) return `M ${from} 0 L ${to} ${mid}`;
@@ -92,8 +128,16 @@ function edgePath(edge: GraphEdge): string {
 }
 
 /** The lane column for one row: its lines, and its commit's node. */
-const GraphCell = memo(function GraphCell({ row }: { row: GraphRow }) {
-  const width = Math.min(row.lanes, MAX_LANES) * LANE_WIDTH;
+const GraphCell = memo(function GraphCell({
+  row,
+  pitch,
+  cap,
+}: {
+  row: GraphRow;
+  pitch: number;
+  cap: number;
+}) {
+  const width = Math.min(row.lanes, cap) * pitch;
   return (
     <svg
       className="graph-cell"
@@ -106,18 +150,34 @@ const GraphCell = memo(function GraphCell({ row }: { row: GraphRow }) {
         <path
           key={index}
           className="graph-edge"
-          d={edgePath(edge)}
+          d={edgePath(edge, pitch, cap)}
           style={{ stroke: `var(--graph-${edge.color + 1})` }}
         />
       ))}
       <circle
         className="graph-node"
-        cx={laneX(row.lane)}
+        cx={laneX(row.lane, pitch, cap)}
         cy={ROW_HEIGHT / 2}
-        r={3.5}
+        r={pitch < 13 ? 3 : 3.5}
         style={{ stroke: `var(--graph-${row.color + 1})` }}
       />
     </svg>
+  );
+});
+
+/**
+ * One ref, coloured by what it is.
+ *
+ * The kind is an attribute rather than a class so the stylesheet keeps the
+ * whole palette in one place: a local branch, the one that is checked out, a
+ * tag and a remote-tracking branch are four colours the theme picks, not four
+ * spellings of `ref-chip`.
+ */
+const RefChip = memo(function RefChip({ chip }: { chip: CommitRef }) {
+  return (
+    <span className="ref-chip" data-kind={chip.kind} data-head={chip.kind === "head"} title={chip.full}>
+      {chip.label}
+    </span>
   );
 });
 
@@ -185,6 +245,8 @@ function statusName(status: string): string {
 export const HistoryPane = memo(function HistoryPane({
   cwd,
   layout = "tab",
+  range,
+  rangeNote,
   onShowDiff,
   onOpenFile,
   onOpenInTab,
@@ -225,7 +287,13 @@ export const HistoryPane = memo(function HistoryPane({
     setDetail(null);
   }, [cwd]);
 
-  const query = useMemo<LogFilter>(() => ({ ...filter, branch }), [filter, branch]);
+  const query = useMemo<LogFilter>(
+    () => (range ? { ...filter, range } : { ...filter, branch }),
+    [filter, branch, range],
+  );
+
+  /** A range is its own starting point, so `--all` has nothing to add to it. */
+  const allBranches = range === undefined && branch === "";
 
   const load = useCallback(async () => {
     const id = (queryId.current += 1);
@@ -233,7 +301,7 @@ export const HistoryPane = memo(function HistoryPane({
     try {
       // `allBranches` is false when a branch is picked: the branch *is* the
       // starting point then, and `--all` would widen it straight back out.
-      const page = await gitLog(cwd, PAGE, 0, branch === "", query);
+      const page = await gitLog(cwd, PAGE, 0, allBranches, query);
       if (queryId.current !== id) return;
       setCommits(page);
       setMore(page.length === PAGE);
@@ -251,13 +319,13 @@ export const HistoryPane = memo(function HistoryPane({
     } finally {
       if (queryId.current === id) setLoading(false);
     }
-  }, [cwd, branch, query]);
+  }, [cwd, allBranches, query]);
 
   const loadMore = useCallback(async () => {
     const id = (queryId.current += 1);
     setLoading(true);
     try {
-      const page = await gitLog(cwd, PAGE, commits.length, branch === "", query);
+      const page = await gitLog(cwd, PAGE, commits.length, allBranches, query);
       if (queryId.current !== id) return;
       setCommits((current) => [...current, ...page]);
       setMore(page.length === PAGE);
@@ -266,7 +334,7 @@ export const HistoryPane = memo(function HistoryPane({
     } finally {
       if (queryId.current === id) setLoading(false);
     }
-  }, [cwd, branch, query, commits.length]);
+  }, [cwd, allBranches, query, commits.length]);
 
   /**
    * One key per distinct query. Re-reading is keyed on the key changing rather
@@ -322,9 +390,26 @@ export const HistoryPane = memo(function HistoryPane({
   }, [cwd, selected, visible]);
 
   const graph = useMemo(() => layoutGraph(commits), [commits]);
+  const pitch = LANE_WIDTH[layout];
+  const cap = MAX_LANES[layout];
   const graphWidth = useMemo(
-    () => Math.min(Math.max(1, ...graph.map((row) => row.lanes)), MAX_LANES) * LANE_WIDTH,
-    [graph],
+    () => Math.min(Math.max(1, ...graph.map((row) => row.lanes)), cap) * pitch,
+    [graph, cap, pitch],
+  );
+
+  /**
+   * The refs each commit shows, and the ones it collapses into a `+N`.
+   *
+   * Keyed off the branch list as well as the commits: until it has loaded,
+   * `origin/feat/x` and `feat/x` are told apart by a slash, and when it arrives
+   * the chips recolour to what they actually are.
+   */
+  const rowRefs = useMemo(
+    () =>
+      commits.map((commit) =>
+        collapseRefs(describeRefs(commit.refs, branches?.remote), REF_CHIPS[layout]),
+      ),
+    [commits, branches, layout],
   );
 
   const openWholePatch = useCallback(
@@ -467,24 +552,26 @@ export const HistoryPane = memo(function HistoryPane({
         {filterBox("text", "Message", "Commits whose message contains this text")}
         {filterBox("author", "Author", "Commits by an author whose name or email contains this")}
         {filterBox("path", "Path", "Commits that touched this path, relative to the repo root")}
-        <select
-          className="history-branch"
-          value={branch}
-          title="Which refs the history is walked from"
-          onChange={(event) => setBranch(event.target.value)}
-        >
-          <option value="">All branches</option>
-          {branches?.local.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-          {branches?.remote.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
+        {range === undefined && (
+          <select
+            className="history-branch"
+            value={branch}
+            title="Which refs the history is walked from"
+            onChange={(event) => setBranch(event.target.value)}
+          >
+            <option value="">All branches</option>
+            {branches?.local.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+            {branches?.remote.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        )}
         {layout === "tab" && (
           <button
             className="toggle-button icon-button"
@@ -496,6 +583,12 @@ export const HistoryPane = memo(function HistoryPane({
           </button>
         )}
       </div>
+
+      {rangeNote !== undefined && (
+        <div className="history-range" title={range && `${range.from}..${range.to}`}>
+          {rangeNote}
+        </div>
+      )}
 
       <div className="history-body">
         <div
@@ -531,16 +624,32 @@ export const HistoryPane = memo(function HistoryPane({
               title={`${commit.sha}\n${commit.author} <${commit.authorEmail}>\n${formatStamp(commit.timestamp)}`}
             >
               <span className="history-graph" style={{ width: graphWidth }}>
-                {graph[index] && <GraphCell row={graph[index]} />}
+                {graph[index] && <GraphCell row={graph[index]} pitch={pitch} cap={cap} />}
               </span>
-              {commit.refs.map((ref) => (
-                <span key={ref} className="ref-chip" data-head={ref.startsWith("HEAD")}>
-                  {ref.replace("HEAD -> ", "")}
+              {/* Chips are allowed a share of the row and no more: the subject
+                  is what distinguishes one commit from the next, and a branch
+                  name long enough to hide it hides it on every row it is on. */}
+              {(rowRefs[index]?.shown.length ?? 0) > 0 && (
+                <span className="history-refs">
+                  {rowRefs[index].shown.map((chip) => (
+                    <RefChip key={chip.full} chip={chip} />
+                  ))}
+                  {rowRefs[index].hidden.length > 0 && (
+                    <span
+                      className="ref-chip"
+                      data-kind="more"
+                      title={rowRefs[index].hidden.map((chip) => chip.full).join("\n")}
+                    >
+                      +{rowRefs[index].hidden.length}
+                    </span>
+                  )}
                 </span>
-              ))}
+              )}
               <span className="subject">{commit.subject}</span>
               {layout === "tab" && <span className="history-author">{commit.author}</span>}
-              <span className="sha">{commit.shortSha}</span>
+              {/* The hash is in the tooltip, in the detail below and in the
+                  context menu; at rail width it is 50px the subject wants. */}
+              {layout === "tab" && <span className="sha">{commit.shortSha}</span>}
               <span className="when">
                 {layout === "tab" ? formatWhen(commit.timestamp) : relativeAge(commit.timestamp)}
               </span>
@@ -562,10 +671,10 @@ export const HistoryPane = memo(function HistoryPane({
             <>
               <div className="history-detail-head">
                 <span className="sha">{detail.commit.shortSha}</span>
-                {detail.commit.refs.map((ref) => (
-                  <span key={ref} className="ref-chip" data-head={ref.startsWith("HEAD")}>
-                    {ref.replace("HEAD -> ", "")}
-                  </span>
+                {/* Every one of them here: the detail is where a row's `+2`
+                    gets read, and it has the room to wrap. */}
+                {describeRefs(detail.commit.refs, branches?.remote).map((chip) => (
+                  <RefChip key={chip.full} chip={chip} />
                 ))}
                 <button
                   className="toggle-button"

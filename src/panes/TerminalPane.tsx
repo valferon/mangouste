@@ -302,14 +302,22 @@ export function TerminalPane({
     // not always credit and, in WebKit, can raise a paste confirmation of its
     // own. Not pushed onto `disposables`: this returns void, so the old code was
     // storing `undefined` and throwing on teardown.
+    //
+    // Returning false only stops xterm from acting on the key; it leaves the
+    // browser's own default in place, and Ctrl+Shift+V is a native paste that
+    // fires a `paste` event on the same textarea xterm listens to. That is a
+    // second copy of the clipboard on its way to the shell, so the default is
+    // cancelled before returning.
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       if (matchChord(CHORD.terminalCopy, event)) {
+        event.preventDefault();
         const selection = term.getSelection();
         if (selection) void copyText(selection);
         return false;
       }
       if (matchChord(CHORD.terminalPaste, event)) {
+        event.preventDefault();
         if (deadRef.current) {
           sayDead();
           return false;

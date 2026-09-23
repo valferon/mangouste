@@ -34,13 +34,22 @@ import {
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
-import type { BranchList, FileStatus, RepoStatus } from "../lib/types";
+import type { BranchList, FileStatus, PullOutcome, RepoStatus } from "../lib/types";
 
 interface GitPaneProps {
   cwd: string;
   onShowDiff: (title: string, patch: string) => void;
   /** Open the working-tree copy of a path in an editor tab. */
   onOpenFile: (path: string) => void;
+  /**
+   * A pull landed, with the commits it brought in.
+   *
+   * The pane says *that* it pulled; what arrived is a list of commits with
+   * messages and patches, which belongs in a tab rather than in a note under
+   * the header. Optional: a host with nowhere to open one leaves it out, and
+   * the pull is unaffected.
+   */
+  onPulled?: (outcome: PullOutcome) => void;
   /**
    * Bumped when something outside this pane wrote to the repo.
    *
@@ -100,6 +109,7 @@ export const GitPane = memo(function GitPane({
   cwd,
   onShowDiff,
   onOpenFile,
+  onPulled,
   refreshToken = 0,
   visible = true,
 }: GitPaneProps) {
@@ -203,6 +213,17 @@ export const GitPane = memo(function GitPane({
     [refresh],
   );
 
+  /** Pull, then hand the review upstairs. git's output still shows as a note. */
+  const pull = useCallback(
+    () =>
+      run("pull", async () => {
+        const outcome = await gitPull(cwd);
+        onPulled?.(outcome);
+        return outcome.output;
+      }),
+    [run, cwd, onPulled],
+  );
+
   const openFileDiff = useCallback(
     async (file: FileStatus, staged: boolean) => {
       try {
@@ -288,7 +309,7 @@ export const GitPane = memo(function GitPane({
     (): MenuEntry[] => [
       { label: "Refresh", run: () => void refresh() },
       "separator",
-      { label: "Pull", disabled: busy !== null, run: () => void run("pull", () => gitPull(cwd)) },
+      { label: "Pull", disabled: busy !== null, run: () => void pull() },
       {
         label: status !== null && status.upstream === null ? "Push and Set Upstream" : "Push",
         disabled: busy !== null,
@@ -309,7 +330,7 @@ export const GitPane = memo(function GitPane({
       },
       { label: "Copy Repository Path", run: () => void copyText(cwd) },
     ],
-    [refresh, busy, cwd, status, run, openBranchMenu],
+    [refresh, busy, cwd, status, run, pull, openBranchMenu],
   );
 
   const fileMenu = useCallback(
@@ -480,7 +501,7 @@ export const GitPane = memo(function GitPane({
         <div className="actions">
           <button
             className="toggle-button icon-button"
-            onClick={() => void run("pull", () => gitPull(cwd))}
+            onClick={() => void pull()}
             disabled={busy !== null}
             title="Pull (fast-forward only)"
           >

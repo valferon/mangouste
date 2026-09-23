@@ -12,7 +12,7 @@ import {
   gitTracking,
 } from "../lib/ipc";
 import { useMenu } from "../lib/menu";
-import type { BranchList } from "../lib/types";
+import type { BranchList, PullOutcome } from "../lib/types";
 import {
   branchLabel,
   canFastForward,
@@ -93,6 +93,13 @@ interface BranchStatusProps {
   watch: boolean;
   /** Bumped after a pull, so panes reading the same repo re-read it. */
   onChanged: () => void;
+  /**
+   * A pull landed, with the commits it took on.
+   *
+   * The chip has room for a number and nothing else, so what actually arrived
+   * is handed up to be opened as a view of its own.
+   */
+  onPulled: (outcome: PullOutcome) => void;
   /** Where a failure that has no dialog to live in goes. */
   onNotice: (message: string) => void;
 }
@@ -108,7 +115,7 @@ interface BranchStatusProps {
  * terminal tab, a commit from a session, a pull in the sidebar all move these
  * numbers without telling this component, so it re-reads instead of tracking.
  */
-export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusProps) {
+export function BranchStatus({ cwd, watch, onChanged, onPulled, onNotice }: BranchStatusProps) {
   const menu = useMenu();
   const [tracking, setTracking] = useState<Tracking | null>(
     () => lastSeen.get(cwd)?.tracking ?? null,
@@ -226,12 +233,14 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
       const mine = generation.current;
       setBusy("pull");
       try {
-        await gitPull(cwd);
+        const outcome = await gitPull(cwd);
         if (mine !== generation.current) return;
         setPrompt(null);
         setPromptError(null);
         // The worktree just changed under every pane reading this repo.
         onChanged();
+        // And here is what changed it, for whoever wants to read it.
+        onPulled(outcome);
       } catch (e) {
         // git's own words: a rejected pull explains itself better than any
         // wording here would — a dirty file it would overwrite, a diverged
@@ -242,7 +251,7 @@ export function BranchStatus({ cwd, watch, onChanged, onNotice }: BranchStatusPr
       }
       await read(false);
     },
-    [cwd, onChanged, read],
+    [cwd, onChanged, onPulled, read],
   );
 
   /**

@@ -110,8 +110,20 @@
      already when the session indent was retuned without its children. */
   --rail-indent: 26px;
   --rail-step: 16px;
+  /* Width of the glyph column every row draws its status into. The fan-out
+     children sit past their parent's glyph, not under it: one step in from the
+     session indent clears the twisty, and the glyph column plus its gap clears
+     the status shape, so a child's own glyph starts where the parent's title
+     does. Without the last two terms a child lands in the parent's glyph column
+     and the nesting stops reading as nesting. */
+  --rail-glyph: 13px;
+  --rail-child: calc(var(--rail-indent) + var(--rail-step) + var(--rail-glyph) + 6px);
   --titlebar-height: 35px;
   --statusbar-height: 22px;
+  /* The colour standing for this window, set per webview in `App.tsx` from
+     `windowScope.windowTint`. The theme's own accent until a window says
+     otherwise, which is what the first window always says. */
+  --window-accent: var(--accent);
 }
 
 * {
@@ -632,6 +644,45 @@ body {
   position: relative;
 }
 
+/* The input row a create or a rename types into. Sized to the row it replaces
+   so the level does not jump while the name is being typed, and the glyph slot
+   is left empty on purpose: the file's type is not known until it has a name. */
+.tree-draft {
+  padding-right: 6px;
+}
+
+.tree-draft-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--fg-bright);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: calc(var(--row-height) - 6px);
+  outline: none;
+}
+
+/* A cut entry stays in place until the paste lands, so it has to read as
+   pending rather than as an ordinary row that did nothing. */
+.tree-row[data-cut="true"] {
+  opacity: 0.55;
+}
+
+/* Where a drag would land. Drawn on the directory row and on the pane body for
+   the repo root, because those are the only two drops that go anywhere: a drop
+   on a file resolves to its parent, which already shows this. */
+.tree-row[data-drop="true"] {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.pane-body[data-drop="true"] {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
 .empty-note {
   padding: 10px;
   color: var(--fg-dim);
@@ -641,17 +692,48 @@ body {
 
 /* ---------- git ---------- */
 
+/* A ref is a label, not a paragraph: it keeps its own width down so the row it
+   sits on still has room for the subject, and says the whole name on hover.
+   The kinds are tinted apart — the checked-out branch, a local branch, a tag
+   and a remote-tracking branch are four different answers to "where am I". */
 .ref-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
+  line-height: 15px;
   padding: 0 4px;
   border-radius: 3px;
   background: var(--chip-bg);
   color: var(--chip-fg);
 }
 
+.ref-chip[data-kind="local"] {
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  color: var(--green);
+}
+
+.ref-chip[data-kind="tag"] {
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  color: var(--amber);
+}
+
+/* The count a row's remaining refs collapse into. Deliberately the quietest of
+   them: it is a note that there is more, not one more thing to read. */
+.ref-chip[data-kind="more"] {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  line-height: 13px;
+}
+
 .ref-chip[data-head="true"] {
   background: var(--chip-head-bg);
   color: var(--chip-head-fg);
+  font-weight: 600;
 }
 
 /* One letter, dim: the colour on the filename already said what changed, and a
@@ -963,6 +1045,17 @@ button.branch-chip:disabled {
   padding: 2px 4px;
 }
 
+/* What a range view is showing, said once above the list. Tinted rather than
+   loud: it is the answer to "why is this history short", not a banner. */
+.history-range {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
 /* The list scrolls, the detail scrolls, and the pane itself never does: two
    independent columns are the whole point of the layout. */
 .history-body {
@@ -998,6 +1091,9 @@ button.branch-chip:disabled {
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
+  /* Nothing spills past the row: at rail width the columns are already at
+     their minimums, and the next pixel has to be clipped somewhere. */
+  overflow: hidden;
 }
 
 .history-row:hover {
@@ -1025,9 +1121,23 @@ button.branch-chip:disabled {
   stroke-width: 2;
 }
 
+/* Chips get at most a third of the row between them. Without a cap on the
+   group, one branch tip with a long name and its remote is the entire row, and
+   the list becomes a column of labels with the commits hidden behind them. */
+.history-refs {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 4px;
+  overflow: hidden;
+  max-width: 34%;
+}
+
+/* The subject is the column the eye runs down, so it is the one thing that is
+   never squeezed to nothing: everything beside it gives way first. */
 .history-row .subject {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 80px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1053,6 +1163,7 @@ button.branch-chip:disabled {
   text-align: right;
   color: var(--fg-dim);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .history-more {
@@ -1254,14 +1365,19 @@ button.branch-chip:disabled {
 }
 
 .history-pane[data-layout="sidebar"] .history-row .when {
-  flex: 0 0 auto;
+  flex: 0 0 32px;
   font-size: 10px;
 }
 
-/* The sha is what identifies a row; at this width the subject is what reads.
-   Both stay — the author is the column that goes, in the component. */
-.history-pane[data-layout="sidebar"] .history-row .sha {
-  font-size: 11px;
+/* At rail width the subject is the only column that earns its space: the hash
+   and the author are dropped in the component, and the chips are held to a
+   quarter of the row so that a pushed branch tip still reads as a commit. */
+.history-pane[data-layout="sidebar"] .history-refs {
+  max-width: 26%;
+}
+
+.history-pane[data-layout="sidebar"] .ref-chip {
+  max-width: 76px;
 }
 
 .history-pane[data-layout="sidebar"] .history-label {
@@ -1793,6 +1909,7 @@ mark.search-new {
 
 .recap-row .recap-glyph {
   flex: 0 0 auto;
+  font-size: 12px;
   color: var(--fg-dim);
 }
 
@@ -1840,7 +1957,7 @@ mark.search-new {
   align-items: center;
   gap: 6px;
   height: var(--row-height);
-  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  padding: 0 6px 0 var(--rail-child);
   cursor: pointer;
   font-size: 11px;
   color: var(--fg-dim);
@@ -1881,7 +1998,7 @@ mark.search-new {
   align-items: center;
   gap: 6px;
   height: var(--row-height);
-  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  padding: 0 6px 0 var(--rail-child);
   cursor: pointer;
   font-size: 11px;
   color: var(--fg);
@@ -1912,7 +2029,7 @@ mark.search-new {
 
 /* Workflow agents are children of a child, so they indent again. */
 .subagent-row[data-nested="true"] {
-  padding-left: calc(var(--rail-indent) + var(--rail-step) * 2);
+  padding-left: calc(var(--rail-child) + var(--rail-step));
 }
 
 /* A backgrounded command. Same shape as an agent row, orange rather than
@@ -1922,7 +2039,7 @@ mark.search-new {
   align-items: center;
   gap: 6px;
   height: var(--row-height);
-  padding: 0 6px 0 calc(var(--rail-indent) + var(--rail-step));
+  padding: 0 6px 0 var(--rail-child);
   cursor: pointer;
   font-size: 11px;
   color: var(--fg);
@@ -1954,14 +2071,14 @@ mark.search-new {
 
 .subagent-glyph,
 .workflow-glyph {
-  flex: 0 0 auto;
-  font-size: 12px;
+  flex: 0 0 var(--rail-glyph);
+  font-size: var(--rail-glyph);
   color: var(--purple);
 }
 
 .task-glyph {
-  flex: 0 0 auto;
-  font-size: 12px;
+  flex: 0 0 var(--rail-glyph);
+  font-size: var(--rail-glyph);
   color: var(--orange);
 }
 
@@ -1976,13 +2093,24 @@ mark.search-new {
 /* Status glyphs. Colour matches the `.status-dot` mapping used elsewhere, so the
    same state reads the same in the status panel and in quick-open. */
 .status-glyph {
-  flex: 0 0 auto;
-  font-size: 13px;
+  flex: 0 0 var(--rail-glyph);
+  font-size: var(--rail-glyph);
   color: var(--status-idle);
 }
 
 .status-glyph[data-status="active"] {
   color: var(--green);
+}
+
+/* The two live states are a rail and a bead rather than a drawing, so they need
+   a box to position inside. `1em` keeps them exactly the size of the five SVG
+   glyphs they sit in a column with. */
+.status-glyph[data-status="active"],
+.status-glyph[data-status="pendingReview"] {
+  position: relative;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
 }
 
 /* Blocked on you: the extension's charts.blue radar ping. */
@@ -1993,10 +2121,6 @@ mark.search-new {
 /* Done but unseen — charts.yellow, and the only quiet-turn state that moves. */
 .status-glyph[data-status="pendingReview"] {
   color: var(--amber);
-}
-
-.status-glyph[data-status="pendingReview"] .glyph-ring {
-  animation: glyph-ring 1.2s ease-in-out infinite;
 }
 
 /* Seen and done: grey, so the reviewed tail stays quiet... */
@@ -2015,29 +2139,101 @@ mark.search-new {
   color: var(--orange);
 }
 
-/* Only the two states that are still moving animate; five blinking glyphs is
-   noise, not signal. Opacity is the animated property because WebKitGTK will
-   not reliably animate `r` or a transform on an SVG child. */
+/* Awaiting is the one drawn state that still moves; the three settled ones hold
+   still, because five animated glyphs is noise rather than signal. Opacity is
+   what its ring animates — WebKitGTK will not reliably animate `r` or a
+   transform on an SVG child, which is why the two busiest states are not SVG
+   at all. */
 .status-glyph .glyph-ring {
   opacity: 0.3;
 }
 
-/* Active spins: continuous rotation reads as "working" from across the rail,
-   the way the reference extension's loading~spin icon does. The rotation is on
-   the <svg> itself — WebKitGTK animates the HTML-level element reliably where
-   it will not animate a transform on an SVG child. The arc stays near-opaque:
-   motion carries the signal, not a blink. */
-.status-glyph[data-status="active"] {
-  animation: glyph-spin 1.2s linear infinite;
+/* The path the bead runs on. Dim enough to be the ground and not the signal,
+   but present: it is what makes a bead at one end read as mid-travel rather
+   than as a dot that happens to be off-centre. */
+.glyph-rail {
+  position: absolute;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.22;
 }
 
-.status-glyph[data-status="active"] .glyph-ring {
-  opacity: 0.9;
+/* Mass is the point. A filled bead with a halo of its own colour puts several
+   times the pigment of a 1.4px stroke on screen, which is what makes these two
+   states carry on a light theme where the hue alone cannot get louder. */
+.glyph-bead {
+  position: absolute;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent);
 }
 
-@keyframes glyph-spin {
+/* Active shuttles: the bead runs end to end along a horizontal rail and back.
+   Sideways travel is what says "going somewhere" — a spinner says the same
+   thing, but every spinner in every app says it, and this one has to win a
+   glance against forty quiet rows. `alternate` is the reversal, so the ease
+   lands at both ends and the bead decelerates into each wall. */
+.status-glyph[data-status="active"] .glyph-rail {
+  left: 0;
+  right: 0;
+  top: calc(50% - 1px);
+  height: 2px;
+}
+
+.status-glyph[data-status="active"] .glyph-bead {
+  left: 0;
+  top: calc(50% - 3px);
+  width: 6px;
+  height: 6px;
+  animation: glyph-shuttle 1.05s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
+}
+
+@keyframes glyph-shuttle {
   to {
-    transform: rotate(360deg);
+    transform: translateX(calc(1em - 6px));
+  }
+}
+
+/* Pending review bounces: same bead, vertical. The axis is the tell — you know
+   which of the two live states a row is in before the colour resolves. The
+   squash at the floor is what makes it a bounce and not a hover; the timing
+   function is split across the two halves so it falls fast and rises slow,
+   which is the only way a ball reads as having weight. */
+.status-glyph[data-status="pendingReview"] .glyph-rail {
+  left: 1px;
+  right: 1px;
+  bottom: 0;
+  height: 2px;
+}
+
+.status-glyph[data-status="pendingReview"] .glyph-bead {
+  left: calc(50% - 3.5px);
+  bottom: 2px;
+  width: 7px;
+  height: 7px;
+  transform-origin: 50% 100%;
+  animation: glyph-bounce 0.8s infinite;
+}
+
+@keyframes glyph-bounce {
+  0% {
+    transform: translateY(0) scale(1.15, 0.8);
+    animation-timing-function: ease-out;
+  }
+  10% {
+    transform: translateY(0) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.4);
+  }
+  50% {
+    transform: translateY(calc(9px - 1em)) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0.6, 0.67, 1);
+  }
+  90% {
+    transform: translateY(0) scale(1, 1);
+    animation-timing-function: ease-in;
+  }
+  100% {
+    transform: translateY(0) scale(1.15, 0.8);
   }
 }
 
@@ -2106,6 +2302,18 @@ mark.search-new {
   background: var(--amber);
 }
 
+/* A session another window is running, in that window's colour. A square, not
+   a circle: the round dot beside it already means "unread", and two dots one
+   pixel apart saying different things is how a rail stops being readable.
+   Its colour is set inline, since it names a window rather than a state. */
+.window-dot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+
 /* Repo header glyphs sit at the same weight as its label. */
 .repo-row > .icon {
   flex: 0 0 auto;
@@ -2170,9 +2378,15 @@ mark.search-new {
     opacity: 0.6;
   }
 
-  .status-glyph[data-status="active"],
-  .status-glyph[data-status="awaiting"] {
+  /* Parked, not hidden: the bead stops where the shape still tells the states
+     apart — mid-rail for active, on the floor for pending review — so the axis
+     keeps doing its work with the motion switched off. */
+  .status-glyph .glyph-bead {
     animation: none;
+  }
+
+  .status-glyph[data-status="active"] .glyph-bead {
+    transform: translateX(calc(0.5em - 3px));
   }
 
   .status-dot[data-status="active"] {
@@ -3141,9 +3355,23 @@ select {
   align-items: center;
   gap: 14px;
   padding: 0 10px;
-  background: var(--accent);
+  /* Painted in this window's colour rather than the theme's accent: with two
+     windows open, the bar is what says which one you are typing into. Identical
+     to the accent in the first window, so nothing changes for one. */
+  background: var(--window-accent);
   color: var(--accent-fg);
   font-size: 11px;
+}
+
+/* Which window this is, named beside the colour that stands for it. Drawn only
+   past the first: the window that has always been there needs no label. */
+.status-window {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent-fg) 22%, transparent);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .statusbar .spacer {
@@ -6095,4 +6323,45 @@ select {
   flex: 0 0 auto;
   color: var(--fg-dim);
   font-style: italic;
+}
+
+/* ---------- session notices ---------- */
+
+/*
+ * What the pane did to its own process: a mode or model change, and whether the
+ * live session took it. Quieter than a turn result — it is not part of the
+ * conversation — but it sits on the same rail, because "when" is half of what
+ * makes it readable.
+ */
+.chat-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* Amber, like the superseded turn: the pick is not lost, it is just not live. */
+.chat-notice[data-tone="warn"] {
+  background: color-mix(in srgb, var(--amber) 10%, var(--bg-elevated));
+  color: color-mix(in srgb, var(--amber) 70%, var(--fg));
+}
+
+.chat-notice-text {
+  min-width: 0;
+}
+
+.chat-notice-action {
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.chat-notice-action:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
