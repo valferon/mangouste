@@ -1389,6 +1389,12 @@ function Workbench() {
     setActiveTab(id);
   }, []);
 
+  /** Stable, so the memoised GitPane is not re-rendered by every Workbench render. */
+  const pulledHere = useCallback(
+    (outcome: PullOutcome) => openPullReview(activeRepo, outcome),
+    [activeRepo, openPullReview],
+  );
+
   /**
    * Watch what one session is doing to the code.
    *
@@ -2437,7 +2443,7 @@ function Workbench() {
                   visible={sidebarView === "git"}
                   onShowDiff={showDiffHere}
                   onOpenFile={openFileHere}
-                  onPulled={(outcome) => openPullReview(activeRepo, outcome)}
+                  onPulled={pulledHere}
                 />
               </PaneBoundary>
             )}
@@ -2976,7 +2982,7 @@ function Workbench() {
           cwd={activeRepo}
           watch={upstreamWatch}
           onChanged={bumpGitRefresh}
-          onPulled={(outcome) => openPullReview(activeRepo, outcome)}
+          onPulled={pulledHere}
           onNotice={setSystemMessage}
         />
         {/* Which window this is, drawn only past the first: the colour of the

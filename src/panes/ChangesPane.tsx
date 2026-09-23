@@ -164,13 +164,12 @@ export default function ChangesPane({ cwd, file, seenAtMs, visible }: ChangesPan
       setNow(Date.now());
       void load();
     }, POLL_MS);
-    let unlisten: (() => void) | null = null;
-    void onSessionsChanged(() => void load()).then((off) => {
-      unlisten = off;
-    });
+    // Kept as the promise: a cleanup that runs before it resolves (a tab switch
+    // flips `visible`) would otherwise find nothing to call and leak the listener.
+    const unlisten = onSessionsChanged(() => void load());
     return () => {
       window.clearInterval(timer);
-      unlisten?.();
+      void unlisten.then((off) => off());
     };
   }, [load, visible]);
 

@@ -128,6 +128,10 @@ export const GitPane = memo(function GitPane({
   const [branches, setBranches] = useState<BranchList | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
 
+  /** The repo on screen now, for async work started under an earlier one. */
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
+
   /** Bumped per refresh, so a slow scan for the previous cwd is dropped. */
   const refreshGeneration = useRef(0);
 
@@ -197,20 +201,24 @@ export const GitPane = memo(function GitPane({
    */
   const run = useCallback(
     async (label: string, action: () => Promise<string | void>) => {
+      const started = cwd;
       setBusy(label);
       setError(null);
       setNote(null);
       try {
         const output = await action();
+        // A write that lands after a repo switch says nothing about this repo.
+        if (cwdRef.current !== started) return;
         if (typeof output === "string" && output.trim()) setNote(output.trim());
       } catch (e) {
-        setError(String(e));
+        if (cwdRef.current === started) setError(String(e));
       } finally {
         setBusy(null);
-        await refresh();
+        // `refresh` here is bound to `started`; the new repo reads its own.
+        if (cwdRef.current === started) await refresh();
       }
     },
-    [refresh],
+    [cwd, refresh],
   );
 
   /** Pull, then hand the review upstairs. git's output still shows as a note. */
@@ -271,7 +279,8 @@ export const GitPane = memo(function GitPane({
       const output = await gitCommit(cwd, text);
       // Only clear the draft once git accepted it, so a rejected commit
       // (a failing hook, an empty identity) does not lose what was typed.
-      setMessage("");
+      // And only this repo's draft: one typed after a switch is someone else's.
+      if (cwdRef.current === cwd) setMessage("");
       return output;
     });
   };
@@ -283,9 +292,14 @@ export const GitPane = memo(function GitPane({
     setBranchFilter("");
     setBranchMode(mode);
     // Refetched per open: a fetch or someone else's push can have moved things.
-    void gitBranchList(cwd)
-      .then(setBranches)
-      .catch((e) => setError(String(e)));
+    const asked = cwd;
+    void gitBranchList(asked)
+      .then((next) => {
+        if (cwdRef.current === asked) setBranches(next);
+      })
+      .catch((e) => {
+        if (cwdRef.current === asked) setError(String(e));
+      });
   };
 
   const branchRows = useMemo(() => {

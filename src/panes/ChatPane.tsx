@@ -353,6 +353,13 @@ interface AnchoredView {
  */
 const MAX_ITEMS = 1500;
 
+/**
+ * Live tool results kept per pane. Twice the row cap: results outlive the rows
+ * they belong to once `items` is trimmed, and without a bound of their own a
+ * long unattended session held every file read and bash dump it ever saw.
+ */
+const MAX_TOOL_RESULTS = MAX_ITEMS * 2;
+
 /** Scroll is pinned to the bottom while the user is within this many pixels of it. */
 const STICKY_THRESHOLD_PX = 120;
 
@@ -393,6 +400,26 @@ function toolResultText(content: unknown): string {
       .join("\n");
   }
   return content === undefined ? "" : JSON.stringify(content, null, 2);
+}
+
+type ToolResults = Record<string, { text: string; isError: boolean }>;
+
+/**
+ * Fold live results into the map, dropping the oldest past `MAX_TOOL_RESULTS`.
+ * Insertion order is age order here: tool ids are never integer-like keys.
+ */
+function mergeToolResults(current: ToolResults, results: ToolResultBlock[]): ToolResults {
+  const next = { ...current };
+  for (const result of results) {
+    next[result.tool_use_id] = {
+      text: toolResultText(result.content),
+      isError: Boolean(result.is_error),
+    };
+  }
+  const keys = Object.keys(next);
+  if (keys.length <= MAX_TOOL_RESULTS) return next;
+  for (const key of keys.slice(0, keys.length - MAX_TOOL_RESULTS)) delete next[key];
+  return next;
 }
 
 /**
@@ -2544,16 +2571,7 @@ export const ChatPane = memo(function ChatPane({
           // the main thread's tool had returned because someone else's did.
           if (typeof frame.parent_tool_use_id === "string") {
             if (results.length > 0) {
-              setToolResults((current) => {
-                const next = { ...current };
-                for (const result of results) {
-                  next[result.tool_use_id] = {
-                    text: toolResultText(result.content),
-                    isError: Boolean(result.is_error),
-                  };
-                }
-                return next;
-              });
+              setToolResults((current) => mergeToolResults(current, results));
             }
             return;
           }
@@ -2561,16 +2579,7 @@ export const ChatPane = memo(function ChatPane({
             setPhase("receiving");
             setPendingTool(null);
             setToolActivity(null);
-            setToolResults((current) => {
-              const next = { ...current };
-              for (const result of results) {
-                next[result.tool_use_id] = {
-                  text: toolResultText(result.content),
-                  isError: Boolean(result.is_error),
-                };
-              }
-              return next;
-            });
+            setToolResults((current) => mergeToolResults(current, results));
           }
           return;
         }

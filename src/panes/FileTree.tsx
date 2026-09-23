@@ -300,7 +300,10 @@ export const FileTree = memo(function FileTree({
       Object.fromEntries(
         Object.entries(current).map(([key, entries]) => [
           moved(key),
-          entries.map((entry) => ({ ...entry, path: moved(entry.path) })),
+          entries.map((entry) => {
+            const path = moved(entry.path);
+            return path === entry.path ? entry : { ...entry, path, name: baseName(path) };
+          }),
         ]),
       ),
     );
@@ -635,12 +638,15 @@ export const FileTree = memo(function FileTree({
 
   const renderLevel = (path: string, depth: number): React.ReactNode => {
     const entries = children[path];
-    if (!entries) return null;
     const creating = draft && draft.target === null && draft.dir === path;
+    // The input row draws even before the listing lands: a create into a
+    // directory that fails to list would otherwise hold a draft with no row to
+    // type into, blur or escape.
+    if (!entries && !creating) return null;
     return (
       <>
         {creating && renderDraft(depth)}
-        {entries.map((entry) => {
+        {(entries ?? []).map((entry) => {
           const isOpen = expanded.has(entry.path);
           const { Icon, tone } = fileGlyph(entry.name, entry.isDir, isOpen);
           if (draft?.target === entry.path) return <div key={entry.path}>{renderDraft(depth)}</div>;
