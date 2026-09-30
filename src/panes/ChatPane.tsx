@@ -92,6 +92,14 @@ import {
   subscribeChatTimes,
   type ChatStamp,
 } from "../lib/chatTimes";
+import {
+  COMPOSER_DEFAULT,
+  composerHeight,
+  resetComposerHeight,
+  resizeComposer,
+  subscribeComposerHeight,
+} from "../lib/composerHeight";
+import { Resizer } from "../layout/Split";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -1791,6 +1799,15 @@ export const ChatPane = memo(function ChatPane({
   // not keep stamping after the tab in front turned stamps off.
   useSyncExternalStore(subscribeChatTimes, chatTimesVersion, chatTimesVersion);
   const timesOn = chatTimesShown();
+  // One height for every pane, so a hidden tab is already the right size when
+  // it comes to the front.
+  const inputHeight = useSyncExternalStore(
+    subscribeComposerHeight,
+    composerHeight,
+    composerHeight,
+  );
+  // The handle is above the box, so dragging up (a negative delta) grows it.
+  const onComposerDrag = useCallback((delta: number) => resizeComposer(-delta), []);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
     {},
@@ -3340,9 +3357,13 @@ export const ChatPane = memo(function ChatPane({
       "separator",
       "editing",
       "separator",
+      inputHeight !== COMPOSER_DEFAULT && {
+        label: "Reset Composer Height",
+        run: resetComposerHeight,
+      },
       { label: "Restart Session", run: () => void restart() },
     ],
-    [alive, draft, attachments.length, running, send, interrupt, restart],
+    [alive, draft, attachments.length, running, send, interrupt, restart, inputHeight],
   );
 
   return (
@@ -3443,6 +3464,7 @@ export const ChatPane = memo(function ChatPane({
         </div>
       </div>
 
+      <Resizer orientation="horizontal" onDelta={onComposerDrag} />
       <div
         className="chat-composer"
         onContextMenu={(event) => menu.openContextMenu(event, composerMenu())}
@@ -3475,6 +3497,7 @@ export const ChatPane = memo(function ChatPane({
           <textarea
             ref={composerRef}
             value={draft}
+            style={{ height: inputHeight }}
             onPaste={(event) => void onPaste(event)}
             placeholder={
               alive

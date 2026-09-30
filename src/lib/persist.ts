@@ -78,6 +78,8 @@ export const KEYS = {
     alertTurnDone: "mangouste.alertTurnDone",
     /** How the rail orders sessions within a repo: by status, or by time. */
     sessionSort: "mangouste.sessionSort",
+    /** The chat composer's dragged height, shared by every pane and window. */
+    composerHeight: "mangouste.composerHeight",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",

@@ -2531,7 +2531,9 @@ mark.search-new {
   width: 100%;
   resize: none;
   min-height: 54px;
-  max-height: 240px;
+  /* The height itself is inline, from composerHeight.ts; this caps it against
+     the window, so a size dragged on a big monitor cannot bury the log. */
+  max-height: 60vh;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
