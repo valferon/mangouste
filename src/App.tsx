@@ -87,6 +87,7 @@ import {
   writeString,
 } from "./lib/persist";
 import { installPrimarySelectionBridge } from "./lib/primary";
+import { installUndoKeys } from "./lib/undoKeys";
 import { retirableTabs, sessionsById } from "./lib/tabRetire";
 import { SessionFlagsProvider, useFlags } from "./lib/sessionFlagsContext";
 import { continueCwd, continuePrimer, nowStamp, type Thread } from "./lib/threads";
@@ -856,6 +857,9 @@ function Workbench() {
   /* ---------- X11 selection behaviour ---------- */
 
   useEffect(() => installPrimarySelectionBridge(), []);
+
+  // WebKitGTK binds no key to a field's undo stack.
+  useEffect(() => installUndoKeys(), []);
 
   // Stamp the stored theme before first paint so there is no dark/light flash.
   useEffect(() => applyTheme(theme), [theme]);
