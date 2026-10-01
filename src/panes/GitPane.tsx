@@ -59,6 +59,15 @@ interface GitPaneProps {
    */
   refreshToken?: number;
   /**
+   * This pane moved something other views of the repo show: a commit, a push,
+   * a pull, a branch switch.
+   *
+   * The status bar's chip polls refs on its own clock, so without this it went
+   * on saying `↑1` for a push the pane had just made. The host bumps
+   * `refreshToken` in answer, which is also how this pane re-reads after one.
+   */
+  onChanged?: () => void;
+  /**
    * Whether this sidebar view is the one on screen.
    *
    * The views are switched with `display: none`, so a hidden pane is a mounted
@@ -78,6 +87,12 @@ interface GitPaneProps {
  * sidebar view on screen: hidden, it costs nothing at all.
  */
 const VISIBLE_REFRESH_MS = 10_000;
+
+/**
+ * Operations that only touch the index, which nothing outside this pane shows
+ * closely enough to be told about. Everything else moves a ref or the worktree.
+ */
+const INDEX_ONLY = new Set(["stage", "unstage"]);
 
 /** Which sections are open. Both follow VSCode and start expanded. */
 type SectionKey = "staged" | "changes";
@@ -110,6 +125,7 @@ export const GitPane = memo(function GitPane({
   onShowDiff,
   onOpenFile,
   onPulled,
+  onChanged,
   refreshToken = 0,
   visible = true,
 }: GitPaneProps) {
@@ -205,6 +221,9 @@ export const GitPane = memo(function GitPane({
       setBusy(label);
       setError(null);
       setNote(null);
+      // Told even when the action fails: a commit-and-push whose push is
+      // rejected has still committed.
+      const announce = onChanged !== undefined && !INDEX_ONLY.has(label);
       try {
         const output = await action();
         // A write that lands after a repo switch says nothing about this repo.
@@ -215,10 +234,15 @@ export const GitPane = memo(function GitPane({
       } finally {
         setBusy(null);
         // `refresh` here is bound to `started`; the new repo reads its own.
-        if (cwdRef.current === started) await refresh();
+        // An announced write re-reads through `refreshToken` instead, so the
+        // worktree is walked once rather than twice.
+        if (cwdRef.current === started) {
+          if (announce) onChanged();
+          else await refresh();
+        }
       }
     },
-    [cwd, refresh],
+    [cwd, refresh, onChanged],
   );
 
   /** Pull, then hand the review upstairs. git's output still shows as a note. */
@@ -272,21 +296,32 @@ export const GitPane = memo(function GitPane({
     void run("discard", () => gitDiscard(cwd, tracked, untracked));
   };
 
-  const commit = () => {
+  /** True when the branch has no upstream yet, so push must set one. */
+  const needsUpstream = status !== null && status.upstream === null;
+
+  const canCommit = busy === null && message.trim() !== "" && stagedFiles.length > 0;
+
+  /**
+   * Commit what is staged, and with `push`, push it straight after.
+   *
+   * The push only runs once the commit landed, and a rejected push leaves the
+   * commit in place: git's refusal shows, and the ↑ count says what is left.
+   */
+  const commit = (push = false) => {
     if (!message.trim() || stagedFiles.length === 0) return;
     const text = message;
-    void run("commit", async () => {
+    const upstream = needsUpstream;
+    void run(push ? "commit & push" : "commit", async () => {
       const output = await gitCommit(cwd, text);
       // Only clear the draft once git accepted it, so a rejected commit
       // (a failing hook, an empty identity) does not lose what was typed.
       // And only this repo's draft: one typed after a switch is someone else's.
       if (cwdRef.current === cwd) setMessage("");
-      return output;
+      if (!push) return output;
+      const pushed = await gitPush(cwd, upstream);
+      return [output, pushed].filter((part) => part?.trim()).join("\n\n");
     });
   };
-
-  /** True when the branch has no upstream yet, so push must set one. */
-  const needsUpstream = status !== null && status.upstream === null;
 
   const openBranchMenu = (mode: BranchMode) => {
     setBranchFilter("");
@@ -630,8 +665,14 @@ export const GitPane = memo(function GitPane({
             {
               label: `Commit${stagedFiles.length > 0 ? ` (${stagedFiles.length})` : ""}`,
               accelerator: CHORD.commit,
-              disabled: busy !== null || !message.trim() || stagedFiles.length === 0,
-              run: commit,
+              disabled: !canCommit,
+              run: () => commit(),
+            },
+            {
+              label: needsUpstream ? "Commit & Push (Set Upstream)" : "Commit & Push",
+              accelerator: CHORD.commitPush,
+              disabled: !canCommit,
+              run: () => commit(true),
             },
             message.trim() !== "" && {
               label: "Clear Message",
@@ -655,23 +696,41 @@ export const GitPane = memo(function GitPane({
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
               e.preventDefault();
-              commit();
+              // Shift adds the push, the chord the button beside Commit runs.
+              commit(e.shiftKey);
             }
           }}
         />
-        <button
-          className="toggle-button commit-button"
-          disabled={busy !== null || !message.trim() || stagedFiles.length === 0}
-          title={
-            stagedFiles.length === 0
-              ? "Nothing staged"
-              : `Commit ${stagedFiles.length} staged file(s)`
-          }
-          onClick={commit}
-        >
-          <CheckIcon />
-          Commit{stagedFiles.length > 0 ? ` (${stagedFiles.length})` : ""}
-        </button>
+        <div className="commit-actions">
+          <button
+            className="toggle-button commit-button"
+            disabled={!canCommit}
+            title={
+              stagedFiles.length === 0
+                ? "Nothing staged"
+                : `Commit ${stagedFiles.length} staged file(s)`
+            }
+            onClick={() => commit()}
+          >
+            <CheckIcon />
+            Commit{stagedFiles.length > 0 ? ` (${stagedFiles.length})` : ""}
+          </button>
+          <button
+            className="toggle-button commit-button"
+            disabled={!canCommit}
+            title={
+              stagedFiles.length === 0
+                ? "Nothing staged"
+                : needsUpstream
+                  ? "Commit, then push and set upstream"
+                  : "Commit, then push"
+            }
+            onClick={() => commit(true)}
+          >
+            <PushIcon />
+            Commit &amp; Push
+          </button>
+        </div>
       </div>
 
       {busy && <div className="git-note">{busy}…</div>}

@@ -236,7 +236,7 @@ const GIT_BRANCH_PATTERN: &str = r#""gitBranch":""#;
 /// commit exists": the command may have died in a pre-commit hook, and its `-m`
 /// argument is routinely a heredoc that reading would mean re-implementing a
 /// shell. The sha is the proof, and it only exists once the commit does.
-fn commit_from_line(line: &str) -> Option<RecapCommit> {
+pub(crate) fn commit_from_line(line: &str) -> Option<RecapCommit> {
     let rest = line.trim().strip_prefix('[')?;
     let close = rest.find("] ")?;
     let inside = rest.get(..close)?;

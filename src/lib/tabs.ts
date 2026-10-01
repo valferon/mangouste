@@ -38,6 +38,11 @@ export interface ChatTab {
    * is already holding a live process at a different renderer would orphan it.
    */
   surface: SessionSurface;
+  /**
+   * Text the composer opens with, for a session started to continue a thread.
+   * Never persisted: a restored tab is resuming, not starting over.
+   */
+  draft?: string;
 }
 
 /**

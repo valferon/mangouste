@@ -1042,7 +1042,7 @@ fn parse_timestamp_ms(text: &str) -> Option<u64> {
 ///
 /// Inverse of `parse_timestamp_ms`, and hand-rolled for the same reason: a date
 /// crate earns nothing here.
-fn format_timestamp_ms(ms: u64) -> String {
+pub(crate) fn format_timestamp_ms(ms: u64) -> String {
     let seconds = (ms / 1_000) as i64;
     let millis = ms % 1_000;
     let days = seconds.div_euclid(86_400);
@@ -1159,7 +1159,7 @@ pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
         .is_ok()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

@@ -25,5 +25,6 @@ export const THEME_LIST: readonly ThemeInfo[] = [
   { id: "solarized-light", label: "Solarized Light", kind: "light" },
   { id: "quiet-light", label: "Quiet Light", kind: "light" },
   { id: "monokai-sun", label: "Monokai Sun", kind: "light" },
+  { id: "light-modern-warm", label: "Light Modern Warm", kind: "light" },
   { id: "hc-light", label: "High Contrast Light", kind: "light" },
 ];

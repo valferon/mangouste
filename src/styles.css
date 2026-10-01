@@ -825,6 +825,17 @@ body {
   border-color: var(--accent);
 }
 
+.commit-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.commit-actions .commit-button {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .commit-button {
   display: flex;
   align-items: center;
@@ -1054,6 +1065,49 @@ button.branch-chip:disabled {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--fg-dim);
   font-size: 11px;
+}
+
+/* A range's net file list. Capped so a pull that touched hundreds of files
+   leaves the commits below it on screen; it scrolls on its own. */
+.history-range-files {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-range-files-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 10px;
+  border: 0;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.history-range-files-head:hover {
+  color: var(--fg);
+}
+
+.history-range-files-head .history-counts {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.history-range-files-head .twisty {
+  width: 10px;
+}
+
+.history-range-files-list {
+  max-height: 35vh;
+  overflow: auto;
+  padding: 0 6px 6px;
 }
 
 /* The list scrolls, the detail scrolls, and the pane itself never does: two
@@ -6383,4 +6437,79 @@ select {
 .chat-notice-action:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+/* ---------- threads ---------- */
+
+/* A thread is a rail group like a repo, so its header is a `.repo-row` and
+   only the differences live here. Purple, the colour the rail keeps for "you
+   decided this": a thread is your call about the work, not a state any
+   transcript reports. */
+.thread-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  color: var(--purple);
+  font-size: 11px;
+}
+
+.thread-header[data-status="blocked"] .thread-glyph {
+  color: var(--orange);
+}
+
+.thread-header[data-status="done"] .label,
+.thread-header[data-status="done"] .thread-glyph {
+  opacity: 0.55;
+}
+
+.thread-rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+}
+
+/* The note reads as a caption to the header, not as a row: dimmer, italic,
+   one line, and aligned with the session titles below it. */
+.thread-note-line {
+  height: var(--row-height);
+  line-height: var(--row-height);
+  padding: 0 8px 0 calc(var(--rail-indent) + 22px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--fg-dim);
+  cursor: text;
+}
+
+.thread-note-line:hover {
+  background: var(--bg-hover);
+}
+
+.thread-note-line[data-empty="true"] {
+  opacity: 0.6;
+}
+
+.thread-note-edit {
+  display: block;
+  box-sizing: border-box;
+  width: calc(100% - var(--rail-indent) - 30px);
+  margin: 2px 8px 4px calc(var(--rail-indent) + 22px);
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  outline: none;
+}
+
+.thread-error {
+  color: var(--red);
 }

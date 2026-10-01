@@ -33,6 +33,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 pub const EVENT_REQUEST: &str = "permission://request";
+/// An ask the CLI stopped waiting on, carrying its request id.
+pub const EVENT_WITHDRAWN: &str = "permission://withdrawn";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,15 +184,17 @@ fn ask_owner_to_show(path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-pub fn start_bridge<F, G, H>(
+pub fn start_bridge<F, W, G, H>(
     state: Arc<PermissionState>,
     path: PathBuf,
     emit: F,
+    withdrawn: W,
     owns_chat: G,
     on_show: H,
 ) -> Result<(), AlreadyRunning>
 where
     F: Fn(&PermissionRequest) + Send + Sync + 'static,
+    W: Fn(&PermissionRequest) + Send + Sync + 'static,
     G: Fn(&str) -> bool + Send + Sync + 'static,
     H: Fn() + Send + Sync + 'static,
 {
@@ -239,6 +243,7 @@ where
     *state.socket_path.lock() = Some(path.to_string_lossy().into_owned());
 
     let emit = Arc::new(emit);
+    let withdrawn: Arc<dyn Fn(&PermissionRequest) + Send + Sync> = Arc::new(withdrawn);
     let owns_chat = Arc::new(owns_chat);
     let on_show = Arc::new(on_show);
     std::thread::spawn(move || {
@@ -246,6 +251,7 @@ where
             let Ok(stream) = stream else { continue };
             let state = Arc::clone(&state);
             let emit = Arc::clone(&emit);
+            let withdrawn = Arc::clone(&withdrawn);
             let owns_chat = Arc::clone(&owns_chat);
             let on_show = Arc::clone(&on_show);
             // One thread per ask: each blocks until someone decides, and asks
@@ -254,6 +260,7 @@ where
                 handle_ask(
                     state,
                     emit.as_ref(),
+                    withdrawn,
                     owns_chat.as_ref(),
                     on_show.as_ref(),
                     stream,
@@ -267,6 +274,7 @@ where
 fn handle_ask<F, G, H>(
     state: Arc<PermissionState>,
     emit: &F,
+    withdrawn: Arc<dyn Fn(&PermissionRequest) + Send + Sync>,
     owns_chat: &G,
     on_show: &H,
     stream: UnixStream,
@@ -349,6 +357,7 @@ fn handle_ask<F, G, H>(
         .lock()
         .insert(id.clone(), (request.clone(), sender));
     emit(&request);
+    watch_for_hangup(&state, &id, &stream, withdrawn);
 
     // No timeout, and no longer unbounded in practice: the `owns_chat` gate
     // above means the asking chat is one this process holds, so the wait is
@@ -385,6 +394,41 @@ fn handle_ask<F, G, H>(
     let _ = stream.flush();
 }
 
+/// Withdraw the ask if the server hangs up before anyone decides.
+///
+/// The server sends nothing after its ask line, so any read returning is the
+/// peer going away: the CLI cancelled the call, or the server died with it.
+/// Without this the card stayed up, answerable, for a question nothing was
+/// waiting on any more. An ask already decided is gone from `pending` by the
+/// time the server closes, which is what keeps a normal finish from counting.
+fn watch_for_hangup(
+    state: &Arc<PermissionState>,
+    id: &str,
+    stream: &UnixStream,
+    withdrawn: Arc<dyn Fn(&PermissionRequest) + Send + Sync>,
+) {
+    let Ok(mut peer) = stream.try_clone() else {
+        return;
+    };
+    let state = Arc::clone(state);
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        let _ = peer.read(&mut byte);
+        let Some((request, sender)) = state.pending.lock().remove(&id) else {
+            return;
+        };
+        let _ = sender.send(PermissionDecision {
+            id,
+            behavior: "deny".into(),
+            message: Some("the ask was withdrawn before it was answered".into()),
+            updated_input: None,
+        });
+        withdrawn(&request);
+    });
+}
+
 /// Enough entropy to key a short-lived in-process map, without a uuid crate.
 ///
 /// The counter is what actually guarantees uniqueness: batched tool calls can
@@ -407,9 +451,17 @@ fn uuid_like() -> String {
 ///
 /// Entered from `main` when `--permission-server` is present, long before Tauri
 /// starts: this process is spawned by the CLI, not by the user.
+///
+/// Each `tools/call` runs on its own thread. The loop used to answer inline,
+/// which meant one ask nobody answered stalled stdin for the life of the chat:
+/// the CLI timed that call out after 30 minutes, but every later ask sat unread
+/// in the pipe, so no card ever reached a window and the turn hung on the tool.
+/// Reading stays on this thread so `notifications/cancelled` is always seen.
 pub fn run_permission_server(socket_path: String, chat_id: Option<String>) {
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+    let stdout = Arc::new(Mutex::new(std::io::stdout()));
+    // Keyed by the JSON-RPC id's text form, since ids may be numbers or strings.
+    let in_flight: Arc<Mutex<HashMap<String, UnixStream>>> = Arc::default();
 
     for line in stdin.lock().lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -452,28 +504,72 @@ pub fn run_permission_server(socket_path: String, chat_id: Option<String>) {
                     .and_then(|p| p.get("arguments"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                let verdict = ask_app(&socket_path, chat_id.as_deref(), &arguments);
-                serde_json::json!({
-                    "content": [{ "type": "text", "text": verdict.to_string() }],
-                })
+                let key = id.as_ref().map(|id| id.to_string());
+                let socket_path = socket_path.clone();
+                let chat_id = chat_id.clone();
+                let stdout = Arc::clone(&stdout);
+                let in_flight = Arc::clone(&in_flight);
+                std::thread::spawn(move || {
+                    let verdict = ask_app(&socket_path, chat_id.as_deref(), &arguments, |stream| {
+                        if let (Some(key), Ok(clone)) = (&key, stream.try_clone()) {
+                            in_flight.lock().insert(key.clone(), clone);
+                        }
+                    });
+                    if let Some(key) = &key {
+                        in_flight.lock().remove(key);
+                    }
+                    let result = serde_json::json!({
+                        "content": [{ "type": "text", "text": verdict.to_string() }],
+                    });
+                    write_response(&stdout, id, result);
+                });
+                continue;
+            }
+            // The CLI gave up on an ask (its tool timeout, or the user typed
+            // over it). Hanging up is what tells the daemon, which withdraws the
+            // card rather than leaving a prompt that can no longer be answered.
+            "notifications/cancelled" => {
+                let key = message
+                    .get("params")
+                    .and_then(|p| p.get("requestId"))
+                    .map(|id| id.to_string());
+                if let Some(stream) = key.and_then(|key| in_flight.lock().remove(&key)) {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                continue;
             }
             // Notifications carry no id and expect no reply.
             _ if id.is_none() => continue,
             _ => serde_json::json!({}),
         };
 
-        let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        if writeln!(stdout, "{response}").is_err() || stdout.flush().is_err() {
+        if !write_response(&stdout, id, result) {
             break;
         }
     }
 }
 
+/// One JSON-RPC reply, whole-line under the lock so concurrent asks never
+/// interleave on stdout. `false` once the CLI has gone away.
+fn write_response(
+    stdout: &Mutex<std::io::Stdout>,
+    id: Option<serde_json::Value>,
+    result: serde_json::Value,
+) -> bool {
+    let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    let mut stdout = stdout.lock();
+    writeln!(stdout, "{response}").is_ok() && stdout.flush().is_ok()
+}
+
 /// Forward one ask to the daemon and block for the answer.
+///
+/// `on_connected` sees the stream before the wait starts, so the caller can
+/// hang it up from another thread when the CLI cancels the ask.
 fn ask_app(
     socket_path: &str,
     chat_id: Option<&str>,
     arguments: &serde_json::Value,
+    on_connected: impl FnOnce(&UnixStream),
 ) -> serde_json::Value {
     let deny = |reason: &str| serde_json::json!({ "behavior": "deny", "message": reason });
 
@@ -496,17 +592,74 @@ fn ask_app(
         return deny("could not reach mangouste");
     }
     let _ = stream.flush();
+    on_connected(&stream);
 
     let mut reply = String::new();
-    if BufReader::new(&stream).read_line(&mut reply).is_err() {
-        return deny("no answer from mangouste");
+    match BufReader::new(&stream).read_line(&mut reply) {
+        Ok(0) | Err(_) => return deny("no answer from mangouste"),
+        Ok(_) => {}
     }
     serde_json::from_str(reply.trim()).unwrap_or_else(|_| deny("malformed answer from mangouste"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SHOW_REQUEST;
+    use super::*;
+
+    fn ask(id: &str) -> PermissionRequest {
+        PermissionRequest {
+            id: id.into(),
+            chat_id: Some("chat".into()),
+            tool_name: "AskUserQuestion".into(),
+            tool_use_id: None,
+            input: serde_json::Value::Null,
+        }
+    }
+
+    /// A server hanging up on an open ask releases the waiting bridge thread
+    /// and withdraws the card, instead of parking both until the chat dies.
+    #[test]
+    fn hangup_withdraws_a_pending_ask() {
+        let state = Arc::new(PermissionState::default());
+        let (bridge, server) = UnixStream::pair().unwrap();
+        let (sender, receiver) = channel();
+        state.pending.lock().insert("a".into(), (ask("a"), sender));
+        let (told, heard) = channel();
+        watch_for_hangup(
+            &state,
+            "a",
+            &bridge,
+            Arc::new(move |r| told.send(r.id.clone()).unwrap()),
+        );
+
+        drop(server);
+
+        let timeout = std::time::Duration::from_secs(2);
+        assert_eq!(receiver.recv_timeout(timeout).unwrap().behavior, "deny");
+        assert_eq!(heard.recv_timeout(timeout).unwrap(), "a");
+        assert!(state.pending_for("chat").is_empty());
+    }
+
+    /// The server closing after it has its answer is the normal end, not a
+    /// withdrawal: the ask is already out of `pending` by then.
+    #[test]
+    fn hangup_after_a_decision_withdraws_nothing() {
+        let state = Arc::new(PermissionState::default());
+        let (bridge, server) = UnixStream::pair().unwrap();
+        let (told, heard) = channel::<String>();
+        watch_for_hangup(
+            &state,
+            "a",
+            &bridge,
+            Arc::new(move |r| told.send(r.id.clone()).unwrap()),
+        );
+
+        drop(server);
+
+        assert!(heard
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+    }
 
     /// The upgrade story rests on this one property.
     ///

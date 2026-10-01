@@ -3,7 +3,16 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyText } from "../lib/editing";
 import { layoutGraph, type GraphEdge, type GraphRow } from "../lib/graph";
 import { ClearIcon, ExpandIcon, HistoryIcon, RefreshIcon } from "../lib/icons";
-import { gitBranchList, gitCommitDetail, gitLog, gitShow, gitShowFile, revealPath } from "../lib/ipc";
+import {
+  gitBranchList,
+  gitCommitDetail,
+  gitLog,
+  gitRangeFile,
+  gitRangeFiles,
+  gitShow,
+  gitShowFile,
+  revealPath,
+} from "../lib/ipc";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
 import { collapseRefs, describeRefs, type CommitRef } from "../lib/refs";
@@ -263,6 +272,10 @@ export const HistoryPane = memo(function HistoryPane({
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  /** Range mode: what the whole range changed, one row per file. */
+  const [rangeFiles, setRangeFiles] = useState<CommitFile[] | null>(null);
+  const [rangeFilesError, setRangeFilesError] = useState<string | null>(null);
+  const [rangeFilesOpen, setRangeFilesOpen] = useState(true);
 
   /** What the boxes hold, and — one debounce later — what git was asked. */
   const [draft, setDraft] = useState<LogFilter>({});
@@ -365,6 +378,40 @@ export const HistoryPane = memo(function HistoryPane({
     };
   }, [cwd, visible, refreshToken, reloadToken]);
 
+  // A range's net file list is one `git diff`, read when the range is shown.
+  // Keyed on the two ends rather than the object, which the caller rebuilds.
+  const rangeFrom = range?.from;
+  const rangeTo = range?.to;
+  useEffect(() => {
+    if (rangeFrom === undefined || rangeTo === undefined) {
+      setRangeFiles(null);
+      return;
+    }
+    if (!visible) return;
+    let live = true;
+    setRangeFilesError(null);
+    gitRangeFiles(cwd, { from: rangeFrom, to: rangeTo })
+      .then((files) => live && setRangeFiles(files))
+      .catch((e) => {
+        if (!live) return;
+        setRangeFiles(null);
+        setRangeFilesError(String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [cwd, rangeFrom, rangeTo, visible, refreshToken, reloadToken]);
+
+  const rangeTotals = useMemo(() => {
+    let additions = 0;
+    let deletions = 0;
+    for (const file of rangeFiles ?? []) {
+      additions += file.additions ?? 0;
+      deletions += file.deletions ?? 0;
+    }
+    return { additions, deletions };
+  }, [rangeFiles]);
+
   // The detail is a second git call, so it follows the selection rather than
   // riding along with the log: a page of 200 commits would otherwise be 200
   // `git show`s to render a list nobody has clicked in yet.
@@ -433,6 +480,26 @@ export const HistoryPane = memo(function HistoryPane({
       }
     },
     [cwd, onShowDiff],
+  );
+
+  /** A file's net patch across the whole range, named by both ends. */
+  const openRangePatch = useCallback(
+    async (file: CommitFile) => {
+      if (rangeFrom === undefined || rangeTo === undefined) return;
+      const title = `${rangeFrom.slice(0, 7)}..${rangeTo.slice(0, 7)} ${file.path}`;
+      try {
+        const patch = await gitRangeFile(
+          cwd,
+          { from: rangeFrom, to: rangeTo },
+          file.path,
+          file.originalPath,
+        );
+        onShowDiff(title, patch || `${file.path}\n\n(no textual diff)`);
+      } catch (e) {
+        onShowDiff(title, String(e));
+      }
+    },
+    [cwd, rangeFrom, rangeTo, onShowDiff],
   );
 
   /** Move the selection by `step` rows, keeping the new one in view. */
@@ -516,6 +583,34 @@ export const HistoryPane = memo(function HistoryPane({
     </label>
   );
 
+  /** One changed file, the same row in a commit's detail and a range's summary. */
+  const fileRow = (file: CommitFile, open: () => void) => (
+    <div
+      key={`${file.status}:${file.path}`}
+      className="history-file"
+      onClick={open}
+      onContextMenu={(event) => menu.openContextMenu(event, fileMenu(file))}
+      title={`${statusName(file.status)}: ${file.originalPath ? `${file.originalPath} → ` : ""}${file.path}`}
+    >
+      <span className="status-code" data-status={file.status.charAt(0)}>
+        {file.status.charAt(0)}
+      </span>
+      <span className="history-file-name">{baseName(file.path)}</span>
+      <span className="history-file-dir">{parentDir(file.path)}</span>
+      {file.additions === null ? (
+        <span className="history-binary">binary</span>
+      ) : (
+        <span className="history-counts">
+          <span className="added">+{file.additions}</span>
+          <span className="removed">−{file.deletions ?? 0}</span>
+        </span>
+      )}
+    </div>
+  );
+
+  const rangeShown = rangeFiles?.slice(0, FILE_LIMIT) ?? [];
+  const rangeHidden = (rangeFiles?.length ?? 0) - rangeShown.length;
+
   const shown = detail?.files.slice(0, FILE_LIMIT) ?? [];
   const hidden = (detail?.files.length ?? 0) - shown.length;
 
@@ -587,6 +682,51 @@ export const HistoryPane = memo(function HistoryPane({
       {rangeNote !== undefined && (
         <div className="history-range" title={range && `${range.from}..${range.to}`}>
           {rangeNote}
+        </div>
+      )}
+
+      {/* What the range changed as a whole, above the commits that did it: the
+          first question after a pull is "what is different now", and walking
+          the commits one detail at a time was the only way to answer it. */}
+      {range !== undefined && (rangeFiles !== null || rangeFilesError !== null) && (
+        <div className="history-range-files" data-open={rangeFilesOpen}>
+          <button
+            className="history-range-files-head"
+            aria-expanded={rangeFilesOpen}
+            onClick={() => setRangeFilesOpen((open) => !open)}
+          >
+            <span className="twisty">{rangeFilesOpen ? "▾" : "▸"}</span>
+            {rangeFiles !== null && (
+              <>
+                <span>
+                  {rangeFiles.length} file{rangeFiles.length === 1 ? "" : "s"} changed
+                </span>
+                <span className="history-counts">
+                  <span className="added">+{rangeTotals.additions}</span>
+                  <span className="removed">−{rangeTotals.deletions}</span>
+                </span>
+              </>
+            )}
+            {rangeFilesError !== null && <span>Files changed</span>}
+          </button>
+          {rangeFilesOpen && (
+            <div className="history-range-files-list">
+              {rangeFilesError !== null && (
+                <div className="empty-note history-error">{rangeFilesError}</div>
+              )}
+              {rangeFiles !== null && rangeFiles.length === 0 && (
+                <div className="empty-note">
+                  No net change: the commits below cancel each other out.
+                </div>
+              )}
+              {rangeShown.map((file) => fileRow(file, () => void openRangePatch(file)))}
+              {rangeHidden > 0 && (
+                <div className="empty-note">
+                  {rangeHidden} more file{rangeHidden === 1 ? "" : "s"} not listed.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -723,29 +863,11 @@ export const HistoryPane = memo(function HistoryPane({
                   Nothing, as far as the first parent is concerned.
                 </div>
               )}
-              {shown.map((file) => (
-                <div
-                  key={`${file.status}:${file.path}`}
-                  className="history-file"
-                  onClick={() => void openFilePatch(detail.commit.sha, detail.commit.shortSha, file.path)}
-                  onContextMenu={(event) => menu.openContextMenu(event, fileMenu(file))}
-                  title={`${statusName(file.status)}: ${file.originalPath ? `${file.originalPath} → ` : ""}${file.path}`}
-                >
-                  <span className="status-code" data-status={file.status.charAt(0)}>
-                    {file.status.charAt(0)}
-                  </span>
-                  <span className="history-file-name">{baseName(file.path)}</span>
-                  <span className="history-file-dir">{parentDir(file.path)}</span>
-                  {file.additions === null ? (
-                    <span className="history-binary">binary</span>
-                  ) : (
-                    <span className="history-counts">
-                      <span className="added">+{file.additions}</span>
-                      <span className="removed">−{file.deletions ?? 0}</span>
-                    </span>
-                  )}
-                </div>
-              ))}
+              {shown.map((file) =>
+                fileRow(file, () =>
+                  void openFilePatch(detail.commit.sha, detail.commit.shortSha, file.path),
+                ),
+              )}
               {hidden > 0 && (
                 <div className="empty-note">
                   {hidden} more file{hidden === 1 ? "" : "s"} not listed. Open the whole patch to

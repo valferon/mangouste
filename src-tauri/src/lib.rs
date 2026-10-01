@@ -13,8 +13,10 @@ mod recap;
 mod search;
 mod sessions;
 mod stats;
+mod threads;
 mod update;
 mod usage;
+pub mod verdict;
 mod windows;
 mod workspace;
 
@@ -188,6 +190,7 @@ pub fn run() {
         .manage(Arc::new(chats::ChatManager::default()))
         .manage(Arc::new(permission::PermissionState::default()))
         .manage(pty::PtyState::default())
+        .manage(threads::ThreadStore::default())
         .manage(sessions::SessionCache::default())
         .manage(stats::StatsCache::default())
         .manage(recap::RecapCache::default())
@@ -212,6 +215,7 @@ pub fn run() {
             let socket = chats::runtime_dir().join("permission.sock");
             trace(&format!("runtime dir resolved ({})", socket.display()));
             let handle = app.handle().clone();
+            let withdrawn_handle = app.handle().clone();
             let owner = Arc::clone(&manager);
             // Raising the window is what a second launch of a single-instance
             // app is asking for, so the running instance answers `show` by
@@ -223,6 +227,9 @@ pub fn run() {
                 socket,
                 move |request| {
                     let _ = handle.emit(permission::EVENT_REQUEST, request);
+                },
+                move |request| {
+                    let _ = withdrawn_handle.emit(permission::EVENT_WITHDRAWN, &request.id);
                 },
                 // Asks for a chat this process does not hold belong to a
                 // previous run's survivors; the bridge denies those rather than
@@ -290,6 +297,11 @@ pub fn run() {
             sessions::read_session_window,
             sessions::search_sessions,
             recap::session_recap,
+            // threads
+            threads::threads_list,
+            threads::thread_create,
+            threads::thread_save,
+            threads::thread_path,
             changes::session_changes,
             changes::session_change_patch,
             chats::rename_session,
@@ -339,6 +351,8 @@ pub fn run() {
             git::git_show,
             git::git_show_file,
             git::git_commit_detail,
+            git::git_range_files,
+            git::git_range_file,
             git::git_diff_file,
             git::git_branches,
             git::git_blame,

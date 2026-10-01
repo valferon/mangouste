@@ -89,6 +89,8 @@ import {
 import { installPrimarySelectionBridge } from "./lib/primary";
 import { retirableTabs, sessionsById } from "./lib/tabRetire";
 import { SessionFlagsProvider, useFlags } from "./lib/sessionFlagsContext";
+import { continueCwd, continuePrimer, nowStamp, type Thread } from "./lib/threads";
+import { ThreadsProvider, useThreads } from "./lib/threadsContext";
 import { SYSTEM, THEME_LIST, applyTheme, loadTheme, type Theme } from "./lib/theme";
 import {
   changesTabLabel,
@@ -270,15 +272,31 @@ function inTerminal(event: KeyboardEvent): boolean {
 export default function App() {
   return (
     <SessionFlagsProvider>
-      <MenuProvider>
-        <Workbench />
-      </MenuProvider>
+      <ThreadsProvider>
+        <MenuProvider>
+          <Workbench />
+        </MenuProvider>
+      </ThreadsProvider>
     </SessionFlagsProvider>
   );
 }
 
 function Workbench() {
   const menu = useMenu();
+  /**
+   * Read through a ref by the per-tab session-id handlers, which are cached for
+   * the life of the tab and would otherwise attach against the thread list as
+   * it was when the tab opened.
+   */
+  const threadsApi = useThreads();
+  const threadsApiRef = useRef(threadsApi);
+  threadsApiRef.current = threadsApi;
+  /**
+   * Tabs opened to continue a thread, until the CLI reports their session id.
+   * The id does not exist when the tab is made, so this is what carries "this
+   * session belongs to that thread" across the gap.
+   */
+  const threadForTabRef = useRef(new Map<string, { threadId: string; cwd: string }>());
   /** The session overlay, for the retirement sweep: a pin keeps a tab, an
       archive retires one. Read here rather than from `localStorage` so
       archiving a session closes its tab on the spot. */
@@ -1017,6 +1035,18 @@ function Workbench() {
       if (!handler) {
         handler = (sessionId: string) => {
           handleSessionId(tabId, sessionId);
+          const pending = threadForTabRef.current.get(tabId);
+          if (pending) {
+            threadForTabRef.current.delete(tabId);
+            void threadsApiRef.current.addMember(pending.threadId, {
+              id: sessionId,
+              added: nowStamp(),
+              cwd: pending.cwd,
+              // The CLI names the session after its first turn; the rail shows
+              // that name once the scan has it, and this is only the fallback.
+              title: "continued",
+            });
+          }
           if (tabId === activeTabRef.current) setLiveSessionId(sessionId);
         };
         handlers.set(tabId, handler);
@@ -1785,6 +1815,34 @@ function Workbench() {
     [openNewChatTab],
   );
 
+  /**
+   * Pick a thread back up: a new session in the repo its newest session ran in,
+   * with the thread's note and history waiting in the composer. Always the chat
+   * surface, because a pty has no composer to put the primer in — and never
+   * sent on its own: you read it, trim it, then send it.
+   */
+  const continueThread = useCallback(
+    async (thread: Thread, metaById: Map<string, SessionMeta>) => {
+      const cwd = continueCwd(thread, activeRepo);
+      if (!cwd) {
+        setSystemMessage(`No repo to continue “${thread.title}” in. Open one first.`);
+        return;
+      }
+      const root = await repoRoot(cwd);
+      setActiveRepo(root);
+      const tab: ChatTab = {
+        ...newSessionTab(root),
+        sessionId: null,
+        surface: "chat",
+        draft: continuePrimer(thread, metaById),
+      };
+      threadForTabRef.current.set(tab.id, { threadId: thread.id, cwd: root });
+      setTabs((current) => [...current, tab]);
+      setActiveTab(tab.id);
+    },
+    [activeRepo, newSessionTab],
+  );
+
   // Switching repos from the picker also detaches the chat from its old session.
   const selectRepo = useCallback(
     (path: string) => {
@@ -1866,6 +1924,10 @@ function Workbench() {
   const handleNewSession = useCallback(
     (cwd: string) => void startNewSession(cwd),
     [startNewSession],
+  );
+  const handleContinueThread = useCallback(
+    (thread: Thread, metaById: Map<string, SessionMeta>) => void continueThread(thread, metaById),
+    [continueThread],
   );
 
   const currentTab = tabs.find((tab) => tab.id === activeTab);
@@ -2603,6 +2665,7 @@ function Workbench() {
                   onShowDiff={showDiffHere}
                   onOpenFile={openFileHere}
                   onPulled={pulledHere}
+                  onChanged={bumpGitRefresh}
                 />
               </PaneBoundary>
             )}
@@ -2760,6 +2823,7 @@ function Workbench() {
                       onModel={setModelAlias}
                       feedback={feedback}
                       onFeedback={setFeedback}
+                      initialDraft={tab.draft}
                     />
                   )}
                   </PaneBoundary>
@@ -2907,6 +2971,7 @@ function Workbench() {
             onNewSession={handleNewSession}
             onOpenFile={openFileHere}
             onWatchChanges={openChanges}
+            onContinueThread={handleContinueThread}
           />
           </PaneBoundary>
         </div>
@@ -3033,6 +3098,7 @@ function Workbench() {
           onChanged={bumpGitRefresh}
           onPulled={pulledHere}
           onNotice={setSystemMessage}
+          refreshToken={gitRefresh}
         />
         {/* Which window this is, drawn only past the first: the colour of the
             bar says two windows are not the same one, and this says which. */}

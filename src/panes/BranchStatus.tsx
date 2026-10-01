@@ -102,6 +102,12 @@ interface BranchStatusProps {
   onPulled: (outcome: PullOutcome) => void;
   /** Where a failure that has no dialog to live in goes. */
   onNotice: (message: string) => void;
+  /**
+   * Bumped when something in the app wrote to the repo, such as a push from
+   * Source Control. The polls would catch it on their next tick; this makes the
+   * chip agree now rather than up to `DIRTY_MS` later.
+   */
+  refreshToken?: number;
 }
 
 /**
@@ -115,7 +121,14 @@ interface BranchStatusProps {
  * terminal tab, a commit from a session, a pull in the sidebar all move these
  * numbers without telling this component, so it re-reads instead of tracking.
  */
-export function BranchStatus({ cwd, watch, onChanged, onPulled, onNotice }: BranchStatusProps) {
+export function BranchStatus({
+  cwd,
+  watch,
+  onChanged,
+  onPulled,
+  onNotice,
+  refreshToken = 0,
+}: BranchStatusProps) {
   const menu = useMenu();
   const [tracking, setTracking] = useState<Tracking | null>(
     () => lastSeen.get(cwd)?.tracking ?? null,
@@ -329,7 +342,8 @@ export function BranchStatus({ cwd, watch, onChanged, onPulled, onNotice }: Bran
       if (document.visibilityState === "visible") void read(false);
     }, READ_MS);
     return () => window.clearInterval(timer);
-  }, [cwd, read]);
+    // `refreshToken` is a dep and nothing reads its value: a bump is the signal.
+  }, [cwd, read, refreshToken]);
 
   /*
    * The `*`, on its own slower clock.
@@ -355,7 +369,7 @@ export function BranchStatus({ cwd, watch, onChanged, onPulled, onNotice }: Bran
       if (document.visibilityState === "visible") look();
     }, DIRTY_MS);
     return () => window.clearInterval(timer);
-  }, [cwd]);
+  }, [cwd, refreshToken]);
 
   /*
    * The network half: once when the repo opens, then on a long interval.

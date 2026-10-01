@@ -72,6 +72,7 @@ const THEMES = [
   { id: "solarized-light", label: "Solarized Light", kind: "light", file: "theme-solarized-light/themes/solarized-light-color-theme.json" },
   { id: "quiet-light", label: "Quiet Light", kind: "light", file: "theme-quietlight/themes/quietlight-color-theme.json" },
   { id: "monokai-sun", label: "Monokai Sun", kind: "light", file: "themes/monokai-sun/monokai-sun-color-theme.json" },
+  { id: "light-modern-warm", label: "Light Modern Warm", kind: "light", file: "themes/light-modern-warm/light-modern-warm-color-theme.json" },
   { id: "hc-light", label: "High Contrast Light", kind: "light", file: "theme-defaults/themes/hc_light.json" },
 ];
 

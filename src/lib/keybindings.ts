@@ -59,6 +59,7 @@ const BASE_CHORD = {
   send: "Enter",
   newline: "Shift+Enter",
   commit: "Ctrl+Enter",
+  commitPush: "Ctrl+Shift+Enter",
   indent: "Tab",
   dismiss: "Escape",
   primaryPaste: "Middle-click",
@@ -213,7 +214,10 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   },
   {
     title: "Source Control",
-    rows: [{ keys: CHORD.commit, what: "Commit the staged changes" }],
+    rows: [
+      { keys: CHORD.commit, what: "Commit the staged changes" },
+      { keys: CHORD.commitPush, what: "Commit the staged changes, then push" },
+    ],
   },
   isMac()
     ? {

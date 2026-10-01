@@ -13,11 +13,13 @@ import type {
   ClaudeFrame,
   Commit,
   CommitDetail,
+  CommitFile,
   DirEntryInfo,
   FileBytes,
   FileText,
   Formatted,
   LogFilter,
+  LogRange,
   ProjectGroup,
   PullOutcome,
   Release,
@@ -469,6 +471,19 @@ export const gitShowFile = (cwd: string, sha: string, path: string) =>
 /** Message, committer and changed-file list for one commit. */
 export const gitCommitDetail = (cwd: string, sha: string) =>
   invoke<CommitDetail>("git_commit_detail", { cwd, sha });
+/**
+ * Net change per file across a range, for a pull review: each file once, with
+ * its final counts, however many of the commits touched it.
+ */
+export const gitRangeFiles = (cwd: string, range: LogRange) =>
+  invoke<CommitFile[]>("git_range_files", { cwd, range });
+/** One file's net patch across a range. `originalPath` keeps a rename a rename. */
+export const gitRangeFile = (
+  cwd: string,
+  range: LogRange,
+  path: string,
+  originalPath: string | null,
+) => invoke<string>("git_range_file", { cwd, range, path, originalPath });
 export const gitDiffFile = (cwd: string, path: string, staged = false) =>
   invoke<string>("git_diff_file", { cwd, path, staged });
 export const gitBranches = (cwd: string) => invoke<string[]>("git_branches", { cwd });
@@ -587,3 +602,7 @@ export const onPermissionRequest = (
   handler: (request: PermissionRequest) => void,
 ): Promise<UnlistenFn> =>
   listen<PermissionRequest>("permission://request", (e) => handler(e.payload));
+
+/** An ask the CLI stopped waiting on (timed out, or typed over), by request id. */
+export const onPermissionWithdrawn = (handler: (id: string) => void): Promise<UnlistenFn> =>
+  listen<string>("permission://withdrawn", (e) => handler(e.payload));

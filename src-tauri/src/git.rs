@@ -730,6 +730,64 @@ pub fn git_commit_detail(cwd: String, sha: String) -> Result<CommitDetail, Strin
     })
 }
 
+/// Net change of every file across a range: what a pull brought in, as one
+/// list rather than one per commit.
+///
+/// A two-dot `diff`, not a `log`: a file touched by five of the pulled commits
+/// is one row with its final counts, and one changed then changed back is not
+/// listed at all, which is the answer to "what did this pull change".
+#[tauri::command(async)]
+pub fn git_range_files(cwd: String, range: LogRange) -> Result<Vec<CommitFile>, String> {
+    checked_ref(&range.from, "revision")?;
+    checked_ref(&range.to, "revision")?;
+    Ok(parse_commit_files(&git(
+        &cwd,
+        &[
+            "diff",
+            "--raw",
+            "--numstat",
+            "-M",
+            "-z",
+            "--end-of-options",
+            &range.from,
+            &range.to,
+        ],
+    )?))
+}
+
+/// One file's net patch across a range, capped like `git_show`.
+///
+/// `original_path` is the pre-image of a rename: without it on the pathspec,
+/// git sees a deleted path it was not asked about and a new file, and shows
+/// the whole thing as added.
+#[tauri::command(async)]
+pub fn git_range_file(
+    cwd: String,
+    range: LogRange,
+    path: String,
+    original_path: Option<String>,
+) -> Result<String, String> {
+    checked_ref(&range.from, "revision")?;
+    checked_ref(&range.to, "revision")?;
+    if path.is_empty() {
+        return Err("empty path".to_string());
+    }
+    let mut args = vec![
+        "diff",
+        "--no-color",
+        "-M",
+        "--end-of-options",
+        &range.from,
+        &range.to,
+        "--",
+    ];
+    if let Some(original) = original_path.as_deref().filter(|p| !p.is_empty()) {
+        args.push(original);
+    }
+    args.push(&path);
+    git_patch(&cwd, &args, false)
+}
+
 /// Local and remote branches, current branch first.
 #[tauri::command(async)]
 pub fn git_branches(cwd: String) -> Result<Vec<String>, String> {
@@ -1375,6 +1433,68 @@ mod tracking_tests {
 
     fn tracking(dir: &Path) -> RepoStatus {
         git_tracking(dir.to_string_lossy().into_owned()).expect("tracking")
+    }
+
+    /// What a pull review lists: the net change per file, renames kept as
+    /// one row, and a file changed then changed back left out entirely.
+    #[test]
+    fn a_range_lists_each_file_once_with_its_net_change() {
+        let dir = repo("range-files");
+        let write = |path: &str, text: &str| std::fs::write(dir.join(path), text).expect("write");
+        write("keep.txt", "a\n");
+        write("old.txt", "one\ntwo\nthree\nfour\n");
+        write("undone.txt", "x\n");
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "--quiet", "-m", "base"]);
+        let from = run(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+        write("keep.txt", "a\nb\n");
+        write("undone.txt", "y\n");
+        run(&dir, &["mv", "old.txt", "new.txt"]);
+        run(&dir, &["commit", "--quiet", "-am", "one"]);
+        write("keep.txt", "a\nb\nc\n");
+        write("undone.txt", "x\n");
+        run(&dir, &["commit", "--quiet", "-am", "two"]);
+        let to = run(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let range = || LogRange {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        let files = git_range_files(cwd.clone(), range()).expect("range files");
+        let rows: Vec<(&str, &str, Option<&str>, Option<u32>)> = files
+            .iter()
+            .map(|f| {
+                (
+                    &f.status[..1],
+                    f.path.as_str(),
+                    f.original_path.as_deref(),
+                    f.additions,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("M", "keep.txt", None, Some(2)),
+                ("R", "new.txt", Some("old.txt"), Some(0)),
+            ]
+        );
+
+        // The rename's patch reads as a rename only with both paths asked for.
+        let patch = git_range_file(cwd, range(), "new.txt".into(), Some("old.txt".into()))
+            .expect("range patch");
+        assert!(patch.contains("rename from old.txt"), "{patch}");
+    }
+
+    #[test]
+    fn a_range_refuses_what_is_not_a_revision() {
+        let range = LogRange {
+            from: "--output=/tmp/x".into(),
+            to: "HEAD".into(),
+        };
+        assert!(git_range_files(".".into(), range).is_err());
     }
 
     #[test]

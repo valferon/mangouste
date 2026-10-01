@@ -135,13 +135,13 @@ export function TerminalPane({
   const [generation, setGeneration] = useState(0);
   const respawn = () => setGeneration((current) => current + 1);
   /**
-   * The live PTY writer, published out of the effect that owns it.
+   * The live paste path, published out of the effect that owns it.
    *
-   * The right-click Paste has to reach the same dead-shell handling every
-   * keystroke goes through, so it borrows `writePty` rather than calling
+   * The right-click Paste has to reach the same bracketed paste and dead-shell
+   * handling as the keyboard one, so it borrows `pastePty` rather than calling
    * `ptyWrite` behind its back.
    */
-  const writeRef = useRef<((text: string) => void) | null>(null);
+  const pasteRef = useRef<((text: string) => void) | null>(null);
   /**
    * The launch command, read when the shell comes up rather than depended on.
    *
@@ -235,7 +235,21 @@ export function TerminalPane({
         sayDead();
       });
     };
-    writeRef.current = writePty;
+    /**
+     * Clipboard text in, through xterm's own paste: it turns newlines into CR
+     * and wraps the text in bracketed-paste markers when the shell asked for
+     * them, so a multi-line paste lands as one edit instead of the first line
+     * running and the command it starts eating the rest. It comes back out
+     * through `onData`, and so through `writePty`.
+     */
+    const pastePty = (text: string) => {
+      if (deadRef.current) {
+        sayDead();
+        return;
+      }
+      term.paste(text);
+    };
+    pasteRef.current = pastePty;
     /** Geometry is not worth a message; a dead PTY just has no geometry. */
     const resizePty = (cols: number, rows: number) => {
       if (deadRef.current) return;
@@ -286,7 +300,7 @@ export function TerminalPane({
           return;
         }
         void primaryGet().then((text) => {
-          if (text) writePty(text);
+          if (text) pastePty(text);
         });
       };
       host.addEventListener("mousedown", onMouseDown, true);
@@ -323,7 +337,7 @@ export function TerminalPane({
           return false;
         }
         void clipboardGet().then((text) => {
-          if (text) writePty(text);
+          if (text) pastePty(text);
         });
         return false;
       }
@@ -471,7 +485,7 @@ export function TerminalPane({
       });
       term.dispose();
       termRef.current = null;
-      writeRef.current = null;
+      pasteRef.current = null;
     };
   }, [id, cwd, generation]);
 
@@ -499,7 +513,7 @@ export function TerminalPane({
           run: () =>
             void clipboardGet()
               .then((text) => {
-                if (text) writeRef.current?.(text);
+                if (text) pasteRef.current?.(text);
               })
               .catch(() => {}),
         },

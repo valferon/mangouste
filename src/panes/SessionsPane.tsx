@@ -37,11 +37,22 @@ import { markTerms } from "../lib/marks";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { recapFileLabel, recapHeadline } from "../lib/recap";
 import { useFlags } from "../lib/sessionFlagsContext";
+import {
+  threadAsMarkdown,
+  threadPath,
+  threadsOf,
+  withNote,
+  withStatus,
+  withTitle,
+  type Thread,
+} from "../lib/threads";
+import { useThreads } from "../lib/threadsContext";
 import { KEYS, readEnum, writeString } from "../lib/persist";
 import { SESSION_SORTS, sortSessions, type SessionSort } from "../lib/sessionOrder";
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import { windowLabel, windowName, windowTint } from "../lib/windowScope";
+import { ThreadHeader, ThreadNote } from "./ThreadGroup";
 import type {
   BackgroundTask,
   ProjectGroup,
@@ -75,6 +86,8 @@ interface SessionsPaneProps {
   activeCwd: string | null;
   /** Open a live diff of what this session has changed. */
   onWatchChanges: (session: SessionMeta) => void;
+  /** Open a new session primed to pick a thread back up. */
+  onContinueThread: (thread: Thread, metaById: Map<string, SessionMeta>) => void;
   /** Lifts the scanned groups so the quick-open palette can reuse them. */
   onGroups: (groups: ProjectGroup[]) => void;
   /** Open a file a recap lists, so "what was done" is one click from the work. */
@@ -428,8 +441,10 @@ export const SessionsPane = memo(function SessionsPane({
   onGroups,
   onOpenFile,
   onWatchChanges,
+  onContinueThread,
 }: SessionsPaneProps) {
   const menu = useMenu();
+  const threadsApi = useThreads();
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
   /** Only holds groups the user collapsed by hand; everything starts open. */
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -452,6 +467,10 @@ export const SessionsPane = memo(function SessionsPane({
     });
   }, []);
   const [showArchived, setShowArchived] = useState(false);
+  /** Closed threads, whose sessions otherwise go back under their repos. */
+  const [showClosedThreads, setShowClosedThreads] = useState(false);
+  /** Thread whose header is an input, from the menu's "Rename". */
+  const [renamingThread, setRenamingThread] = useState<string | null>(null);
   /**
    * Per-session override for the fan-out list.
    *
@@ -581,8 +600,59 @@ export const SessionsPane = memo(function SessionsPane({
     return count;
   }, [haystacks, terms, searching]);
 
+  const metaById = useMemo(() => {
+    const map = new Map<string, SessionMeta>();
+    for (const group of groups) for (const session of group.sessions) map.set(session.id, session);
+    return map;
+  }, [groups]);
+
+  /**
+   * Threads shown as groups of their own, above the repos. A session in one of
+   * these is listed under the thread and not under its repo: one row per
+   * session, wherever it is most useful. Closed threads let their sessions go
+   * back to their repos, and age out with them, unless asked to show.
+   */
+  const shownThreads = useMemo(
+    () => threadsApi.threads.filter((t) => t.status !== "done" || showClosedThreads),
+    [threadsApi.threads, showClosedThreads],
+  );
+
+  const threadedIds = useMemo(
+    () => new Set(shownThreads.flatMap((t) => t.sessions.map((s) => s.id))),
+    [shownThreads],
+  );
+
+  /**
+   * Each shown thread with its sessions resolved to scanned rows, newest first.
+   * The standing toggles do not apply: a thread is your statement that this
+   * work matters, which outranks "it has been quiet for a day". A query does.
+   */
+  const threadGroups = useMemo(() => {
+    return shownThreads
+      .map((thread) => {
+        const members = thread.sessions
+          .map((s) => metaById.get(s.id))
+          .filter((m): m is SessionMeta => m !== undefined)
+          .filter(
+            (m) =>
+              !searching ||
+              matchesTerms(haystacks.get(m.id) ?? "", terms) ||
+              activeHits?.has(m.id) === true,
+          )
+          .sort((a, b) => b.lastActivityMs - a.lastActivityMs);
+        return { thread, members };
+      })
+      .filter(
+        ({ thread, members }) =>
+          !searching ||
+          members.length > 0 ||
+          matchesTerms(`${thread.title} ${thread.note}`.toLowerCase(), terms),
+      );
+  }, [shownThreads, metaById, searching, haystacks, terms, activeHits]);
+
   const visible = useMemo(() => {
     const keep = (session: SessionMeta) => {
+      if (threadedIds.has(session.id)) return false;
       // A query overrides the standing toggles, archived and idle included: the
       // row hidden because it is old is exactly the row a search is for.
       if (searching) {
@@ -635,6 +705,7 @@ export const SessionsPane = memo(function SessionsPane({
     haystacks,
     activeHits,
     visited.visits,
+    threadedIds,
   ]);
 
   /** Rows the query actually produced, for the header count. */
@@ -844,6 +915,12 @@ export const SessionsPane = memo(function SessionsPane({
         run: () => setShowArchived((v) => !v),
       },
       "separator",
+      {
+        label: "Show Closed Threads",
+        checked: showClosedThreads,
+        run: () => setShowClosedThreads((v) => !v),
+      },
+      "separator",
       { label: "Order by Time", checked: sort === "recent", run: toggleSort },
       "separator",
       {
@@ -851,7 +928,47 @@ export const SessionsPane = memo(function SessionsPane({
         run: () => flags.markAllSeen(groups.flatMap((group) => group.sessions)),
       },
     ],
-    [refresh, onlyLive, showIdle, showArchived, sort, toggleSort, flags, groups],
+    [
+      refresh,
+      onlyLive,
+      showIdle,
+      showArchived,
+      showClosedThreads,
+      sort,
+      toggleSort,
+      flags,
+      groups,
+    ],
+  );
+
+  /**
+   * Thread membership, from the row: the one place a session is picked up into
+   * the long-lived work it belongs to. Closed threads are not offered as
+   * targets; reopening one is a decision made on the thread itself.
+   */
+  const threadEntries = useCallback(
+    (session: SessionMeta): MenuEntry[] => {
+      const { threads, startFromSession, addSession, removeSession } = threadsApi;
+      const member = threadsOf(threads, session.id);
+      const targets = threads.filter(
+        (t) => t.status !== "done" && !member.some((m) => m.id === t.id),
+      );
+      return [
+        { label: "Start Thread from Session", run: () => void startFromSession(session) },
+        targets.length > 0 && {
+          label: "Add to Thread",
+          items: targets.map((t) => ({
+            label: t.title,
+            run: () => void addSession(t.id, session),
+          })),
+        },
+        ...member.map((t) => ({
+          label: `Remove from “${t.title}”`,
+          run: () => void removeSession(t.id, session.id),
+        })),
+      ];
+    },
+    [threadsApi],
   );
 
   const sessionMenu = useCallback(
@@ -883,6 +1000,8 @@ export const SessionsPane = memo(function SessionsPane({
           run: () => flags.setArchived(session.id, !archived),
         },
         "separator",
+        ...threadEntries(session),
+        "separator",
         {
           label: recapOpen.has(session.id) ? "Hide What Was Done" : "What Was Done",
           run: () => toggleRecap(session),
@@ -911,6 +1030,7 @@ export const SessionsPane = memo(function SessionsPane({
       paneEntries,
       recapOpen,
       toggleRecap,
+      threadEntries,
     ],
   );
 
@@ -985,6 +1105,330 @@ export const SessionsPane = memo(function SessionsPane({
       <span className="agent-type">{task.id}</span>
     </div>
   );
+
+  /** One session's row and everything that hangs off it: hits, recap, fan-out. */
+  const renderSession = (session: SessionMeta, groupCwd: string) => {
+    const status = flags.effectiveStatus(session);
+    const hit = activeHits?.get(session.id) ?? null;
+    const showRecap = recapOpen.has(session.id);
+    const markedUnread = flags.isMarkedUnread(session.id);
+    const archived = flags.isArchived(session.id);
+    const pinned = flags.isPinned(session.id);
+    const agents = session.runningAgents ?? [];
+    const workflows = session.runningWorkflows ?? [];
+    const tasks = session.backgroundTasks ?? [];
+    const workflowAgents = workflows.reduce((n, w) => n + w.agents.length, 0);
+    const fanout = agents.length + workflowAgents;
+    // Agents and backgrounded commands expand from the same
+    // twisty: both answer what the session is still doing.
+    const working = fanout + tasks.length;
+    const workingLabel = [
+      fanout > 0 ? `${fanout} agent${fanout === 1 ? "" : "s"} writing now` : null,
+      tasks.length > 0
+        ? `${tasks.length} backgrounded command${tasks.length === 1 ? "" : "s"} running`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const showFanout = working > 0 && (fanoutOverride.get(session.id) ?? true);
+    const heat = heatLevel(session);
+    // Owned elsewhere: the row still opens, it just opens over
+    // there. Marked in that window's own colour, which is the
+    // colour of its status bar — the mark and the place it sends
+    // you are the same thing.
+    const owner = sessionOwners.get(session.id);
+    const elsewhere = owner && owner !== windowLabel() ? owner : null;
+    return (
+      <Fragment key={session.id}>
+        <div
+          className="session-row"
+          data-status={status}
+          data-selected={activeSessionId === session.id}
+          data-warm={status === "finished" && flags.isRecentlyChecked(session.id)}
+          data-unread={markedUnread || status === "pendingReview"}
+          data-archived={archived}
+          data-pinned={pinned}
+          onClick={() => openSession(session)}
+          onContextMenu={(event) =>
+            menu.openContextMenu(event, sessionMenu(session))
+          }
+          title={[
+            session.title ?? session.id,
+            session.lastPrompt,
+            hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
+            `${status} · ${shortAge(session.lastActivityMs)} ago`,
+            workingLabel || null,
+            elsewhere ? `running in ${windowName(elsewhere)} — click to raise it` : null,
+            pinned ? "pinned — kept through every filter" : null,
+            ...threadsOf(threadsApi.threads, session.id).map(
+              (t) => `thread: ${t.title}`,
+            ),
+            markedUnread ? "marked unread" : null,
+            session.gitBranch,
+            `${session.messageCount}${session.messageCountExact ? "" : "+"} msg`,
+            session.id,
+          ]
+            .filter(Boolean)
+            .join("\n")}
+        >
+          {working > 0 ? (
+            <span
+              className="twisty"
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleFanout(session.id, true);
+              }}
+              title={workingLabel}
+            >
+              {showFanout ? "▾" : "▸"}
+            </span>
+          ) : (
+            <span className="twisty" />
+          )}
+          <StatusGlyph status={status} />
+          {/* Named by title only, never the last prompt: the
+              title pipeline (derived at start, Haiku upgrade,
+              manual rename) is the single source of names. */}
+          <span className="title">
+            {session.title ?? session.id.slice(0, 8)}
+          </span>
+          {working > 0 && !showFanout && (
+            <span className="agent-count" title={workingLabel}>
+              {fanout > 0 && `${fanout}⚙`}
+              {tasks.length > 0 && `${tasks.length}❯`}
+            </span>
+          )}
+          {/* Wrapped rather than titled directly: a `title`
+              attribute on an <svg> is not a tooltip. */}
+          {pinned && (
+            <span className="pin-marker" title="Pinned to the top of this repo">
+              <PinIcon />
+            </span>
+          )}
+          {(markedUnread || status === "pendingReview") && (
+            <span
+              className="unread-dot"
+              title={markedUnread ? "Marked unread" : "Unseen since it finished"}
+            />
+          )}
+          {heat >= 0 && (
+            <span className="heat-badge" title={HEAT_TOOLTIPS[heat]}>
+              {HEAT_BADGES[heat]}
+            </span>
+          )}
+          {elsewhere && (
+            <span
+              className="window-dot"
+              style={{ background: windowTint(elsewhere) }}
+              title={`Running in ${windowName(elsewhere)} — click to raise it`}
+            />
+          )}
+          <span className="age">{shortAge(session.lastActivityMs)}</span>
+          <span className="row-actions">
+            <button
+              className="toggle-button icon-button"
+              data-active={showRecap}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleRecap(session);
+              }}
+              title={
+                showRecap
+                  ? "Hide what was done"
+                  : "What was done: files, commits, branches, fan-outs"
+              }
+            >
+              <RecapIcon />
+            </button>
+            <button
+              className="toggle-button icon-button"
+              data-active={pinned}
+              onClick={(event) => {
+                event.stopPropagation();
+                flags.setPinned(session.id, !pinned);
+              }}
+              title={pinned ? "Unpin" : "Pin to the top, through every filter"}
+            >
+              {pinned ? <UnpinIcon /> : <PinIcon />}
+            </button>
+            <button
+              className="toggle-button icon-button"
+              onClick={(event) => {
+                event.stopPropagation();
+                if (markedUnread) flags.markSeen(session);
+                else flags.markUnread(session.id);
+              }}
+              title={markedUnread ? "Mark read" : "Mark unread"}
+            >
+              {markedUnread ? <ReadToggleIcon /> : <UnreadToggleIcon />}
+            </button>
+            <button
+              className="toggle-button icon-button"
+              onClick={(event) => {
+                event.stopPropagation();
+                flags.setArchived(session.id, !archived);
+              }}
+              title={archived ? "Unarchive" : "Archive"}
+            >
+              {archived ? <UnarchiveIcon /> : <ArchiveIcon />}
+            </button>
+          </span>
+        </div>
+        {/* Why this row is here, and where in the session to
+            find it: one row per matching turn, each one a click
+            away from the conversation around it. Listing them all
+            rather than only the first is what makes a result
+            scannable — the first match is rarely the one that
+            tells you this is the session you meant. */}
+        {hit?.snippets.map((snippet, index) => (
+          <div
+            key={`${snippet.offset}-${index}`}
+            className="match-row"
+            data-role={snippet.role}
+            onClick={(event) => {
+              event.stopPropagation();
+              openSession(session, snippet.offset);
+            }}
+            title={[
+              snippet.text,
+              snippet.role === "user" ? "you said this" : "claude said this",
+              "Click to open the session at this turn.",
+              index === 0 && hit.matchCount > hit.snippets.length
+                ? `${hit.matchCount} matching turns in all`
+                : null,
+            ]
+              .filter(Boolean)
+              .join("\n\n")}
+          >
+            {/* The count sits on the first row only, but the
+                column is held on all of them so the snippets
+                stay aligned under each other. */}
+            <span className="match-count">
+              {index === 0 ? `${hit.matchCount}×` : ""}
+            </span>
+            <span className="match-text">
+              {markTerms(snippet.text, hitTerms).map((segment, at) =>
+                segment.hit ? (
+                  <mark key={at} className="search-hit">
+                    {segment.text}
+                  </mark>
+                ) : (
+                  <span key={at}>{segment.text}</span>
+                ),
+              )}
+            </span>
+          </div>
+        ))}
+        {showRecap && (
+          <RecapBlock
+            state={recaps.get(session.id)}
+            cwd={session.cwd ?? groupCwd}
+            onOpenFile={onOpenFile}
+          />
+        )}
+        {showFanout && (
+          <>
+            {tasks.map((task) => taskRow(task, session))}
+            {agents.map((agent) => agentRow(agent, session, false))}
+            {workflows.map((workflow) => (
+              <Fragment key={workflow.runId}>
+                <div
+                  className="workflow-row"
+                  onClick={() => openSession(session)}
+                  title={[
+                    `workflow ${workflow.name ?? workflow.runId}`,
+                    workflow.phase ? `phase: ${workflow.phase}` : null,
+                    `${workflow.agents.length} writing now`,
+                    workflow.agentCount
+                      ? `${workflow.agentCount} spawned over the run`
+                      : null,
+                    workflow.jsonPath,
+                  ]
+                    .filter(Boolean)
+                    .join("\n")}
+                >
+                  <WorkflowGlyph />
+                  <span className="title">{workflow.name ?? workflow.runId}</span>
+                  <span className="agent-type">
+                    {workflow.agents.length}⚡
+                    {workflow.phase ? ` ${workflow.phase}` : ""}
+                  </span>
+                </div>
+                {workflow.agents.map((agent) => agentRow(agent, session, true))}
+              </Fragment>
+            ))}
+          </>
+        )}
+      </Fragment>
+    );
+  };
+
+  const saveThread = threadsApi.save;
+
+  const threadMenu = (thread: Thread): MenuEntry[] => [
+    { header: thread.title },
+    { label: "Continue in a New Session", run: () => onContinueThread(thread, metaById) },
+    { label: "Rename", run: () => setRenamingThread(thread.id) },
+    {
+      label: collapsed.has(`thread:${thread.id}`) ? "Expand" : "Collapse",
+      run: () => toggleGroup(`thread:${thread.id}`),
+    },
+    "separator",
+    thread.status !== "open" && {
+      label: "Reopen",
+      run: () => void saveThread(withStatus(thread, "open")),
+    },
+    thread.status === "open" && {
+      label: "Mark Blocked",
+      run: () => void saveThread(withStatus(thread, "blocked")),
+    },
+    thread.status !== "done" && {
+      label: "Close Thread",
+      run: () => void saveThread(withStatus(thread, "done")),
+    },
+    "separator",
+    { label: "Copy as Markdown", run: () => void copyText(threadAsMarkdown(thread)) },
+    {
+      label: "Reveal Thread File",
+      run: () => void threadPath(thread.id).then((path) => revealPath(path)),
+    },
+    "separator",
+    ...paneEntries(),
+  ];
+
+  const renderThread = ({ thread, members }: { thread: Thread; members: SessionMeta[] }) => {
+    const key = `thread:${thread.id}`;
+    const isCollapsed = collapsed.has(key) && !searching;
+    return (
+      <div key={key}>
+        <ThreadHeader
+          thread={thread}
+          collapsed={isCollapsed}
+          badge={groupSummary(members.map((m) => flags.effectiveStatus(m)))}
+          onToggle={() => toggleGroup(key)}
+          onContinue={() => onContinueThread(thread, metaById)}
+          onContextMenu={(event) => menu.openContextMenu(event, threadMenu(thread))}
+          renaming={renamingThread === thread.id}
+          onRename={(title) => {
+            setRenamingThread(null);
+            if (title !== null) {
+              const edited = withTitle(thread, title);
+              if (edited !== thread) void saveThread(edited);
+            }
+          }}
+        />
+        {!isCollapsed && (
+          <>
+            <ThreadNote
+              note={thread.note}
+              onSave={(note) => saveThread(withNote(thread, note))}
+            />
+            {members.map((session) => renderSession(session, session.cwd ?? ""))}
+          </>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
@@ -1145,7 +1589,9 @@ export const SessionsPane = memo(function SessionsPane({
         </div>
       )}
       <div className="pane-body" ref={bodyRef}>
-        {visible.length === 0 && (
+        {threadsApi.error && <div className="empty-note thread-error">{threadsApi.error}</div>}
+        {threadGroups.map(renderThread)}
+        {visible.length === 0 && threadGroups.length === 0 && (
           <div className="empty-note">
             {searching ? "No session matches that." : "No sessions found."}
           </div>
@@ -1160,7 +1606,14 @@ export const SessionsPane = memo(function SessionsPane({
           const visitedMs = group.sessions.length === 0 ? visited.visits[group.cwd] : undefined;
           const isVisitOnly = visitedMs !== undefined;
           /** Sessions the scan found here that the toggles are holding back. */
-          const hiddenCount = isVisitOnly ? (scannedCounts.get(group.cwd) ?? 0) : 0;
+          const scannedHere = groups.find((g) => g.cwd === group.cwd)?.sessions ?? [];
+          /** Listed under a thread above rather than here, so not "hidden". */
+          const threadedCount = isVisitOnly
+            ? scannedHere.filter((s) => threadedIds.has(s.id)).length
+            : 0;
+          const hiddenCount = isVisitOnly
+            ? (scannedCounts.get(group.cwd) ?? 0) - threadedCount
+            : 0;
           return (
             <div key={group.dirName}>
               <div
@@ -1203,7 +1656,16 @@ export const SessionsPane = memo(function SessionsPane({
                 </button>
                 {isActiveRepo && <ChevronRightIcon className="repo-active-marker" />}
               </div>
-              {!isCollapsed && isVisitOnly && hiddenCount === 0 && (
+              {!isCollapsed && isVisitOnly && hiddenCount === 0 && threadedCount > 0 && (
+                <div
+                  className="repo-empty-row"
+                  onClick={() => onNewSession(group.cwd)}
+                  title="This repo's sessions are listed under their threads — click to start a new one here"
+                >
+                  {threadedCount} session{threadedCount === 1 ? "" : "s"} under threads above
+                </div>
+              )}
+              {!isCollapsed && isVisitOnly && hiddenCount === 0 && threadedCount === 0 && (
                 <div
                   className="repo-empty-row"
                   onClick={() => onNewSession(group.cwd)}
@@ -1221,259 +1683,7 @@ export const SessionsPane = memo(function SessionsPane({
                   {hiddenCount} session{hiddenCount === 1 ? "" : "s"} hidden by the filters
                 </div>
               )}
-              {!isCollapsed &&
-                group.sessions.map((session) => {
-                  const status = flags.effectiveStatus(session);
-                  const hit = activeHits?.get(session.id) ?? null;
-                  const showRecap = recapOpen.has(session.id);
-                  const markedUnread = flags.isMarkedUnread(session.id);
-                  const archived = flags.isArchived(session.id);
-                  const pinned = flags.isPinned(session.id);
-                  const agents = session.runningAgents ?? [];
-                  const workflows = session.runningWorkflows ?? [];
-                  const tasks = session.backgroundTasks ?? [];
-                  const workflowAgents = workflows.reduce((n, w) => n + w.agents.length, 0);
-                  const fanout = agents.length + workflowAgents;
-                  // Agents and backgrounded commands expand from the same
-                  // twisty: both answer what the session is still doing.
-                  const working = fanout + tasks.length;
-                  const workingLabel = [
-                    fanout > 0 ? `${fanout} agent${fanout === 1 ? "" : "s"} writing now` : null,
-                    tasks.length > 0
-                      ? `${tasks.length} backgrounded command${tasks.length === 1 ? "" : "s"} running`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ");
-                  const showFanout = working > 0 && (fanoutOverride.get(session.id) ?? true);
-                  const heat = heatLevel(session);
-                  // Owned elsewhere: the row still opens, it just opens over
-                  // there. Marked in that window's own colour, which is the
-                  // colour of its status bar — the mark and the place it sends
-                  // you are the same thing.
-                  const owner = sessionOwners.get(session.id);
-                  const elsewhere = owner && owner !== windowLabel() ? owner : null;
-                  return (
-                    <Fragment key={session.id}>
-                      <div
-                        className="session-row"
-                        data-status={status}
-                        data-selected={activeSessionId === session.id}
-                        data-warm={status === "finished" && flags.isRecentlyChecked(session.id)}
-                        data-unread={markedUnread || status === "pendingReview"}
-                        data-archived={archived}
-                        data-pinned={pinned}
-                        onClick={() => openSession(session)}
-                        onContextMenu={(event) =>
-                          menu.openContextMenu(event, sessionMenu(session))
-                        }
-                        title={[
-                          session.title ?? session.id,
-                          session.lastPrompt,
-                          hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
-                          `${status} · ${shortAge(session.lastActivityMs)} ago`,
-                          workingLabel || null,
-                          elsewhere ? `running in ${windowName(elsewhere)} — click to raise it` : null,
-                          pinned ? "pinned — kept through every filter" : null,
-                          markedUnread ? "marked unread" : null,
-                          session.gitBranch,
-                          `${session.messageCount}${session.messageCountExact ? "" : "+"} msg`,
-                          session.id,
-                        ]
-                          .filter(Boolean)
-                          .join("\n")}
-                      >
-                        {working > 0 ? (
-                          <span
-                            className="twisty"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleFanout(session.id, true);
-                            }}
-                            title={workingLabel}
-                          >
-                            {showFanout ? "▾" : "▸"}
-                          </span>
-                        ) : (
-                          <span className="twisty" />
-                        )}
-                        <StatusGlyph status={status} />
-                        {/* Named by title only, never the last prompt: the
-                            title pipeline (derived at start, Haiku upgrade,
-                            manual rename) is the single source of names. */}
-                        <span className="title">
-                          {session.title ?? session.id.slice(0, 8)}
-                        </span>
-                        {working > 0 && !showFanout && (
-                          <span className="agent-count" title={workingLabel}>
-                            {fanout > 0 && `${fanout}⚙`}
-                            {tasks.length > 0 && `${tasks.length}❯`}
-                          </span>
-                        )}
-                        {/* Wrapped rather than titled directly: a `title`
-                            attribute on an <svg> is not a tooltip. */}
-                        {pinned && (
-                          <span className="pin-marker" title="Pinned to the top of this repo">
-                            <PinIcon />
-                          </span>
-                        )}
-                        {(markedUnread || status === "pendingReview") && (
-                          <span
-                            className="unread-dot"
-                            title={markedUnread ? "Marked unread" : "Unseen since it finished"}
-                          />
-                        )}
-                        {heat >= 0 && (
-                          <span className="heat-badge" title={HEAT_TOOLTIPS[heat]}>
-                            {HEAT_BADGES[heat]}
-                          </span>
-                        )}
-                        {elsewhere && (
-                          <span
-                            className="window-dot"
-                            style={{ background: windowTint(elsewhere) }}
-                            title={`Running in ${windowName(elsewhere)} — click to raise it`}
-                          />
-                        )}
-                        <span className="age">{shortAge(session.lastActivityMs)}</span>
-                        <span className="row-actions">
-                          <button
-                            className="toggle-button icon-button"
-                            data-active={showRecap}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleRecap(session);
-                            }}
-                            title={
-                              showRecap
-                                ? "Hide what was done"
-                                : "What was done: files, commits, branches, fan-outs"
-                            }
-                          >
-                            <RecapIcon />
-                          </button>
-                          <button
-                            className="toggle-button icon-button"
-                            data-active={pinned}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              flags.setPinned(session.id, !pinned);
-                            }}
-                            title={pinned ? "Unpin" : "Pin to the top, through every filter"}
-                          >
-                            {pinned ? <UnpinIcon /> : <PinIcon />}
-                          </button>
-                          <button
-                            className="toggle-button icon-button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (markedUnread) flags.markSeen(session);
-                              else flags.markUnread(session.id);
-                            }}
-                            title={markedUnread ? "Mark read" : "Mark unread"}
-                          >
-                            {markedUnread ? <ReadToggleIcon /> : <UnreadToggleIcon />}
-                          </button>
-                          <button
-                            className="toggle-button icon-button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              flags.setArchived(session.id, !archived);
-                            }}
-                            title={archived ? "Unarchive" : "Archive"}
-                          >
-                            {archived ? <UnarchiveIcon /> : <ArchiveIcon />}
-                          </button>
-                        </span>
-                      </div>
-                      {/* Why this row is here, and where in the session to
-                          find it: one row per matching turn, each one a click
-                          away from the conversation around it. Listing them all
-                          rather than only the first is what makes a result
-                          scannable — the first match is rarely the one that
-                          tells you this is the session you meant. */}
-                      {hit?.snippets.map((snippet, index) => (
-                        <div
-                          key={`${snippet.offset}-${index}`}
-                          className="match-row"
-                          data-role={snippet.role}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openSession(session, snippet.offset);
-                          }}
-                          title={[
-                            snippet.text,
-                            snippet.role === "user" ? "you said this" : "claude said this",
-                            "Click to open the session at this turn.",
-                            index === 0 && hit.matchCount > hit.snippets.length
-                              ? `${hit.matchCount} matching turns in all`
-                              : null,
-                          ]
-                            .filter(Boolean)
-                            .join("\n\n")}
-                        >
-                          {/* The count sits on the first row only, but the
-                              column is held on all of them so the snippets
-                              stay aligned under each other. */}
-                          <span className="match-count">
-                            {index === 0 ? `${hit.matchCount}×` : ""}
-                          </span>
-                          <span className="match-text">
-                            {markTerms(snippet.text, hitTerms).map((segment, at) =>
-                              segment.hit ? (
-                                <mark key={at} className="search-hit">
-                                  {segment.text}
-                                </mark>
-                              ) : (
-                                <span key={at}>{segment.text}</span>
-                              ),
-                            )}
-                          </span>
-                        </div>
-                      ))}
-                      {showRecap && (
-                        <RecapBlock
-                          state={recaps.get(session.id)}
-                          cwd={session.cwd ?? group.cwd}
-                          onOpenFile={onOpenFile}
-                        />
-                      )}
-                      {showFanout && (
-                        <>
-                          {tasks.map((task) => taskRow(task, session))}
-                          {agents.map((agent) => agentRow(agent, session, false))}
-                          {workflows.map((workflow) => (
-                            <Fragment key={workflow.runId}>
-                              <div
-                                className="workflow-row"
-                                onClick={() => openSession(session)}
-                                title={[
-                                  `workflow ${workflow.name ?? workflow.runId}`,
-                                  workflow.phase ? `phase: ${workflow.phase}` : null,
-                                  `${workflow.agents.length} writing now`,
-                                  workflow.agentCount
-                                    ? `${workflow.agentCount} spawned over the run`
-                                    : null,
-                                  workflow.jsonPath,
-                                ]
-                                  .filter(Boolean)
-                                  .join("\n")}
-                              >
-                                <WorkflowGlyph />
-                                <span className="title">{workflow.name ?? workflow.runId}</span>
-                                <span className="agent-type">
-                                  {workflow.agents.length}⚡
-                                  {workflow.phase ? ` ${workflow.phase}` : ""}
-                                </span>
-                              </div>
-                              {workflow.agents.map((agent) => agentRow(agent, session, true))}
-                            </Fragment>
-                          ))}
-                        </>
-                      )}
-                    </Fragment>
-                  );
-                })}
+              {!isCollapsed && group.sessions.map((session) => renderSession(session, group.cwd))}
             </div>
           );
         })}

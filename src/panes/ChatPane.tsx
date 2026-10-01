@@ -14,6 +14,7 @@ import {
   claudeSendRaw,
   clipboardImage,
   onPermissionRequest,
+  onPermissionWithdrawn,
   permissionRespond,
   claudeStart,
   claudeDetach,
@@ -179,6 +180,8 @@ interface ChatPaneProps {
   feedback: FeedbackLevel;
   /** Picking a level here becomes the default the next pane spawns with. */
   onFeedback: (level: FeedbackLevel) => void;
+  /** Text the composer opens with. Read once, at mount. */
+  initialDraft?: string;
   onStats: (stats: {
     sessionId: string | null;
     model: string | null;
@@ -1459,8 +1462,16 @@ const UserMessage = memo(function UserMessage({ text }: { text: string }) {
 });
 
 /** What a decided card says it did, per tool family. */
-const DECIDED_LABELS: Record<string, string> = { allow: "allowed", deny: "denied" };
-const ANSWERED_LABELS: Record<string, string> = { allow: "answered", deny: "dismissed" };
+const DECIDED_LABELS: Record<string, string> = {
+  allow: "allowed",
+  deny: "denied",
+  withdrawn: "no longer waiting",
+};
+const ANSWERED_LABELS: Record<string, string> = {
+  allow: "answered",
+  deny: "dismissed",
+  withdrawn: "no longer waiting",
+};
 
 /**
  * One tool prompt, pending or decided.
@@ -1793,6 +1804,7 @@ export const ChatPane = memo(function ChatPane({
   onModel,
   feedback: defaultFeedback,
   onFeedback,
+  initialDraft,
 }: ChatPaneProps) {
   const menu = useMenu();
   // One fact for every pane, like the editor's blame column: a tab behind must
@@ -1822,7 +1834,7 @@ export const ChatPane = memo(function ChatPane({
    * thing telling you that the rows below are not the newest ones.
    */
   const [anchored, setAnchored] = useState<AnchoredView | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initialDraft ?? "");
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   const [attachments, setAttachments] = useState<PendingImage[]>([]);
   const [running, setRunning] = useState(false);
@@ -2754,6 +2766,17 @@ export const ChatPane = memo(function ChatPane({
             : "awaiting your permission",
         );
         appendItem({ kind: "permission", key: nextKey(), request, decided: null });
+      }),
+      // The CLI gave up on the ask, so the card can no longer answer anything.
+      // Ids are unique across chats, so no chat filter is needed.
+      onPermissionWithdrawn((id) => {
+        setItems((current) =>
+          current.map((item) =>
+            item.kind === "permission" && item.request.id === id && item.decided === null
+              ? { ...item, decided: "withdrawn" }
+              : item,
+          ),
+        );
       }),
       onClaudeToolActivity((event) => {
         if (event.chatId === chatId && isCurrent(event.instance)) {
