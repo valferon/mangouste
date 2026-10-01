@@ -19,8 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use notify::event::{EventKind, ModifyKind};
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, RecommendedCache};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{Emitter, Manager, Window};
 
 pub const EVENT_TREE_CHANGED: &str = "tree://changed";
@@ -29,8 +28,12 @@ pub const EVENT_TREE_CHANGED: &str = "tree://changed";
 /// that a `git checkout` touching a few hundred files arrives as one batch.
 const TREE_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// The longest a batch waits for quiet: a build writing into a watched folder
+/// non-stop would otherwise hold every other change back until it finished.
+const TREE_BATCH_MAX: Duration = Duration::from_millis(500);
+
 struct TreeWatch {
-    debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
+    watcher: RecommendedWatcher,
     /// Shared with the event handler, which maps paths back to watched dirs.
     dirs: std::sync::Arc<Mutex<Watched>>,
 }
@@ -96,34 +99,51 @@ fn start(window: &Window) -> Result<TreeWatch, String> {
 }
 
 /// A watcher with nothing watched yet, reporting changed dirs to `on_change`.
+///
+/// Raw `notify` events batched by a quiet period, rather than
+/// `notify-debouncer-full`: that one pairs a rename's two halves by file id,
+/// and on macOS drops the half it cannot pair, so a file moved out of a folder
+/// never told that folder. The tree has no use for the pairing, only for both
+/// directories.
 fn spawn(on_change: impl Fn(Vec<String>) + Send + 'static) -> Result<TreeWatch, String> {
     let dirs = std::sync::Arc::new(Mutex::new(Watched::new()));
     let watched = std::sync::Arc::clone(&dirs);
-    let debouncer = new_debouncer(TREE_DEBOUNCE, None, move |result| {
-        let Ok(events): Result<Vec<DebouncedEvent>, _> = result else {
-            return;
-        };
-        let changed = {
-            let watched = watched.lock().unwrap_or_else(|e| e.into_inner());
-            affected_dirs(
-                events
-                    .iter()
-                    .map(|e| (&e.event.kind, e.event.paths.as_slice())),
-                &watched,
-            )
-        };
-        if changed.is_empty() {
-            return;
+    let (tx, rx) = std::sync::mpsc::channel::<Event>();
+    let watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
+        if let Ok(event) = result {
+            let _ = tx.send(event);
         }
-        on_change(
-            changed
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-        );
     })
     .map_err(|e| format!("tree watcher failed to start: {e}"))?;
-    Ok(TreeWatch { debouncer, dirs })
+
+    // Ends when the watcher is dropped: that drops the sender, and `recv` fails.
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            let deadline = std::time::Instant::now() + TREE_BATCH_MAX;
+            while let Ok(next) = rx.recv_timeout(
+                TREE_DEBOUNCE.min(deadline.saturating_duration_since(std::time::Instant::now())),
+            ) {
+                batch.push(next);
+            }
+            let changed = {
+                let watched = watched.lock().unwrap_or_else(|e| e.into_inner());
+                affected_dirs(
+                    batch.iter().map(|e| (&e.kind, e.paths.as_slice())),
+                    &watched,
+                )
+            };
+            if !changed.is_empty() {
+                on_change(
+                    changed
+                        .into_iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                );
+            }
+        }
+    });
+    Ok(TreeWatch { watcher, dirs })
 }
 
 impl TreeWatch {
@@ -132,7 +152,7 @@ impl TreeWatch {
         let mut current = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
         let held: HashSet<PathBuf> = current.values().cloned().collect();
         for dir in held.difference(&wanted) {
-            let _ = self.debouncer.unwatch(dir);
+            let _ = self.watcher.unwatch(dir);
             current.retain(|_, original| original != dir);
         }
         for dir in wanted {
@@ -140,7 +160,7 @@ impl TreeWatch {
                 continue;
             }
             if self
-                .debouncer
+                .watcher
                 .watch(&dir, RecursiveMode::NonRecursive)
                 .is_ok()
             {
