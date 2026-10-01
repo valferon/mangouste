@@ -2,6 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   Blame,
@@ -304,6 +305,19 @@ export const listDir = (
   respectGitignore = true,
   showHidden = true,
 ) => invoke<DirEntryInfo[]>("list_dir", { path, respectGitignore, showHidden });
+
+/**
+ * Watch exactly these directories, one level each, for this window's tree.
+ * An empty list stops the watcher. See `src-tauri/src/treewatch.rs`.
+ */
+export const watchTree = (dirs: string[]) => invoke<void>("watch_tree", { dirs });
+
+/**
+ * Directories whose listing may have changed under the tree. Listened on this
+ * window only: Rust sends each window the dirs its own tree is watching.
+ */
+export const onTreeChanged = (handler: (dirs: string[]) => void): Promise<UnlistenFn> =>
+  getCurrentWebviewWindow().listen<string[]>("tree://changed", (e) => handler(e.payload));
 
 export const discoverRepos = (root: string) => invoke<RepoInfo[]>("discover_repos", { root });
 export const searchFiles = (root: string, query: string, limit?: number) =>

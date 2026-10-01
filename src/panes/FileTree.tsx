@@ -21,9 +21,11 @@ import {
   deletePath,
   duplicatePath,
   listDir,
+  onTreeChanged,
   openInDefaultApp,
   renamePath,
   revealPath,
+  watchTree,
 } from "../lib/ipc";
 import {
   ChevronRightIcon,
@@ -243,6 +245,37 @@ export const FileTree = memo(function FileTree({
     seenRefresh.current = refreshToken;
     refreshAll();
   }, [refreshToken, refreshAll]);
+
+  /*
+   * Watch what the tree is holding, so writes from anywhere else show up.
+   *
+   * Every directory listed for this repo, collapsed ones included: the cache
+   * keeps them, and a re-expand should not show a listing from before a
+   * session wrote into it. Keyed on a joined string so the watch set is only
+   * resent when the set changes, not on every listing that comes back.
+   */
+  const watchedKey = Object.keys(children)
+    .filter((dir) => dir === root || dir.startsWith(`${root}/`))
+    .sort()
+    .join("\n");
+  useEffect(() => {
+    void watchTree(watchedKey === "" ? [] : watchedKey.split("\n")).catch(() => {});
+  }, [watchedKey]);
+  useEffect(() => () => void watchTree([]).catch(() => {}), []);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisten = onTreeChanged((dirs) => {
+      if (disposed) return;
+      for (const dir of dirs) {
+        if (childrenRef.current[dir]) void load(dir, true);
+      }
+    });
+    return () => {
+      disposed = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, [load]);
 
   // A draft belongs to the repo it was opened in; leaving would commit it
   // somewhere the user is no longer looking.

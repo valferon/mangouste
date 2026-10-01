@@ -14,6 +14,7 @@ mod search;
 mod sessions;
 mod stats;
 mod threads;
+mod treewatch;
 mod update;
 mod usage;
 pub mod verdict;
@@ -191,6 +192,7 @@ pub fn run() {
         .manage(Arc::new(permission::PermissionState::default()))
         .manage(pty::PtyState::default())
         .manage(threads::ThreadStore::default())
+        .manage(treewatch::TreeWatchState::default())
         .manage(sessions::SessionCache::default())
         .manage(stats::StatsCache::default())
         .manage(recap::RecapCache::default())
@@ -324,6 +326,7 @@ pub fn run() {
             pty::pty_list,
             // files
             workspace::list_dir,
+            treewatch::watch_tree,
             workspace::discover_repos,
             workspace::search_files,
             workspace::read_text_file,
@@ -404,6 +407,7 @@ pub fn run() {
             pty::close_owned_by(&terminals, &label);
             let manager: tauri::State<'_, Arc<chats::ChatManager>> = handle.state();
             manager.kill_owned_by(&label);
+            treewatch::drop_window(&handle, &label);
         });
     });
 
