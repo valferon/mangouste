@@ -32,8 +32,16 @@ const TREE_DEBOUNCE: Duration = Duration::from_millis(100);
 struct TreeWatch {
     debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     /// Shared with the event handler, which maps paths back to watched dirs.
-    dirs: std::sync::Arc<Mutex<HashSet<PathBuf>>>,
+    dirs: std::sync::Arc<Mutex<Watched>>,
 }
+
+/// Every spelling of a watched directory, mapped to the one the tree uses.
+///
+/// FSEvents reports resolved paths: on macOS a repo under `/var/...` changes as
+/// `/private/var/...`, and any symlink on the way to a repo does the same. Both
+/// the tree's spelling and the canonical one are keys, and events come back to
+/// the tree in its own, or it would not recognise them as rows it holds.
+type Watched = HashMap<PathBuf, PathBuf>;
 
 #[derive(Default)]
 pub struct TreeWatchState {
@@ -61,7 +69,7 @@ fn changes_listing(kind: &EventKind) -> bool {
 /// tree, which drops a directory whose listing fails.
 fn affected_dirs<'a>(
     events: impl IntoIterator<Item = (&'a EventKind, &'a [PathBuf])>,
-    watched: &HashSet<PathBuf>,
+    watched: &Watched,
 ) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     for (kind, paths) in events {
@@ -69,13 +77,11 @@ fn affected_dirs<'a>(
             continue;
         }
         for path in paths {
-            if watched.contains(path) {
-                out.insert(path.clone());
+            if let Some(dir) = watched.get(path) {
+                out.insert(dir.clone());
             }
-            if let Some(parent) = path.parent() {
-                if watched.contains(parent) {
-                    out.insert(parent.to_path_buf());
-                }
+            if let Some(dir) = path.parent().and_then(|parent| watched.get(parent)) {
+                out.insert(dir.clone());
             }
         }
     }
@@ -91,7 +97,7 @@ fn start(window: &Window) -> Result<TreeWatch, String> {
 
 /// A watcher with nothing watched yet, reporting changed dirs to `on_change`.
 fn spawn(on_change: impl Fn(Vec<String>) + Send + 'static) -> Result<TreeWatch, String> {
-    let dirs = std::sync::Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+    let dirs = std::sync::Arc::new(Mutex::new(Watched::new()));
     let watched = std::sync::Arc::clone(&dirs);
     let debouncer = new_debouncer(TREE_DEBOUNCE, None, move |result| {
         let Ok(events): Result<Vec<DebouncedEvent>, _> = result else {
@@ -124,13 +130,13 @@ impl TreeWatch {
     /// Apply the difference between what is watched and `wanted`.
     fn sync(&mut self, wanted: HashSet<PathBuf>) {
         let mut current = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
-        let stale: Vec<PathBuf> = current.difference(&wanted).cloned().collect();
-        for dir in stale {
-            let _ = self.debouncer.unwatch(&dir);
-            current.remove(&dir);
+        let held: HashSet<PathBuf> = current.values().cloned().collect();
+        for dir in held.difference(&wanted) {
+            let _ = self.debouncer.unwatch(dir);
+            current.retain(|_, original| original != dir);
         }
         for dir in wanted {
-            if current.contains(&dir) || !Path::new(&dir).is_dir() {
+            if held.contains(&dir) || !Path::new(&dir).is_dir() {
                 continue;
             }
             if self
@@ -138,7 +144,10 @@ impl TreeWatch {
                 .watch(&dir, RecursiveMode::NonRecursive)
                 .is_ok()
             {
-                current.insert(dir);
+                if let Ok(canonical) = dir.canonicalize() {
+                    current.insert(canonical, dir.clone());
+                }
+                current.insert(dir.clone(), dir);
             }
         }
     }
@@ -185,8 +194,11 @@ mod tests {
     use super::*;
     use notify::event::{AccessKind, CreateKind, DataChange, RemoveKind, RenameMode};
 
-    fn set(paths: &[&str]) -> HashSet<PathBuf> {
-        paths.iter().map(PathBuf::from).collect()
+    fn set(paths: &[&str]) -> Watched {
+        paths
+            .iter()
+            .map(|p| (PathBuf::from(p), PathBuf::from(p)))
+            .collect()
     }
 
     fn run(events: &[(EventKind, Vec<PathBuf>)], watched: &[&str]) -> Vec<String> {
@@ -279,6 +291,25 @@ mod tests {
 
         drop(watch);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_resolved_path_comes_back_in_the_trees_spelling() {
+        let watched: Watched = [
+            (PathBuf::from("/var/r"), PathBuf::from("/var/r")),
+            (PathBuf::from("/private/var/r"), PathBuf::from("/var/r")),
+        ]
+        .into_iter()
+        .collect();
+        let events = [(
+            EventKind::Create(CreateKind::File),
+            vec![PathBuf::from("/private/var/r/a.ts")],
+        )];
+        let got = affected_dirs(events.iter().map(|(k, p)| (k, p.as_slice())), &watched);
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            [PathBuf::from("/var/r")]
+        );
     }
 
     #[test]
