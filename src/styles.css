@@ -151,7 +151,7 @@ body {
    select-to-PRIMARY works where it matters. */
 .app,
 .pane-header,
-.tab-strip,
+.tab-strips,
 .statusbar {
   user-select: none;
 }
@@ -3265,6 +3265,13 @@ select {
 
 /* ---------- tabs ---------- */
 
+/* Sessions on top, files and views on a slimmer row underneath. */
+.tab-strips {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+
 .tab-strip {
   display: flex;
   flex: 0 0 auto;
@@ -3272,6 +3279,16 @@ select {
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+}
+
+.tab-strip[data-row="view"] {
+  height: 28px;
+  background: var(--bg);
+}
+
+.tab-strip[data-row="view"] .tab[data-active="true"]:not([data-drop]) {
+  background: var(--bg-elevated);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 /* The global bar is 10px, which inside a 35px strip eats a third of the tab

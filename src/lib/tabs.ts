@@ -109,6 +109,21 @@ export function tabInRepo(tab: Tab, repo: string): boolean {
 }
 
 /**
+ * Which of the two strips a tab sits on.
+ *
+ * Sessions get a row to themselves, and every other tab (files, diffs, history,
+ * changes, the dashboard) goes on the row under it. They are different kinds
+ * of thing: a session is a process you come back to, a view is something you
+ * open, read and throw away. In one strip the handful of sessions you steer
+ * between were buried under the files they had you open.
+ */
+export type TabRow = "session" | "view";
+
+export function tabRow(tab: Tab): TabRow {
+  return tab.kind === "chat" ? "session" : "view";
+}
+
+/**
  * What a tab looks like in `localStorage`, for restoring the strip on launch.
  *
  * Deliberately narrower than `Tab`. Two members of the union never come back:

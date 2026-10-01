@@ -97,6 +97,7 @@ import {
   storedTabId,
   successorTab,
   tabInRepo,
+  tabRow,
   toStoredTab,
   type ChatTab,
   type Tab,
@@ -1404,7 +1405,9 @@ function Workbench() {
    * the rail's menu and the chat's button cannot mint two.
    */
   const openChanges = useCallback((session: SessionMeta) => {
-    const cwd = session.cwd ?? "";
+    // Filed under the repo root, not the raw cwd: a session started in a
+    // subdirectory would otherwise own a tab no strip ever shows.
+    const cwd = session.cwd ? (knownRepoRoot(session.cwd) ?? session.cwd) : "";
     if (cwd === "" || session.file === "") return;
     const id = `changes|${cwd}|${session.id}`;
     setTabs((current) =>
@@ -1951,7 +1954,17 @@ function Workbench() {
     [tabs, activeRepo],
   );
 
-  /** The strip element, for the two things only the DOM node can answer. */
+  /** `visibleTabs` split across the two strips, in strip order. */
+  const sessionTabs = useMemo(
+    () => visibleTabs.filter((tab) => tabRow(tab) === "session"),
+    [visibleTabs],
+  );
+  const viewTabs = useMemo(
+    () => visibleTabs.filter((tab) => tabRow(tab) === "view"),
+    [visibleTabs],
+  );
+
+  /** Both strips' container, for the two things only the DOM can answer. */
   const tabStripRef = useRef<HTMLDivElement | null>(null);
 
   /**
@@ -1965,9 +1978,13 @@ function Workbench() {
    * behind the strip scrolls instead.
    */
   useEffect(() => {
-    const strip = tabStripRef.current;
-    if (!strip) return;
+    const strips = tabStripRef.current;
+    if (!strips) return;
+    // On the container rather than on each strip: the view row comes and goes
+    // with its tabs, and a listener bound to it would need rebinding each time.
     const onWheel = (event: WheelEvent) => {
+      const strip = (event.target as Element | null)?.closest<HTMLElement>(".tab-strip");
+      if (!strip) return;
       // A trackpad's sideways component already reaches the strip as deltaX;
       // taking deltaY as well would double every diagonal flick.
       if (event.deltaX !== 0) return;
@@ -1980,8 +1997,8 @@ function Workbench() {
       const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE;
       strip.scrollLeft += event.deltaY * (lines ? 16 : 1);
     };
-    strip.addEventListener("wheel", onWheel, { passive: false });
-    return () => strip.removeEventListener("wheel", onWheel);
+    strips.addEventListener("wheel", onWheel, { passive: false });
+    return () => strips.removeEventListener("wheel", onWheel);
   }, []);
 
   /**
@@ -2314,6 +2331,148 @@ function Workbench() {
     return () => menu.setFallback(null);
   }, [menu, commands]);
 
+  /**
+   * One tab in either strip. Both rows share every behaviour (focus, menu,
+   * middle-click close, drag), so the row is only which list the tab is in.
+   */
+  const renderTab = (tab: Tab) => {
+    const label = tab.kind === "chat" ? chatLabel(tab) : tab.label;
+    return (
+      <div
+        key={tab.id}
+        className="tab"
+        data-kind={tab.kind}
+        data-active={tab.id === activeTab}
+        data-dragging={dragTab === tab.id}
+        data-drop={dropHint?.id === tab.id ? dropHint.side : undefined}
+        // Dragging owns mousedown, which would make selecting
+        // text inside the rename input impossible.
+        draggable={renaming?.id !== tab.id}
+        onClick={() => setActiveTab(tab.id)}
+        onContextMenu={(event) => {
+          setActiveTab(tab.id);
+          menu.openContextMenu(event, tabMenu(tab, tabMenuContext));
+        }}
+        onAuxClick={(event) => {
+          // Middle-click closes, as in VSCode.
+          if (event.button === 1) {
+            event.preventDefault();
+            closeTab(tab.id);
+          }
+        }}
+        onDragStart={(event) => {
+          dragTabRef.current = tab.id;
+          setDragTab(tab.id);
+          event.dataTransfer.effectAllowed = "move";
+          // WebKitGTK will not begin a drag with an empty payload.
+          event.dataTransfer.setData("text/plain", tab.id);
+        }}
+        onDragOver={(event) => {
+          const dragging = dragTabRef.current;
+          if (!dragging || dragging === tab.id) return;
+          // Each row reorders within itself: a file dropped among sessions
+          // would only jump back to its own row, which reads as a failed drop.
+          const from = tabsRef.current.find((candidate) => candidate.id === dragging);
+          if (!from || tabRow(from) !== tabRow(tab)) return;
+          // Without preventDefault this is not a drop target and
+          // onDrop never fires at all.
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          const side = dropSide(event);
+          setDropHint((current) =>
+            current?.id === tab.id && current.side === side
+              ? current
+              : { id: tab.id, side },
+          );
+        }}
+        onDragLeave={() =>
+          setDropHint((current) => (current?.id === tab.id ? null : current))
+        }
+        onDrop={(event) => {
+          event.preventDefault();
+          const dragging = dragTabRef.current;
+          if (dragging) moveTab(dragging, tab.id, dropSide(event));
+          endDrag();
+        }}
+        onDragEnd={endDrag}
+        title={tab.kind === "file" ? tab.path : label}
+      >
+        {/* The dot is read off the stream, so only a pane has one.
+            A terminal session gets a mark of its own rather than a
+            dot stuck on "idle" forever, which would read as a status
+            rather than as the absence of one. */}
+        {tab.kind === "chat" && tab.surface === "chat" && (
+          <span
+            className="status-dot"
+            data-status={tabStatus[tab.id] ?? "idle"}
+            title={tabStatus[tab.id] ?? "idle"}
+          />
+        )}
+        {tab.kind === "chat" && tab.surface === "terminal" && (
+          <span className="tab-terminal" title="claude, in a terminal">
+            ❯
+          </span>
+        )}
+        {tab.kind === "file" && dirtyFiles[tab.path] && (
+          <span className="tab-dirty" title="Unsaved changes">
+            ●
+          </span>
+        )}
+        {renaming?.id === tab.id ? (
+          <input
+            className="tab-rename-input"
+            value={renaming.value}
+            autoFocus
+            onFocus={(event) => event.target.select()}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) =>
+              setRenaming({ ...renaming, value: event.target.value })
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                renameDoneRef.current = true;
+                commitRename(renaming.sessionId, renaming.value);
+              } else if (event.key === "Escape") {
+                renameDoneRef.current = true;
+                setRenaming(null);
+              }
+            }}
+            onBlur={() => {
+              if (renameDoneRef.current) return;
+              commitRename(renaming.sessionId, renaming.value);
+            }}
+          />
+        ) : (
+          <span className="tab-label">{label}</span>
+        )}
+        {/* Renaming needs a transcript to write to, so a session
+            that has not announced its uuid yet has no pencil. */}
+        {tab.kind === "chat" && tab.sessionId && renaming?.id !== tab.id && (
+          <span
+            className="rename"
+            title="Rename session"
+            onClick={(event) => {
+              event.stopPropagation();
+              renameDoneRef.current = false;
+              setRenaming({ id: tab.id, sessionId: tab.sessionId!, value: label });
+            }}
+          >
+            <PencilIcon />
+          </span>
+        )}
+        <span
+          className="close"
+          onClick={(event) => {
+            event.stopPropagation();
+            closeTab(tab.id);
+          }}
+        >
+          ×
+        </span>
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <div
@@ -2475,166 +2634,56 @@ function Workbench() {
         {!leftCollapsed && <Resizer orientation="vertical" onDelta={resizeLeft} />}
 
         <div className="center-column">
-          <div
-            className="tab-strip"
-            ref={tabStripRef}
-            onContextMenu={(event) =>
-              menu.openContextMenu(event, [
-                activeRepo && {
-                  label: "New Session in this Repo",
-                  accelerator: CHORD.newSession,
-                  run: () => openNewChatTab(activeRepo),
-                },
-                {
-                  label: "Close All Tabs",
-                  disabled: visibleTabs.length === 0,
-                  run: () => closeTabsExcept(null),
-                },
-                "separator",
-                "app",
-              ])
-            }
-          >
-            {visibleTabs.map((tab) => {
-              const label = tab.kind === "chat" ? chatLabel(tab) : tab.label;
-              return (
-                <div
-                  key={tab.id}
-                  className="tab"
-                  data-kind={tab.kind}
-                  data-active={tab.id === activeTab}
-                  data-dragging={dragTab === tab.id}
-                  data-drop={dropHint?.id === tab.id ? dropHint.side : undefined}
-                  // Dragging owns mousedown, which would make selecting
-                  // text inside the rename input impossible.
-                  draggable={renaming?.id !== tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  onContextMenu={(event) => {
-                    setActiveTab(tab.id);
-                    menu.openContextMenu(event, tabMenu(tab, tabMenuContext));
-                  }}
-                  onAuxClick={(event) => {
-                    // Middle-click closes, as in VSCode.
-                    if (event.button === 1) {
-                      event.preventDefault();
-                      closeTab(tab.id);
-                    }
-                  }}
-                  onDragStart={(event) => {
-                    dragTabRef.current = tab.id;
-                    setDragTab(tab.id);
-                    event.dataTransfer.effectAllowed = "move";
-                    // WebKitGTK will not begin a drag with an empty payload.
-                    event.dataTransfer.setData("text/plain", tab.id);
-                  }}
-                  onDragOver={(event) => {
-                    const dragging = dragTabRef.current;
-                    if (!dragging || dragging === tab.id) return;
-                    // Without preventDefault this is not a drop target and
-                    // onDrop never fires at all.
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                    const side = dropSide(event);
-                    setDropHint((current) =>
-                      current?.id === tab.id && current.side === side
-                        ? current
-                        : { id: tab.id, side },
-                    );
-                  }}
-                  onDragLeave={() =>
-                    setDropHint((current) => (current?.id === tab.id ? null : current))
-                  }
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const dragging = dragTabRef.current;
-                    if (dragging) moveTab(dragging, tab.id, dropSide(event));
-                    endDrag();
-                  }}
-                  onDragEnd={endDrag}
-                  title={tab.kind === "file" ? tab.path : label}
-                >
-                  {/* The dot is read off the stream, so only a pane has one.
-                      A terminal session gets a mark of its own rather than a
-                      dot stuck on "idle" forever, which would read as a status
-                      rather than as the absence of one. */}
-                  {tab.kind === "chat" && tab.surface === "chat" && (
-                    <span
-                      className="status-dot"
-                      data-status={tabStatus[tab.id] ?? "idle"}
-                      title={tabStatus[tab.id] ?? "idle"}
-                    />
-                  )}
-                  {tab.kind === "chat" && tab.surface === "terminal" && (
-                    <span className="tab-terminal" title="claude, in a terminal">
-                      ❯
-                    </span>
-                  )}
-                  {tab.kind === "file" && dirtyFiles[tab.path] && (
-                    <span className="tab-dirty" title="Unsaved changes">
-                      ●
-                    </span>
-                  )}
-                  {renaming?.id === tab.id ? (
-                    <input
-                      className="tab-rename-input"
-                      value={renaming.value}
-                      autoFocus
-                      onFocus={(event) => event.target.select()}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) =>
-                        setRenaming({ ...renaming, value: event.target.value })
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          renameDoneRef.current = true;
-                          commitRename(renaming.sessionId, renaming.value);
-                        } else if (event.key === "Escape") {
-                          renameDoneRef.current = true;
-                          setRenaming(null);
-                        }
-                      }}
-                      onBlur={() => {
-                        if (renameDoneRef.current) return;
-                        commitRename(renaming.sessionId, renaming.value);
-                      }}
-                    />
-                  ) : (
-                    <span className="tab-label">{label}</span>
-                  )}
-                  {/* Renaming needs a transcript to write to, so a session
-                      that has not announced its uuid yet has no pencil. */}
-                  {tab.kind === "chat" && tab.sessionId && renaming?.id !== tab.id && (
-                    <span
-                      className="rename"
-                      title="Rename session"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        renameDoneRef.current = false;
-                        setRenaming({ id: tab.id, sessionId: tab.sessionId!, value: label });
-                      }}
-                    >
-                      <PencilIcon />
-                    </span>
-                  )}
-                  <span
-                    className="close"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      closeTab(tab.id);
-                    }}
-                  >
-                    ×
-                  </span>
-                </div>
-              );
-            })}
-            <button
-              className="tab-new"
-              onClick={() => activeRepo && openNewChatTab(activeRepo)}
-              title="New session in this repo"
+          <div className="tab-strips" ref={tabStripRef}>
+            <div
+              className="tab-strip"
+              data-row="session"
+              onContextMenu={(event) =>
+                menu.openContextMenu(event, [
+                  activeRepo && {
+                    label: "New Session in this Repo",
+                    accelerator: CHORD.newSession,
+                    run: () => openNewChatTab(activeRepo),
+                  },
+                  {
+                    label: "Close All Tabs",
+                    disabled: visibleTabs.length === 0,
+                    run: () => closeTabsExcept(null),
+                  },
+                  "separator",
+                  "app",
+                ])
+              }
             >
-              +
-            </button>
+              {sessionTabs.map(renderTab)}
+              <button
+                className="tab-new"
+                onClick={() => activeRepo && openNewChatTab(activeRepo)}
+                title="New session in this repo"
+              >
+                +
+              </button>
+            </div>
+            {/* Files and views only get a row once there is one: a strip of
+                nothing would cost the centre pane 28px to say so. */}
+            {viewTabs.length > 0 && (
+              <div
+                className="tab-strip"
+                data-row="view"
+                onContextMenu={(event) =>
+                  menu.openContextMenu(event, [
+                    {
+                      label: "Close All Files and Views",
+                      run: () => viewTabs.forEach((tab) => closeTab(tab.id)),
+                    },
+                    "separator",
+                    "app",
+                  ])
+                }
+              >
+                {viewTabs.map(renderTab)}
+              </div>
+            )}
           </div>
 
           <div

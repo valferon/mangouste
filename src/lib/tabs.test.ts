@@ -8,6 +8,7 @@ import {
   successorTab,
   tabInRepo,
   tabRepo,
+  tabRow,
   toStoredTab,
   type StoredTab,
   type Tab,
@@ -360,6 +361,17 @@ describe("tabRepo / tabInRepo", () => {
     const homeless: Tab = { ...fileTab, cwd: "" };
     expect(tabInRepo(homeless, "")).toBe(true);
     expect(tabInRepo(homeless, "/repos/mangouste")).toBe(false);
+  });
+});
+
+describe("tabRow", () => {
+  it("puts sessions on the top row and everything else below", () => {
+    const terminal: Tab = { ...chatTab, surface: "terminal" };
+    expect(tabRow(chatTab)).toBe("session");
+    expect(tabRow(terminal)).toBe("session");
+    for (const tab of [fileTab, historyTab, changesTab, dashboardTab]) {
+      expect(tabRow(tab)).toBe("view");
+    }
   });
 });
 
