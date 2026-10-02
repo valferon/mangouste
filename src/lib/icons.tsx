@@ -226,6 +226,26 @@ export function RefreshIcon(props: IconProps) {
   );
 }
 
+/** Prompts rail glyph: a bolt, for a message sent in one click. */
+export function QuickPromptsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9.2 1.6L3.4 9h4.1l-.9 5.4L12.6 7H8.4z" />
+    </Icon>
+  );
+}
+
+/** Bin, for deleting something that is not a file or a change. */
+export function TrashIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2.8 4.2h10.4M6.2 4.2V2.6h3.6v1.6" />
+      <path d="M4.2 4.2l.7 9.2a.9.9 0 0 0 .9.8h4.4a.9.9 0 0 0 .9-.8l.7-9.2" />
+      <path d="M6.7 6.8v4.6M9.3 6.8v4.6" />
+    </Icon>
+  );
+}
+
 /** Pencil, for inline rename affordances. */
 export function PencilIcon(props: IconProps) {
   return (

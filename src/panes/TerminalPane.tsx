@@ -6,6 +6,7 @@ import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { matchChord } from "../lib/commands";
 import { isMac } from "../lib/platform";
+import type { PasteRequest } from "../lib/quickPrompts";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { clipboardGet, onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
 
@@ -37,6 +38,8 @@ interface TerminalPaneProps {
    * still running.
    */
   launch?: string;
+  /** A saved prompt to paste at the prompt, then Enter when it asks to be sent. */
+  pasteRequest?: PasteRequest | null;
 }
 
 /**
@@ -109,6 +112,7 @@ export function TerminalPane({
   focusRequest = 0,
   paneActions,
   launch,
+  pasteRequest = null,
 }: TerminalPaneProps) {
   const menu = useMenu();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -561,6 +565,17 @@ export function TerminalPane({
     const frame = requestAnimationFrame(() => termRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [focusRequest]);
+
+  // Through the same bracketed paste a Ctrl+Shift+V takes, so a multi-line
+  // prompt reaches `claude` as one edit; the Enter after it is a keystroke.
+  const servedPasteRef = useRef(0);
+  useEffect(() => {
+    if (!pasteRequest || pasteRequest.token <= servedPasteRef.current) return;
+    servedPasteRef.current = pasteRequest.token;
+    pasteRef.current?.(pasteRequest.text);
+    if (pasteRequest.submit && !deadRef.current) termRef.current?.input("\r");
+    termRef.current?.focus();
+  }, [pasteRequest]);
 
   // The parent bumps this when the panel height changes.
   useEffect(() => {

@@ -18,6 +18,7 @@ import {
 } from "./panes/TerminalPanel";
 import { TerminalPane } from "./panes/TerminalPane";
 import { HistoryPane } from "./panes/HistoryPane";
+import { QuickPromptsPane } from "./panes/QuickPromptsPane";
 import ChangesPane from "./panes/ChangesPane";
 import { DiffView, FileView } from "./panes/Viewer";
 import { DebugLog } from "./panes/DebugLog";
@@ -64,8 +65,10 @@ import {
   HistoryIcon,
   MongooseLogo,
   PencilIcon,
+  QuickPromptsIcon,
   SourceControlIcon,
 } from "./lib/icons";
+import type { PasteRequest, QuickPrompt } from "./lib/quickPrompts";
 import { claimedByShell, runChord, type Command } from "./lib/commands";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
@@ -149,10 +152,10 @@ const SESSION_SURFACE_KEY = KEYS.prefs.sessionSurface;
 const FEEDBACK_KEY = KEYS.prefs.feedback;
 
 /** The left sidebar shows one of these at a time. */
-type SidebarView = "explorer" | "search" | "git" | "history";
+type SidebarView = "explorer" | "search" | "git" | "history" | "prompts";
 
 /** Every view the rail can show, for the stored-value guard. */
-const SIDEBAR_VIEWS: SidebarView[] = ["explorer", "search", "git", "history"];
+const SIDEBAR_VIEWS: SidebarView[] = ["explorer", "search", "git", "history", "prompts"];
 
 /**
  * The activity rail, in order. `hint` is the chord shown in the tooltip, and
@@ -194,6 +197,13 @@ const ACTIVITY_ITEMS: {
     label: "Git History",
     hint: CHORD.gitHistory,
     Glyph: HistoryIcon,
+  },
+  {
+    view: "prompts",
+    id: ID.quickPrompts,
+    label: "Prompts",
+    hint: CHORD.quickPrompts,
+    Glyph: QuickPromptsIcon,
   },
 ];
 
@@ -1948,6 +1958,50 @@ function Workbench() {
    */
   const paneChat = activeChat?.surface === "chat" ? activeChat : null;
 
+  /**
+   * A saved prompt on its way to one tab's composer or pty.
+   *
+   * Addressed to a tab id, so switching tabs afterwards cannot redeliver it to
+   * whichever pane comes forward next, and tokened so clicking the same prompt
+   * twice pastes it twice.
+   */
+  const [pasteRequest, setPasteRequest] = useState<
+    (PasteRequest & { tabId: string }) | null
+  >(null);
+  const pasteTokenRef = useRef(0);
+  const runPrompt = useCallback(
+    (prompt: QuickPrompt) => {
+      if (activeChat) {
+        pasteTokenRef.current += 1;
+        setPasteRequest({
+          tabId: activeChat.id,
+          token: pasteTokenRef.current,
+          text: prompt.text,
+          submit: prompt.submit,
+        });
+        return;
+      }
+      // Nothing to paste into: a new chat with the prompt as its opening draft.
+      // Never sent from here, even for a "send" prompt — the session is not up
+      // yet, and a first message is worth a look before it goes.
+      if (!activeRepo) {
+        setSystemMessage("Open a repo first: a prompt needs a session to go to.");
+        return;
+      }
+      const tab: ChatTab = {
+        ...newSessionTab(activeRepo),
+        sessionId: null,
+        surface: "chat",
+        draft: prompt.text,
+      };
+      setTabs((current) => [...current, tab]);
+      setActiveTab(tab.id);
+    },
+    [activeChat, activeRepo, newSessionTab],
+  );
+  const pasteRequestFor = (tabId: string): PasteRequest | null =>
+    pasteRequest?.tabId === tabId ? pasteRequest : null;
+
   // Follow the front tab, so the status panel describes what you are looking at.
   useEffect(() => {
     setLiveSessionId(activeChat?.sessionId ?? null);
@@ -2674,6 +2728,17 @@ function Workbench() {
               </PaneBoundary>
             )}
           </div>
+          <div
+            className="sidebar-view"
+            style={{ display: sidebarView === "prompts" ? "flex" : "none" }}
+          >
+            <PaneBoundary label="prompts">
+              <QuickPromptsPane
+                onRun={runPrompt}
+                target={activeChat ? chatLabel(activeChat) : null}
+              />
+            </PaneBoundary>
+          </div>
           {/* A rail view of its own rather than a fourth section under Source
               Control: what is staged and what a commit did are two questions,
               and the one that scrolls back through the year must not push the
@@ -2803,6 +2868,7 @@ function Workbench() {
                         refitToken={refitToken + tabActivation}
                         themeKey={theme}
                         focusRequest={tab.id === activeTab ? tabActivation : 0}
+                        pasteRequest={pasteRequestFor(tab.id)}
                       />
                     )
                   ) : (
@@ -2828,6 +2894,7 @@ function Workbench() {
                       feedback={feedback}
                       onFeedback={setFeedback}
                       initialDraft={tab.draft}
+                      pasteRequest={pasteRequestFor(tab.id)}
                     />
                   )}
                   </PaneBoundary>

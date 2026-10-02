@@ -80,6 +80,8 @@ export const KEYS = {
     sessionSort: "mangouste.sessionSort",
     /** The chat composer's dragged height, shared by every pane and window. */
     composerHeight: "mangouste.composerHeight",
+    /** The saved prompts the rail's Prompts view replays into a session. */
+    quickPrompts: "mangouste.quickPrompts",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",

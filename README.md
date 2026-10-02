@@ -26,10 +26,11 @@ process, watching the same sessions.
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`E`, `F`, `G` and `H` are the activity rail — Explorer, Find, Source Control,
-Git History: one left view at a time, switched with `Ctrl+Shift+E` /
-`Ctrl+Shift+F` / `Ctrl+Shift+G` / `Ctrl+Shift+H`, and the button for the open
-view collapses it. All four stay mounted — glancing at the tree must not throw
+`E`, `F`, `G`, `H` and `K` are the activity rail — Explorer, Find, Source
+Control, Git History, Prompts: one left view at a time, switched with
+`Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+G` / `Ctrl+Shift+H` /
+`Ctrl+Shift+K`, and the button for the open view collapses it. All of them stay
+mounted — glancing at the tree must not throw
 away a half-typed commit message, the results of a sweep that took seconds, or
 a page of history scrolled back through the year.
 
@@ -981,6 +982,22 @@ step with the text it describes. And the on/off switch lives in a module store
 rather than in `App` or in each editor, because file editors stay mounted while
 hidden — a per-editor flag would leave the tab behind still showing a column that
 was turned off in the tab in front.
+
+## Prompts: the messages you keep typing
+
+The bolt on the activity rail (`Ctrl+Shift+K`) is a list of saved prompts, one
+button each: "commit and push", "check my day's sessions and archive the done
+ones", "clean the renovate mail out of my inbox". A click puts the prompt in the
+composer of the session in front, after anything already typed there, or pastes
+it at `claude`'s prompt for a session running in the terminal. A prompt saved
+with "Send on click" is sent straight away instead of waiting for Enter. With no
+session in front, a click opens a new one with the prompt as its draft, and
+does not send it.
+
+`+` adds one, the pencil edits it, the bin deletes it after asking once, and a
+right-click reorders. The label is optional: a blank one is the prompt's first
+line. The list is a preference, so every window shares it and an edit in one
+shows up in the others.
 
 ## The whole history, at the width the graph needs
 

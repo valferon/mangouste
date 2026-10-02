@@ -103,6 +103,7 @@ import {
 import { Resizer } from "../layout/Split";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
+import { appendToDraft, type PasteRequest } from "../lib/quickPrompts";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import type {
   ClaudeFrame,
@@ -182,6 +183,8 @@ interface ChatPaneProps {
   onFeedback: (level: FeedbackLevel) => void;
   /** Text the composer opens with. Read once, at mount. */
   initialDraft?: string;
+  /** A saved prompt to drop into the composer, and send when it asks to be. */
+  pasteRequest?: PasteRequest | null;
   onStats: (stats: {
     sessionId: string | null;
     model: string | null;
@@ -1805,6 +1808,7 @@ export const ChatPane = memo(function ChatPane({
   feedback: defaultFeedback,
   onFeedback,
   initialDraft,
+  pasteRequest = null,
 }: ChatPaneProps) {
   const menu = useMenu();
   // One fact for every pane, like the editor's blame column: a tab behind must
@@ -3045,6 +3049,34 @@ export const ChatPane = memo(function ChatPane({
       onSystemMessage(`send failed: ${e}`);
     }
   }, [draft, attachments, alive, chatId, appendItem, setSticky]);
+
+  /*
+   * A prompt from the rail. It lands after whatever is already typed rather
+   * than over it, and "send" is deferred to the render that has it in `draft`,
+   * since `send` reads the draft it closed over. The send effect is declared
+   * first on purpose: in the commit that pastes, it runs before the flag is
+   * raised, so it is the next commit's `send`, with the new draft, that fires.
+   */
+  const servedPasteRef = useRef(0);
+  const sendAfterPasteRef = useRef(false);
+  useEffect(() => {
+    if (!sendAfterPasteRef.current) return;
+    sendAfterPasteRef.current = false;
+    // Not running yet (a cold tab, a respawn): the text stays in the composer,
+    // which is the same place a failed send leaves it.
+    if (alive) void send();
+  }, [send, alive]);
+  useEffect(() => {
+    if (!pasteRequest || pasteRequest.token <= servedPasteRef.current) return;
+    servedPasteRef.current = pasteRequest.token;
+    setDraft((current) => {
+      const next = appendToDraft(current, pasteRequest.text);
+      setCaret(next.length);
+      return next;
+    });
+    sendAfterPasteRef.current = pasteRequest.submit;
+    composerRef.current?.focus();
+  }, [pasteRequest]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
