@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { undoCommandFor } from "./undoKeys";
+
+// The listener only runs off macOS, so read chords from the Linux keymap even
+// when the suite runs on a Mac, where `CHORD` would resolve Ctrl to Cmd.
+vi.mock("./platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./platform")>()),
+  isMac: () => false,
+}));
 
 /** Enough of a KeyboardEvent for `matchChord`, which reads five fields. */
 function press(code: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}) {
