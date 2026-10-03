@@ -34,6 +34,15 @@ export type SessionSort = "status" | "recent";
 export const SESSION_SORTS: readonly SessionSort[] = ["status", "recent"];
 
 /**
+ * How the rail groups sessions: under their repos, or as one feed of every
+ * session, newest first, for when you know when you were in it but not where.
+ */
+export type SessionView = "projects" | "recent";
+
+/** Every view, for the stored-value guard. */
+export const SESSION_VIEWS: readonly SessionView[] = ["projects", "recent"];
+
+/**
  * Statuses from most to least worth your attention.
  *
  * The first three are the group header's own summary order (live, asking,

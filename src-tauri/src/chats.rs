@@ -549,7 +549,7 @@ fn has_title_record(path: &Path) -> bool {
 /// whole lines. One appended write of whole lines is safe next to the CLI's
 /// own appends; a reader that catches a torn line skips it and heals on the
 /// next scan.
-fn append_title_records(
+pub(crate) fn append_title_records(
     path: &Path,
     session_id: &str,
     kind: &str,
@@ -745,6 +745,36 @@ const MAX_EXPANDED_TERMS: usize = 8;
 /// A search box cannot wait on a rate-limited CLI.
 const EXPAND_TIMEOUT_MS: u64 = 20_000;
 
+/// What `helper_output` returns when the child outstays its budget.
+pub(crate) const HELPER_TIMED_OUT: &str = "timed out";
+
+/// Stdout of a background `claude -p` helper, or an error once `timeout_ms`
+/// passes. `output()` would block forever on a hung child, and these calls sit
+/// behind a button or a keystroke, so the wait is polled and the child is
+/// killed if it outstays the budget.
+pub(crate) fn helper_output(mut child: Child, timeout_ms: u64) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(HELPER_TIMED_OUT.into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("claude exited with an error".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Ask Haiku for words likely to appear in the transcript being looked for.
 ///
 /// Returns an empty vec rather than an error when the model gives nothing
@@ -767,7 +797,7 @@ pub fn expand_search_terms(query: String) -> Result<Vec<String>, String> {
          concrete technical nouns implied by the query, and likely error or \
          command strings. One term per line, nothing else."
     );
-    let mut child = crate::env::with_child_path(&mut Command::new(claude_binary()))
+    let child = crate::env::with_child_path(&mut Command::new(claude_binary()))
         .args(["-p", "--model", "haiku"])
         .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_SEARCH)
         .arg(&ask)
@@ -778,29 +808,13 @@ pub fn expand_search_terms(query: String) -> Result<Vec<String>, String> {
         .spawn()
         .map_err(|e| format!("could not run claude: {e}"))?;
 
-    // `output()` would block forever on a hung child, and this is on a
-    // keystroke-driven path, so the wait is polled and the child is killed if it
-    // outstays the budget.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXPAND_TIMEOUT_MS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("term expansion timed out".into());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => return Err(e.to_string()),
+    let text = helper_output(child, EXPAND_TIMEOUT_MS).map_err(|e| {
+        if e == HELPER_TIMED_OUT {
+            "term expansion timed out".into()
+        } else {
+            e
         }
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("claude exited with an error".into());
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    })?;
     let mut terms: Vec<String> = Vec::new();
     for line in text.lines() {
         // Models reach for bullets and numbering however firmly they are told
@@ -1027,7 +1041,7 @@ fn chat_entrypoint() -> String {
 /// `child_path_dirs` leads because it is what the word `claude` means in the
 /// user's own terminal, which is the CLI they authenticated. It is empty off
 /// macOS, so the order below is unchanged there.
-fn claude_binary() -> String {
+pub(crate) fn claude_binary() -> String {
     if let Ok(explicit) = std::env::var("MANGOUSTE_CLAUDE_BIN") {
         if !explicit.is_empty() {
             return explicit;

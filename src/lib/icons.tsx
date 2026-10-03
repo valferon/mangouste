@@ -235,6 +235,40 @@ export function QuickPromptsIcon(props: IconProps) {
   );
 }
 
+/** Dashboard rail glyph: four tiles of uneven height, a board of panels. */
+export function DashboardIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="2" y="2" width="5" height="7" rx="1" />
+      <rect x="9" y="2" width="5" height="4" rx="1" />
+      <rect x="2" y="11" width="5" height="3" rx="1" />
+      <rect x="9" y="8" width="5" height="6" rx="1" />
+    </Icon>
+  );
+}
+
+/** Settings rail glyph: a cog, eight teeth around a hub. */
+export function SettingsIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="8" cy="8" r="2" />
+      <path d="M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M3.5 12.5l1.3-1.3M11.2 4.8l1.3-1.3" />
+      <circle cx="8" cy="8" r="4.4" />
+    </Icon>
+  );
+}
+
+/** Terminal rail glyph: a prompt chevron and cursor inside a window. */
+export function TerminalIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="1.8" y="2.5" width="12.4" height="11" rx="1.4" />
+      <path d="M4.6 6.2L6.8 8l-2.2 1.8" />
+      <path d="M8.4 10.2h3" />
+    </Icon>
+  );
+}
+
 /** Bin, for deleting something that is not a file or a change. */
 export function TrashIcon(props: IconProps) {
   return (
@@ -585,6 +619,16 @@ export function OverflowIcon(props: IconProps) {
   return (
     <Icon {...props} strokeWidth={2}>
       <path d="M8 3.6h.01M8 8h.01M8 12.4h.01" />
+    </Icon>
+  );
+}
+
+/** Pencil with a spark: the session named again by the model, not by hand. */
+export function RetitleIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8.9 5.1l2.5 2.5-6 6-3.1.6.6-3.1z" />
+      <path d="M12.6 1.4v3.2M11 3h3.2" />
     </Icon>
   );
 }

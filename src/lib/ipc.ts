@@ -183,6 +183,13 @@ export const postNotification = (title: string, body: string) =>
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });
 
+/**
+ * Have Haiku name the session again from its prompts, the latest weighted in,
+ * and write the name as a `custom-title`. Resolves to the new title.
+ */
+export const retitleSession = (sessionId: string) =>
+  invoke<string>("retitle_session", { sessionId });
+
 /* ---------- chat ---------- */
 
 /**

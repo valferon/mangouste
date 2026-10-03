@@ -10,6 +10,7 @@ mod permission;
 mod primary;
 mod pty;
 mod recap;
+mod retitle;
 mod search;
 mod sessions;
 mod stats;
@@ -308,6 +309,7 @@ pub fn run() {
             changes::session_change_patch,
             chats::rename_session,
             chats::expand_search_terms,
+            retitle::retitle_session,
             // chat transport
             claude::claude_start,
             claude::claude_restart,

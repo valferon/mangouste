@@ -208,10 +208,6 @@ body {
   font-size: 12px;
 }
 
-.titlebar .spacer {
-  flex: 1;
-}
-
 .toggle-button {
   background: transparent;
   border: 1px solid transparent;
@@ -398,6 +394,17 @@ body {
   transition:
     background 90ms ease,
     color 90ms ease;
+}
+
+/* Pushed to the foot of the rail by the auto margin; the bottom padding keeps
+   the last button off the status bar. */
+.activity-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  margin-top: auto;
+  padding-bottom: 6px;
 }
 
 .activity-item:hover {
@@ -1857,19 +1864,39 @@ mark.search-new {
   color: var(--fg-dim);
 }
 
-/* Actions take the age's slot on hover rather than sitting beside it — the rail
-   is ~300px and a truncated title costs more than a hidden timestamp. */
+/* Actions float over the row's right end on hover instead of taking a slot in
+   it. In the flow they were wider than the age they replaced, so the pin, the
+   unread dot and the badges jumped left under the pointer. Out of the flow
+   nothing moves; `background: inherit` takes the row's own hover tint, which is
+   opaque in every theme, so whatever they cover is hidden rather than showing
+   through. */
+.session-row {
+  position: relative;
+}
+
 .session-row .row-actions {
   display: none;
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  right: 6px;
+  bottom: 0;
+  align-items: center;
+  padding-left: 4px;
+  background: inherit;
 }
 
 .session-row:hover .row-actions {
   display: flex;
 }
 
-.session-row:hover .age {
-  display: none;
+/* Haiku is naming the row: the old title stays, dimmed, until the new one lands. */
+.session-row .title[data-naming="true"] {
+  opacity: 0.5;
+  font-style: italic;
+}
+
+.session-row .row-actions .icon-button[data-error="true"] {
+  color: var(--red);
 }
 
 .session-row .row-actions .icon-button {
@@ -6600,7 +6627,8 @@ select {
   opacity: 0.55;
 }
 
-.thread-rename {
+.thread-rename,
+.session-rename {
   flex: 1;
   min-width: 0;
   font: inherit;
@@ -6650,4 +6678,31 @@ select {
 
 .thread-error {
   color: var(--red);
+}
+
+/* Projects / recent switch in the sessions header: two words sharing one
+   outline, so they read as a choice rather than two independent toggles. */
+.view-tabs {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.view-tabs .toggle-button {
+  border: none;
+  border-radius: 0;
+}
+
+/* The recent feed's rows carry their repo, since no group header above does. */
+.session-feed .session-row {
+  padding-left: 6px;
+}
+.session-row .repo-tag {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--fg-dim);
 }

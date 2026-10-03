@@ -3,6 +3,8 @@ import {
   expandSearchTerms,
   listSessions,
   onSessionsChanged,
+  renameSession,
+  retitleSession,
   revealPath,
   searchSessions,
   sessionRecap,
@@ -20,8 +22,8 @@ import {
   BackgroundTaskGlyph,
   PinIcon,
   ReadToggleIcon,
-  RecapIcon,
   RefreshIcon,
+  RetitleIcon,
   RepoIcon,
   SearchIcon,
   StatusGlyph,
@@ -48,10 +50,17 @@ import {
 } from "../lib/threads";
 import { useThreads } from "../lib/threadsContext";
 import { KEYS, readEnum, writeString } from "../lib/persist";
-import { SESSION_SORTS, sortSessions, type SessionSort } from "../lib/sessionOrder";
+import {
+  SESSION_SORTS,
+  SESSION_VIEWS,
+  sortSessions,
+  type SessionSort,
+  type SessionView,
+} from "../lib/sessionOrder";
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import { windowLabel, windowName, windowTint } from "../lib/windowScope";
+import { SessionTitleInput } from "./SessionTitleInput";
 import { ThreadHeader, ThreadNote } from "./ThreadGroup";
 import type {
   BackgroundTask,
@@ -450,7 +459,18 @@ export const SessionsPane = memo(function SessionsPane({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   /** Idle is >24h stale and dominates the list, so it is collapsed away by default. */
   const [showIdle, setShowIdle] = useState(false);
-  const [onlyLive, setOnlyLive] = useState(false);
+  /**
+   * Under their repos, or one feed of every session newest first. The feed
+   * answers "which one was I just in" when you don't know which repo to look
+   * under; remembered, like the order, because it is how you read the rail.
+   */
+  const [view, setView] = useState<SessionView>(() =>
+    readEnum(KEYS.prefs.sessionView, SESSION_VIEWS, "projects"),
+  );
+  const chooseView = useCallback((next: SessionView) => {
+    setView(next);
+    writeString(KEYS.prefs.sessionView, next);
+  }, []);
   /**
    * Status-and-name, or newest first. Remembered, unlike the filters above:
    * those narrow what is shown and are a question about right now, this is how
@@ -471,6 +491,12 @@ export const SessionsPane = memo(function SessionsPane({
   const [showClosedThreads, setShowClosedThreads] = useState(false);
   /** Thread whose header is an input, from the menu's "Rename". */
   const [renamingThread, setRenamingThread] = useState<string | null>(null);
+  /** Session whose title is an input, from the menu's "Rename". */
+  const [renamingSession, setRenamingSession] = useState<string | null>(null);
+  /** Names written from here, shown until a scan reports them back. */
+  const [titleOverrides, setTitleOverrides] = useState<Map<string, string>>(new Map());
+  /** Sessions Haiku is naming: `null` while it runs, the error if it failed. */
+  const [retitling, setRetitling] = useState<Map<string, string | null>>(new Map());
   /**
    * Per-session override for the fan-out list.
    *
@@ -525,6 +551,59 @@ export const SessionsPane = memo(function SessionsPane({
       inFlight.current = false;
     }
   }, [onGroups]);
+
+  // Drop overrides the scan has caught up with, so a later rename from
+  // elsewhere (CLI `/rename`, a chat tab) is not shadowed by a stale one.
+  useEffect(() => {
+    setTitleOverrides((current) => {
+      if (current.size === 0) return current;
+      const next = new Map(current);
+      for (const group of groups) {
+        for (const session of group.sessions) {
+          if (next.get(session.id) === session.title) next.delete(session.id);
+        }
+      }
+      return next.size === current.size ? current : next;
+    });
+  }, [groups]);
+
+  const showTitle = useCallback((sessionId: string, title: string) => {
+    setTitleOverrides((current) => new Map(current).set(sessionId, title));
+    void refresh();
+  }, [refresh]);
+
+  const commitSessionRename = useCallback(
+    (session: SessionMeta, value: string | null) => {
+      setRenamingSession(null);
+      const title = value?.trim();
+      if (!title || title === (titleOverrides.get(session.id) ?? session.title)) return;
+      renameSession(session.id, title).then(
+        () => showTitle(session.id, title),
+        (error) => setRetitling((current) => new Map(current).set(session.id, String(error))),
+      );
+    },
+    [showTitle, titleOverrides],
+  );
+
+  /** Have Haiku name the session again from everything typed in it so far. */
+  const retitle = useCallback(
+    (session: SessionMeta) => {
+      if (retitling.get(session.id) === null) return;
+      setRetitling((current) => new Map(current).set(session.id, null));
+      retitleSession(session.id).then(
+        (title) => {
+          setRetitling((current) => {
+            const next = new Map(current);
+            next.delete(session.id);
+            return next;
+          });
+          showTitle(session.id, title);
+        },
+        (error) => setRetitling((current) => new Map(current).set(session.id, String(error))),
+      );
+    },
+    [retitling, showTitle],
+  );
 
   useEffect(() => {
     void refresh();
@@ -665,9 +744,7 @@ export const SessionsPane = memo(function SessionsPane({
       // what you say about the session you want to find without remembering it.
       if (flags.isPinned(session.id)) return true;
       if (flags.isArchived(session.id) && !showArchived) return false;
-      const status = flags.effectiveStatus(session);
-      if (onlyLive) return status === "active" || status === "awaiting";
-      return showIdle || status !== "idle";
+      return showIdle || flags.effectiveStatus(session) !== "idle";
     };
     const scanned = groups
       .map((group) => ({
@@ -679,23 +756,17 @@ export const SessionsPane = memo(function SessionsPane({
       }))
       .filter((group) => group.sessions.length > 0);
     // Repos you were in that the scan cannot account for — no session there, or
-    // none that survived the filters. `onlyLive` is the one toggle they cannot
-    // pass: nothing is running under a repo with no sessions, so a rail asked
-    // for live work only must not list one.
-    const placeholders = onlyLive
-      ? []
-      : visitedPlaceholders(
-          visited.visits,
-          scanned.map((group) => group.cwd),
-          { now: Date.now(), includeIdle: showIdle || searching },
-        ).filter(
-          (group) =>
-            !searching || matchesTerms(`${group.label} ${group.cwd}`.toLowerCase(), terms),
-        );
+    // none that survived the filters.
+    const placeholders = visitedPlaceholders(
+      visited.visits,
+      scanned.map((group) => group.cwd),
+      { now: Date.now(), includeIdle: showIdle || searching },
+    ).filter(
+      (group) => !searching || matchesTerms(`${group.label} ${group.cwd}`.toLowerCase(), terms),
+    );
     return withPlaceholders(scanned, placeholders);
   }, [
     groups,
-    onlyLive,
     showIdle,
     showArchived,
     sort,
@@ -708,10 +779,39 @@ export const SessionsPane = memo(function SessionsPane({
     threadedIds,
   ]);
 
+  /**
+   * The recent view: every session in one list, newest watermark first, each
+   * with the repo it belongs to. Threads and pins do not reorder it and idle
+   * rows stay in, because the whole point is "what did I touch last" — the
+   * age stamp already says how stale the bottom of the list is. Archived rows
+   * are still held back unless asked for, and a query narrows it the same way.
+   */
+  const feed = useMemo(() => {
+    if (view !== "recent") return [];
+    const rows: { session: SessionMeta; group: ProjectGroup }[] = [];
+    for (const group of groups) {
+      for (const session of group.sessions) {
+        const keep = searching
+          ? matchesTerms(haystacks.get(session.id) ?? "", terms) ||
+            activeHits?.has(session.id) === true
+          : flags.isPinned(session.id) || !flags.isArchived(session.id) || showArchived;
+        if (keep) rows.push({ session, group });
+      }
+    }
+    return rows.sort(
+      (a, b) =>
+        b.session.lastActivityMs - a.session.lastActivityMs ||
+        a.session.id.localeCompare(b.session.id),
+    );
+  }, [view, groups, searching, haystacks, terms, activeHits, flags, showArchived]);
+
   /** Rows the query actually produced, for the header count. */
   const matchedCount = useMemo(
-    () => visible.reduce((total, group) => total + group.sessions.length, 0),
-    [visible],
+    () =>
+      view === "recent"
+        ? feed.length
+        : visible.reduce((total, group) => total + group.sessions.length, 0),
+    [view, feed, visible],
   );
 
   /** Every scanned session, archived included — `tally.total` excludes those,
@@ -907,7 +1007,6 @@ export const SessionsPane = memo(function SessionsPane({
     (): MenuEntry[] => [
       { label: "Refresh", run: () => void refresh() },
       "separator",
-      { label: "Only Live Sessions", checked: onlyLive, run: () => setOnlyLive((v) => !v) },
       { label: "Include Idle", checked: showIdle, run: () => setShowIdle((v) => !v) },
       {
         label: `Include Archived (${flags.archivedCount})`,
@@ -930,7 +1029,6 @@ export const SessionsPane = memo(function SessionsPane({
     ],
     [
       refresh,
-      onlyLive,
       showIdle,
       showArchived,
       showClosedThreads,
@@ -978,8 +1076,10 @@ export const SessionsPane = memo(function SessionsPane({
       const unread = flags.isMarkedUnread(session.id);
       const cwd = session.cwd ?? "";
       return [
-        { header: session.title ?? session.id },
+        { header: titleOverrides.get(session.id) ?? session.title ?? session.id },
         { label: "Open Session", run: () => openSession(session) },
+        { label: "Rename", run: () => setRenamingSession(session.id) },
+        { label: "Rename with Haiku", run: () => retitle(session) },
         cwd && { label: "Switch to this Repo", run: () => onSelectRepo(cwd) },
         cwd && {
           label: "New Session in this Repo",
@@ -1029,6 +1129,8 @@ export const SessionsPane = memo(function SessionsPane({
       onWatchChanges,
       paneEntries,
       recapOpen,
+      retitle,
+      titleOverrides,
       toggleRecap,
       threadEntries,
     ],
@@ -1107,7 +1209,7 @@ export const SessionsPane = memo(function SessionsPane({
   );
 
   /** One session's row and everything that hangs off it: hits, recap, fan-out. */
-  const renderSession = (session: SessionMeta, groupCwd: string) => {
+  const renderSession = (session: SessionMeta, groupCwd: string, repoLabel?: string) => {
     const status = flags.effectiveStatus(session);
     const hit = activeHits?.get(session.id) ?? null;
     const showRecap = recapOpen.has(session.id);
@@ -1138,6 +1240,9 @@ export const SessionsPane = memo(function SessionsPane({
     // you are the same thing.
     const owner = sessionOwners.get(session.id);
     const elsewhere = owner && owner !== windowLabel() ? owner : null;
+    const title = titleOverrides.get(session.id) ?? session.title;
+    const naming = retitling.has(session.id) && retitling.get(session.id) === null;
+    const namingError = retitling.get(session.id) ?? null;
     return (
       <Fragment key={session.id}>
         <div
@@ -1153,7 +1258,7 @@ export const SessionsPane = memo(function SessionsPane({
             menu.openContextMenu(event, sessionMenu(session))
           }
           title={[
-            session.title ?? session.id,
+            title ?? session.id,
             session.lastPrompt,
             hit ? `${hit.matchCount} transcript match${hit.matchCount === 1 ? "" : "es"}` : null,
             `${status} · ${shortAge(session.lastActivityMs)} ago`,
@@ -1189,9 +1294,16 @@ export const SessionsPane = memo(function SessionsPane({
           {/* Named by title only, never the last prompt: the
               title pipeline (derived at start, Haiku upgrade,
               manual rename) is the single source of names. */}
-          <span className="title">
-            {session.title ?? session.id.slice(0, 8)}
-          </span>
+          {renamingSession === session.id ? (
+            <SessionTitleInput
+              title={title ?? ""}
+              onDone={(value) => commitSessionRename(session, value)}
+            />
+          ) : (
+            <span className="title" data-naming={naming}>
+              {title ?? session.id.slice(0, 8)}
+            </span>
+          )}
           {working > 0 && !showFanout && (
             <span className="agent-count" title={workingLabel}>
               {fanout > 0 && `${fanout}⚙`}
@@ -1223,22 +1335,31 @@ export const SessionsPane = memo(function SessionsPane({
               title={`Running in ${windowName(elsewhere)} — click to raise it`}
             />
           )}
+          {repoLabel && (
+            <span className="repo-tag" title={session.cwd ?? groupCwd}>
+              {repoLabel}
+            </span>
+          )}
           <span className="age">{shortAge(session.lastActivityMs)}</span>
           <span className="row-actions">
             <button
               className="toggle-button icon-button"
-              data-active={showRecap}
+              data-active={naming}
+              data-error={namingError !== null}
+              disabled={naming}
               onClick={(event) => {
                 event.stopPropagation();
-                toggleRecap(session);
+                retitle(session);
               }}
               title={
-                showRecap
-                  ? "Hide what was done"
-                  : "What was done: files, commits, branches, fan-outs"
+                namingError
+                  ? `Naming failed: ${namingError}. Click to ask Haiku again`
+                  : naming
+                    ? "Haiku is naming this session…"
+                    : "Rename with Haiku, from everything asked in it so far"
               }
             >
-              <RecapIcon />
+              <RetitleIcon />
             </button>
             <button
               className="toggle-button icon-button"
@@ -1456,37 +1577,30 @@ export const SessionsPane = memo(function SessionsPane({
           )}
         </span>
         <div className="actions">
-          <button
-            className="toggle-button"
-            data-active={onlyLive}
-            onClick={() => setOnlyLive((v) => !v)}
-            title="Show only active or awaiting sessions"
-          >
-            live
-          </button>
-          <button
-            className="toggle-button"
-            data-active={showIdle}
-            onClick={() => setShowIdle((v) => !v)}
-            title="Include sessions idle for over a day"
-          >
-            idle
-          </button>
-          {/* The one control here that is not a filter: it changes how the
-              rows read, not which rows there are, and it applies to a filtered
-              list the same as a full one. */}
-          <button
-            className="toggle-button"
-            data-active={sort === "recent"}
-            onClick={toggleSort}
-            title={
-              sort === "recent"
-                ? "Ordered by last activity — click for status, then name"
-                : "Ordered by status, then name — click for last activity"
-            }
-          >
-            time
-          </button>
+          {/* How the rows read, not which rows there are: by project is the
+              default, recent is the one feed for "which was I just in". */}
+          <span className="view-tabs" role="tablist">
+            <button
+              className="toggle-button"
+              role="tab"
+              aria-selected={view === "projects"}
+              data-active={view === "projects"}
+              onClick={() => chooseView("projects")}
+              title="Sessions under their projects"
+            >
+              projects
+            </button>
+            <button
+              className="toggle-button"
+              role="tab"
+              aria-selected={view === "recent"}
+              data-active={view === "recent"}
+              onClick={() => chooseView("recent")}
+              title="Every session in one list, last activity first"
+            >
+              recent
+            </button>
+          </span>
           <button
             className="toggle-button icon-button"
             data-active={showArchived}
@@ -1590,13 +1704,23 @@ export const SessionsPane = memo(function SessionsPane({
       )}
       <div className="pane-body" ref={bodyRef}>
         {threadsApi.error && <div className="empty-note thread-error">{threadsApi.error}</div>}
-        {threadGroups.map(renderThread)}
-        {visible.length === 0 && threadGroups.length === 0 && (
+        {view === "recent" && (
+          <div className="session-feed">
+            {feed.length === 0 && (
+              <div className="empty-note">
+                {searching ? "No session matches that." : "No sessions found."}
+              </div>
+            )}
+            {feed.map(({ session, group }) => renderSession(session, group.cwd, group.label))}
+          </div>
+        )}
+        {view === "projects" && threadGroups.map(renderThread)}
+        {view === "projects" && visible.length === 0 && threadGroups.length === 0 && (
           <div className="empty-note">
             {searching ? "No session matches that." : "No sessions found."}
           </div>
         )}
-        {visible.map((group) => {
+        {view === "projects" && visible.map((group) => {
           // A collapsed group would hide its own matches, so a query opens
           // every group without touching what the user collapsed by hand.
           const isCollapsed = collapsed.has(group.dirName) && !searching;

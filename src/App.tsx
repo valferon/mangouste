@@ -66,6 +66,9 @@ import {
   MongooseLogo,
   PencilIcon,
   QuickPromptsIcon,
+  DashboardIcon,
+  SettingsIcon,
+  TerminalIcon,
   SourceControlIcon,
 } from "./lib/icons";
 import type { PasteRequest, QuickPrompt } from "./lib/quickPrompts";
@@ -2610,30 +2613,6 @@ function Workbench() {
           <span className="repo-name">{activeRepo.split("/").pop() || "select a repo"}</span>
           <span className="repo-hint">{formatChord(CHORD.quickOpen)}</span>
         </button>
-        <span className="spacer" />
-        <button
-          className="toggle-button"
-          data-active={activeTab === DASHBOARD_TAB}
-          onClick={openDashboard}
-          title="Dashboard — all sessions, cost and tokens (Ctrl+Shift+D)"
-        >
-          dashboard
-        </button>
-        <button
-          className="toggle-button"
-          onClick={() => setSettingsOpen(true)}
-          title="Settings (Ctrl+,)"
-        >
-          ⚙
-        </button>
-        <button
-          className="toggle-button"
-          data-active={terminalVisible}
-          onClick={toggleTerminal}
-          title="Toggle terminal (Ctrl+`)"
-        >
-          terminal
-        </button>
       </div>
 
       <div className="workbench">
@@ -2662,6 +2641,36 @@ function Workbench() {
               </button>
             );
           })}
+          {/* App-wide toggles rather than sidebar views: pinned to the foot of
+              the rail, the way VSCode keeps accounts and settings there. */}
+          <div className="activity-footer">
+            <button
+              className="activity-item"
+              aria-label="Dashboard"
+              data-active={activeTab === DASHBOARD_TAB}
+              onClick={openDashboard}
+              title={`Dashboard: all sessions, cost and tokens (${formatChord(CHORD.dashboard)})`}
+            >
+              <DashboardIcon />
+            </button>
+            <button
+              className="activity-item"
+              aria-label="Toggle terminal"
+              data-active={terminalVisible}
+              onClick={toggleTerminal}
+              title={`Toggle terminal (${formatChord(CHORD.toggleTerminal)})`}
+            >
+              <TerminalIcon />
+            </button>
+            <button
+              className="activity-item"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen(true)}
+              title={`Settings (${formatChord(CHORD.settings)})`}
+            >
+              <SettingsIcon />
+            </button>
+          </div>
         </div>
 
         <div
