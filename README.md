@@ -994,10 +994,41 @@ with "Send on click" is sent straight away instead of waiting for Enter. With no
 session in front, a click opens a new one with the prompt as its draft, and
 does not send it.
 
+A prompt saved with "Always in a new session" never touches the session in
+front: each click opens a fresh chat, in the repo picked beside the checkbox
+(or the active one), and a "send" prompt goes as soon as that session is up.
+Typing in the composer before then cancels the send and leaves you the draft.
+Any other prompt can do the same once from its right-click menu, "Run in a New
+Session".
+
+"On a schedule" takes a five-field cron expression (`0 9 * * 1-5`, `*/30 * * * *`,
+`@daily`; local time, day names and month names allowed) and moves the prompt to
+a Scheduled list that shows when it runs next. A scheduled run always opens a
+new session in the prompt's repo and sends, in the background: no tab or repo
+switch, so it never lands in the middle of something you are typing. The status
+line says when one starts, and the session shows in the rail like any other.
+
+It runs only while mangouste is open, and only the main window fires it, so a
+second window does not double every run. A run whose minute passed while the app
+was closed or the machine asleep is skipped, not replayed late. Clicking a
+scheduled prompt runs it now, in front.
+
 `+` adds one, the pencil edits it, the bin deletes it after asking once, and a
 right-click reorders. The label is optional: a blank one is the prompt's first
 line. The list is a preference, so every window shares it and an edit in one
 shows up in the others.
+
+## Remote control
+
+A chat pane is a `claude --print` process, and the CLI's remote-control bridge
+only lives in the interactive REPL, so `/remote-control` typed in a chat explains
+that rather than doing nothing. The phone icon at the foot of the activity rail
+is the way in: it opens a terminal tab named `remote` in the repo in front and
+runs `claude remote-control` there, the CLI's own server mode, so claude.ai and
+the Claude app can start and drive sessions in that repo. Login prompts and the
+session URL show in the tab, as they would in any terminal. Clicking it again
+brings back the tab already running rather than starting a second one; closing
+the tab stops it.
 
 ## The whole history, at the width the graph needs
 

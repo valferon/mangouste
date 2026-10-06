@@ -1699,7 +1699,7 @@ const Timeline = memo(function Timeline({
             )}
 
             {entry.kind === "subagent" && (
-              <div className="subagent-row">
+              <div className="subagent-frame">
                 <span className="subagent-label">{entry.label ?? "subagent"}</span>
                 {entry.inner.kind === "tool" ? (
                   <ToolBlock
@@ -3060,11 +3060,12 @@ export const ChatPane = memo(function ChatPane({
   const servedPasteRef = useRef(0);
   const sendAfterPasteRef = useRef(false);
   useEffect(() => {
-    if (!sendAfterPasteRef.current) return;
+    // Held until the process is up, which for a session opened by the prompt
+    // itself is a spawn away. Typing in the meantime cancels it (see onChange):
+    // the send was for the prompt, not for whatever it has turned into.
+    if (!sendAfterPasteRef.current || !alive) return;
     sendAfterPasteRef.current = false;
-    // Not running yet (a cold tab, a respawn): the text stays in the composer,
-    // which is the same place a failed send leaves it.
-    if (alive) void send();
+    void send();
   }, [send, alive]);
   useEffect(() => {
     if (!pasteRequest || pasteRequest.token <= servedPasteRef.current) return;
@@ -3562,6 +3563,7 @@ export const ChatPane = memo(function ChatPane({
                   : "Not started"
             }
             onChange={(event) => {
+              sendAfterPasteRef.current = false;
               setDraft(event.target.value);
               setCaret(event.target.selectionStart ?? event.target.value.length);
             }}

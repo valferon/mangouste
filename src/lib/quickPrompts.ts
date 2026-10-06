@@ -8,6 +8,7 @@
  * never the list.
  */
 
+import { parseCron } from "./cron";
 import { KEYS, readJson, writeJson } from "./persist";
 
 export interface QuickPrompt {
@@ -18,6 +19,27 @@ export interface QuickPrompt {
   text: string;
   /** Send straight away rather than leave it in the composer to read first. */
   submit: boolean;
+  /** Always open a fresh session for it, rather than use the one in front. */
+  newSession: boolean;
+  /**
+   * The repo that fresh session opens in. Null is "whichever repo is active",
+   * and only means anything with `newSession`.
+   */
+  project: string | null;
+  /**
+   * Cron expression to run it on, while the app is open. A scheduled prompt is
+   * always a new session that sends: at 3am there is no "session in front"
+   * worth trusting, and nobody there to press Enter.
+   */
+  schedule: string | null;
+}
+
+/** Which of the pane's lists a prompt sits in. Also what reordering respects. */
+export type PromptGroup = "here" | "new" | "scheduled";
+
+export function groupOf(prompt: QuickPrompt): PromptGroup {
+  if (prompt.schedule) return "scheduled";
+  return prompt.newSession ? "new" : "here";
 }
 
 /** What the editor hands back; the id is the list's business. */
@@ -44,7 +66,11 @@ function isPrompt(value: unknown): value is QuickPrompt {
     typeof entry.label === "string" &&
     typeof entry.text === "string" &&
     entry.text.trim() !== "" &&
-    typeof entry.submit === "boolean"
+    typeof entry.submit === "boolean" &&
+    // Added after the first release: absent is the old behaviour, not corrupt.
+    (entry.newSession === undefined || typeof entry.newSession === "boolean") &&
+    (entry.project === undefined || entry.project === null || typeof entry.project === "string") &&
+    (entry.schedule === undefined || entry.schedule === null || typeof entry.schedule === "string")
   );
 }
 
@@ -66,6 +92,11 @@ export function cleanPrompts(value: unknown): QuickPrompt[] {
       label: entry.label.trim() || deriveLabel(entry.text),
       text: entry.text,
       submit: entry.submit,
+      newSession: entry.newSession ?? false,
+      project: entry.project || null,
+      // A schedule that no longer parses (hand-edited, or from a newer build's
+      // syntax) is dropped rather than left to never fire without saying so.
+      schedule: entry.schedule && parseCron(entry.schedule).ok ? entry.schedule.trim() : null,
     });
   }
   return prompts;
@@ -79,13 +110,22 @@ export function writePrompts(prompts: readonly QuickPrompt[]): void {
   writeJson(PROMPTS_KEY, prompts);
 }
 
-/** Normalise what the editor produced. Null when there is nothing to save. */
+/**
+ * Normalise what the editor produced. Null when there is nothing to save, or
+ * when the schedule does not parse.
+ */
 export function normaliseDraft(draft: QuickPromptDraft): QuickPromptDraft | null {
   if (draft.text.trim() === "") return null;
+  const schedule = draft.schedule?.trim() || null;
+  if (schedule && !parseCron(schedule).ok) return null;
+  const newSession = draft.newSession || schedule !== null;
   return {
     label: draft.label.trim() || deriveLabel(draft.text),
     text: draft.text,
-    submit: draft.submit,
+    submit: draft.submit || schedule !== null,
+    newSession,
+    project: newSession ? draft.project || null : null,
+    schedule,
   };
 }
 
@@ -112,15 +152,26 @@ export function removePrompt(prompts: readonly QuickPrompt[], id: string): Quick
   return prompts.filter((prompt) => prompt.id !== id);
 }
 
-/** Swap a prompt with its neighbour. Off either end is a no-op, not a wrap. */
+/**
+ * Swap a prompt with its neighbour in the same group.
+ *
+ * The pane shows "this session", "new session" and scheduled prompts as three
+ * lists, so the
+ * neighbour is the next one the user can see, not the next one stored: swapping
+ * across groups would be a move that changes nothing on screen. Off either end
+ * is a no-op, not a wrap.
+ */
 export function movePrompt(
   prompts: readonly QuickPrompt[],
   id: string,
   delta: -1 | 1,
 ): QuickPrompt[] {
   const from = prompts.findIndex((prompt) => prompt.id === id);
-  const to = from + delta;
-  if (from < 0 || to < 0 || to >= prompts.length) return [...prompts];
+  if (from < 0) return [...prompts];
+  const group = groupOf(prompts[from]);
+  let to = from + delta;
+  while (to >= 0 && to < prompts.length && groupOf(prompts[to]) !== group) to += delta;
+  if (to < 0 || to >= prompts.length) return [...prompts];
   const next = [...prompts];
   [next[from], next[to]] = [next[to], next[from]];
   return next;

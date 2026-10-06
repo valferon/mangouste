@@ -700,8 +700,10 @@ function RemoteControlPanel() {
         every mangouste chat is, never starts one.
       </div>
       <div className="cp-note">
-        To use it, open the terminal pane, run <code>claude</code> there, and type{" "}
-        <code>/remote-control</code> in that session.
+        To use it, click the remote-control button at the foot of the activity rail. It runs{" "}
+        <code>claude remote-control</code> in a terminal tab for this repo, and claude.ai or the
+        Claude app can start and drive sessions from there. A session opened in the terminal surface
+        can also take <code>/remote-control</code> directly.
       </div>
     </Frame>
   );

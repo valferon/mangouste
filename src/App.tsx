@@ -6,7 +6,7 @@ import { FileTree } from "./panes/FileTree";
 import { BranchStatus } from "./panes/BranchStatus";
 import { EditorFacts } from "./panes/EditorFacts";
 import { GitPane } from "./panes/GitPane";
-import { QuickOpen } from "./panes/QuickOpen";
+import { buildEntries, QuickOpen } from "./panes/QuickOpen";
 import { SearchPane } from "./panes/SearchPane";
 import { Settings } from "./panes/Settings";
 import { StatusPanel, type ChatStats } from "./panes/StatusPanel";
@@ -68,10 +68,13 @@ import {
   QuickPromptsIcon,
   DashboardIcon,
   SettingsIcon,
+  RemoteControlIcon,
   TerminalIcon,
   SourceControlIcon,
 } from "./lib/icons";
-import type { PasteRequest, QuickPrompt } from "./lib/quickPrompts";
+import { cronMatches, parseCron } from "./lib/cron";
+import { readPrompts, type PasteRequest, type QuickPrompt } from "./lib/quickPrompts";
+import { repoLabel } from "./lib/visitedRepos";
 import { claimedByShell, runChord, type Command } from "./lib/commands";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
@@ -217,6 +220,12 @@ const ACTIVITY_ITEMS: {
  * downstream, which is what made all four Tauri listeners rebind per render.
  */
 const noop = () => {};
+
+/** What the rail's remote-control button types into its terminal tab. */
+const REMOTE_CONTROL_LAUNCH = "claude remote-control";
+
+/** How often the prompt schedule is checked. Runs are per minute. */
+const SCHEDULE_TICK_MS = 15_000;
 
 /** Floor for the terminal panel, matching the size hook's own minimum. */
 const TERMINAL_MIN_HEIGHT = 80;
@@ -751,6 +760,22 @@ function Workbench() {
    * above strips it, since a flag under "" is garbage that would outlive the
    * run.
    */
+  /**
+   * `claude remote-control` in a terminal tab of its own, in the repo in front.
+   *
+   * The CLI's own server mode rather than anything mangouste speaks: a chat
+   * pane is a `--print` process, which has no remote-control bridge, and the
+   * terminal is where the CLI's login prompts and its session URL already work.
+   * A second click brings back the tab already running it.
+   */
+  const startRemoteControl = useCallback(() => {
+    if (!activeRepo || !terminalActions.current) {
+      setSystemMessage("Open a repo first: remote control runs in its terminal.");
+      return;
+    }
+    terminalActions.current.runInTab(REMOTE_CONTROL_LAUNCH, "remote");
+  }, [activeRepo]);
+
   const showTerminal = useCallback(() => {
     setTerminalOpen((current) =>
       current[activeRepo] === true ? current : { ...current, [activeRepo]: true },
@@ -1968,42 +1993,110 @@ function Workbench() {
    * whichever pane comes forward next, and tokened so clicking the same prompt
    * twice pastes it twice.
    */
-  const [pasteRequest, setPasteRequest] = useState<
-    (PasteRequest & { tabId: string }) | null
-  >(null);
+  const [pasteRequests, setPasteRequests] = useState<Record<string, PasteRequest>>({});
   const pasteTokenRef = useRef(0);
+  /**
+   * One slot per tab rather than one for the app: a scheduled run lands in a
+   * background tab while you click a prompt into the one in front, and a
+   * single slot would let the second request overwrite the first before its
+   * pane had rendered it.
+   */
+  const deliverPrompt = useCallback((tabId: string, text: string, submit: boolean) => {
+    pasteTokenRef.current += 1;
+    const request = { token: pasteTokenRef.current, text, submit };
+    setPasteRequests((current) => ({ ...current, [tabId]: request }));
+  }, []);
   const runPrompt = useCallback(
-    (prompt: QuickPrompt) => {
-      if (activeChat) {
-        pasteTokenRef.current += 1;
-        setPasteRequest({
-          tabId: activeChat.id,
-          token: pasteTokenRef.current,
-          text: prompt.text,
-          submit: prompt.submit,
-        });
+    async (prompt: QuickPrompt) => {
+      const deliver = (tabId: string, submit: boolean) => deliverPrompt(tabId, prompt.text, submit);
+      if (activeChat && !prompt.newSession) {
+        deliver(activeChat.id, prompt.submit);
         return;
       }
-      // Nothing to paste into: a new chat with the prompt as its opening draft.
-      // Never sent from here, even for a "send" prompt — the session is not up
-      // yet, and a first message is worth a look before it goes.
-      if (!activeRepo) {
+      const where = (prompt.newSession && prompt.project) || activeRepo;
+      if (!where) {
         setSystemMessage("Open a repo first: a prompt needs a session to go to.");
         return;
       }
-      const tab: ChatTab = {
-        ...newSessionTab(activeRepo),
-        sessionId: null,
-        surface: "chat",
-        draft: prompt.text,
-      };
+      const root = where === activeRepo ? where : await repoRoot(where);
+      if (root !== activeRepo) setActiveRepo(root);
+      // Always a chat pane, whatever the default surface: a pty would take the
+      // paste at the shell prompt, before `claude` is up to read it.
+      const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
       setTabs((current) => [...current, tab]);
       setActiveTab(tab.id);
+      // A prompt that asked for a new session gets its "send" honoured once the
+      // pane is up. One that only landed here because nothing was in front is
+      // left as a draft: nobody chose to start a session with it.
+      deliver(tab.id, prompt.newSession && prompt.submit);
     },
-    [activeChat, activeRepo, newSessionTab],
+    [activeChat, activeRepo, newSessionTab, deliverPrompt],
   );
-  const pasteRequestFor = (tabId: string): PasteRequest | null =>
-    pasteRequest?.tabId === tabId ? pasteRequest : null;
+  const handleRunPrompt = useCallback(
+    (prompt: QuickPrompt) => void runPrompt(prompt),
+    [runPrompt],
+  );
+  /** Recent repos first, then every other one, as the quick-open lists them. */
+  const promptProjects = useMemo(
+    () => buildEntries(sessionGroups, repos).map(({ path, label }) => ({ path, label })),
+    [sessionGroups, repos],
+  );
+  const pasteRequestFor = (tabId: string): PasteRequest | null => pasteRequests[tabId] ?? null;
+
+  /**
+   * A scheduled prompt's run: a new chat that sends, opened behind whatever
+   * you are doing. No tab switch and no repo switch, because a schedule firing
+   * must not pull the workbench out from under a half-typed message; the run
+   * shows up in the rail like any other session, and the status line says so.
+   */
+  const runScheduled = useCallback(
+    async (prompt: QuickPrompt) => {
+      const where = prompt.project ?? activeRepo;
+      if (!where) {
+        setSystemMessage(`Scheduled “${prompt.label}” skipped: no repo to run it in.`);
+        return;
+      }
+      const root = await repoRoot(where);
+      const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
+      setTabs((current) => [...current, tab]);
+      deliverPrompt(tab.id, prompt.text, true);
+      setSystemMessage(`Scheduled “${prompt.label}” started in ${repoLabel(root)}.`);
+    },
+    [activeRepo, newSessionTab, deliverPrompt],
+  );
+  const runScheduledRef = useRef(runScheduled);
+  useEffect(() => {
+    runScheduledRef.current = runScheduled;
+  });
+  /**
+   * The schedule clock. Main window only: the prompt list is shared by every
+   * window, and two windows each firing a run would be two sessions doing the
+   * same job. Reads the list from the store on each tick, so an edit in any
+   * window is picked up without a message between them.
+   *
+   * No catch-up: a run whose minute passed while the app was closed or the
+   * machine asleep is skipped, not replayed late, the way cron itself does.
+   */
+  const firedRef = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!isMainWindow()) return;
+    const tick = () => {
+      const now = new Date();
+      const minute = Math.floor(now.getTime() / 60_000);
+      for (const prompt of readPrompts()) {
+        if (!prompt.schedule || firedRef.current.get(prompt.id) === minute) continue;
+        const parsed = parseCron(prompt.schedule);
+        if (!parsed.ok || !cronMatches(parsed.cron, now)) continue;
+        firedRef.current.set(prompt.id, minute);
+        void runScheduledRef.current(prompt);
+      }
+    };
+    // Well under a minute, so a tick lands inside every minute even when the
+    // timer is throttled in a hidden window.
+    const timer = window.setInterval(tick, SCHEDULE_TICK_MS);
+    tick();
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Follow the front tab, so the status panel describes what you are looking at.
   useEffect(() => {
@@ -2664,6 +2757,14 @@ function Workbench() {
             </button>
             <button
               className="activity-item"
+              aria-label="Remote control"
+              onClick={startRemoteControl}
+              title="Remote control: run `claude remote-control` in this repo's terminal, to drive sessions from claude.ai or the Claude app"
+            >
+              <RemoteControlIcon />
+            </button>
+            <button
+              className="activity-item"
               aria-label="Settings"
               onClick={() => setSettingsOpen(true)}
               title={`Settings (${formatChord(CHORD.settings)})`}
@@ -2743,8 +2844,9 @@ function Workbench() {
           >
             <PaneBoundary label="prompts">
               <QuickPromptsPane
-                onRun={runPrompt}
+                onRun={handleRunPrompt}
                 target={activeChat ? chatLabel(activeChat) : null}
+                projects={promptProjects}
               />
             </PaneBoundary>
           </div>

@@ -269,6 +269,48 @@ export function TerminalIcon(props: IconProps) {
   );
 }
 
+/** Remote control: a phone with signal arcs off its corner. */
+export function RemoteControlIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="2.6" y="4.6" width="6.4" height="9.6" rx="1.2" />
+      <path d="M5.2 12.2h1.2" />
+      <path d="M10.6 4.4a2.6 2.6 0 0 1 1.6 2.4M11.4 1.8a5.2 5.2 0 0 1 3.4 4.9" />
+    </Icon>
+  );
+}
+
+/** Clock, for a prompt that runs on a schedule. */
+export function ClockIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.6V8l2.4 1.6" />
+    </Icon>
+  );
+}
+
+/** Send: a paper plane, for a prompt that goes as soon as it is clicked. */
+export function SendIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14.2 1.8L1.8 6.9l5 2.3 2.3 5z" />
+      <path d="M14.2 1.8L6.8 9.2" />
+    </Icon>
+  );
+}
+
+/** Paste into the composer: a clipboard with an arrow going down into it. */
+export function PasteIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M5.2 2.8H4a.8.8 0 0 0-.8.8v10a.8.8 0 0 0 .8.8h8a.8.8 0 0 0 .8-.8v-10a.8.8 0 0 0-.8-.8h-1.2" />
+      <path d="M5.8 1.6h4.4v2.2H5.8z" />
+      <path d="M8 6.2v5M6.1 9.4L8 11.2l1.9-1.8" />
+    </Icon>
+  );
+}
+
 /** Bin, for deleting something that is not a file or a change. */
 export function TrashIcon(props: IconProps) {
   return (

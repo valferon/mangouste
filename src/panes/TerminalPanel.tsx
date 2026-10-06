@@ -14,6 +14,12 @@ import { TerminalPane } from "./TerminalPane";
  */
 export interface TerminalActions {
   newTab: () => void;
+  /**
+   * Bring up the tab running `launch` in the front repo, opening one if the
+   * repo has none: a command like `claude remote-control` is a long-lived
+   * service, and a second click wants the one already running, not a twin.
+   */
+  runInTab: (launch: string, title: string) => void;
   split: () => void;
   closePane: () => void;
 }
@@ -33,6 +39,10 @@ interface TerminalTab {
   id: string;
   slots: TerminalSlot[];
   activeSlot: string;
+  /** Typed into the tab's first shell once it is up. Absent for a plain shell. */
+  launch?: string;
+  /** Shown in place of the tab's number, for a tab opened to run something. */
+  title?: string;
 }
 
 /** Every terminal one repo owns. */
@@ -60,9 +70,9 @@ function makeSlot(): TerminalSlot {
   return { id: mintId("term"), weight: 1 };
 }
 
-function makeTab(): TerminalTab {
+function makeTab(launch?: string, title?: string): TerminalTab {
   const slot = makeSlot();
-  return { id: mintId("tab"), slots: [slot], activeSlot: slot.id };
+  return { id: mintId("tab"), slots: [slot], activeSlot: slot.id, launch, title };
 }
 
 function makeGroup(): RepoTerminals {
@@ -174,6 +184,25 @@ export function TerminalPanel({
       return { ...current, [repo]: { tabs: [...existing.tabs, tab], activeTab: tab.id } };
     });
   }, [repo, visible, onRequestShow, focusSlot]);
+
+  const runInTab = useCallback(
+    (launch: string, title: string) => {
+      if (!repo) return;
+      if (!visible) onRequestShow();
+      const running = groups[repo]?.tabs.find((tab) => tab.launch === launch);
+      const tab = running ?? makeTab(launch, title);
+      focusSlot(tab.activeSlot);
+      setGroups((current) => {
+        const existing = current[repo];
+        if (!existing) return { ...current, [repo]: { tabs: [tab], activeTab: tab.id } };
+        const tabs = existing.tabs.some((candidate) => candidate.id === tab.id)
+          ? existing.tabs
+          : [...existing.tabs, tab];
+        return { ...current, [repo]: { tabs, activeTab: tab.id } };
+      });
+    },
+    [repo, visible, groups, onRequestShow, focusSlot],
+  );
 
   const splitTab = useCallback(() => {
     if (!repo) return;
@@ -326,9 +355,14 @@ export function TerminalPanel({
   // Publish the actions the Terminal menu drives, and take them back down on
   // unmount so a stale closure cannot outlive the panel.
   useEffect(() => {
-    onRegisterActions?.({ newTab: addTab, split: splitTab, closePane: closeActiveSlot });
+    onRegisterActions?.({
+      newTab: addTab,
+      runInTab,
+      split: splitTab,
+      closePane: closeActiveSlot,
+    });
     return () => onRegisterActions?.(null);
-  }, [onRegisterActions, addTab, splitTab, closeActiveSlot]);
+  }, [onRegisterActions, addTab, runInTab, splitTab, closeActiveSlot]);
 
   /** Right-click on the bar, a tab, or the empty strip beside them. */
   const barMenu = useCallback(
@@ -389,10 +423,10 @@ export function TerminalPanel({
               data-active={tab.id === group.activeTab}
               onClick={() => selectTab(tab.id)}
               onContextMenu={(event) => menu.openContextMenu(event, barMenu(tab.id))}
-              title={tab.slots.length > 1 ? `${tab.slots.length} panes` : undefined}
+              title={tab.launch ?? (tab.slots.length > 1 ? `${tab.slots.length} panes` : undefined)}
             >
               <span>
-                {index + 1}
+                {tab.title ?? index + 1}
                 {tab.slots.length > 1 ? ` · ${tab.slots.length}` : ""}
               </span>
               <span
@@ -480,6 +514,9 @@ export function TerminalPanel({
                             <TerminalPane
                               id={slot.id}
                               cwd={groupRepo}
+                              // The tab's command runs in the shell it opened
+                              // with; a split beside it is a plain shell.
+                              launch={slot.id === tab.slots[0].id ? tab.launch : undefined}
                               refitToken={refitToken + showToken}
                               themeKey={themeKey}
                               focusRequest={
