@@ -663,6 +663,11 @@ export const FileView = memo(function FileView({
   const menu = useMenu();
   /** What is on disk, as far as this pane knows. */
   const [saved, setSaved] = useState<{ text: string; modifiedMs: number } | null>(null);
+  /**
+   * The file is not UTF-8, so the buffer has U+FFFD where its bytes were.
+   * Read-only: a save would make every one of those permanent.
+   */
+  const [lossy, setLossy] = useState(false);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<EditorState>({ kind: "clean" });
@@ -682,17 +687,29 @@ export const FileView = memo(function FileView({
 
   const dirty = saved !== null && draft !== saved.text;
 
+  /**
+   * The path the tab shows now. A tab's path changes in place, so a read
+   * started for the old one can land after the switch; checked before any
+   * result is applied, or file A's bytes would sit in file B's buffer and the
+   * next save would write them there.
+   */
+  const pathRef = useRef(path);
+  useEffect(() => {
+    pathRef.current = path;
+  }, [path]);
+
   const load = useCallback(
     async (signal?: { cancelled: boolean }) => {
       try {
         const file = await readTextFileMeta(path);
-        if (signal?.cancelled) return;
+        if (signal?.cancelled || pathRef.current !== path) return;
         setSaved({ text: file.content, modifiedMs: file.modifiedMs });
         setDraft(file.content);
+        setLossy(file.lossy);
         setError(null);
         setState({ kind: "clean" });
       } catch (e) {
-        if (signal?.cancelled) return;
+        if (signal?.cancelled || pathRef.current !== path) return;
         setError(String(e));
       }
     },
@@ -703,6 +720,7 @@ export const FileView = memo(function FileView({
     const signal = { cancelled: false };
     setSaved(null);
     setDraft("");
+    setLossy(false);
     setError(null);
     setState({ kind: "clean" });
     void load(signal);
@@ -720,7 +738,7 @@ export const FileView = memo(function FileView({
    */
   const save = useCallback(
     async (force = false): Promise<boolean> => {
-      if (saved === null) return false;
+      if (saved === null || lossy) return false;
       const text = draft;
       setState({ kind: "saving" });
       try {
@@ -729,16 +747,19 @@ export const FileView = memo(function FileView({
           text,
           force ? undefined : saved.modifiedMs,
         );
+        // Written to the right file either way; only the buffer has moved on.
+        if (pathRef.current !== path) return true;
         setSaved({ text, modifiedMs });
         setState({ kind: "saved" });
         return true;
       } catch (e) {
+        if (pathRef.current !== path) return false;
         const message = String(e);
         setState(message.includes(STALE_MARKER) ? { kind: "stale" } : { kind: "error", message });
         return false;
       }
     },
-    [draft, path, saved],
+    [draft, lossy, path, saved],
   );
 
   /**
@@ -763,11 +784,14 @@ export const FileView = memo(function FileView({
     try {
       result = await formatText(path, before);
     } catch (e) {
+      if (pathRef.current !== path) return false;
       // No formatter installed for this file type arrives here too. It is a note
       // rather than a failure, and reads as one in the status line.
       setState({ kind: "error", message: String(e) });
       return false;
     }
+    // The old file's text, formatted, must not land in the new file's buffer.
+    if (pathRef.current !== path) return false;
     if (result.changed) {
       if (field) {
         // The caret keeps its offset, which after a reflow is near where it was
@@ -894,9 +918,11 @@ export const FileView = memo(function FileView({
   // is worse than one that quietly caught up.
   useEffect(() => {
     if (!visible || dirty) return;
+    const signal = { cancelled: false };
     const onFocus = () => {
       void readTextFileMeta(path)
         .then((file) => {
+          if (signal.cancelled || pathRef.current !== path) return;
           const current = savedRef.current;
           if (current === null || current.modifiedMs === file.modifiedMs) return;
           // Re-checked here, not only in the effect's guard: the read is a round
@@ -905,12 +931,16 @@ export const FileView = memo(function FileView({
           if (draftRef.current !== current.text) return;
           setSaved({ text: file.content, modifiedMs: file.modifiedMs });
           setDraft(file.content);
+          setLossy(file.lossy);
           setState({ kind: "clean" });
         })
         .catch(() => {});
     };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    return () => {
+      signal.cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
   }, [dirty, path, visible]);
 
   /**
@@ -1212,6 +1242,11 @@ export const FileView = memo(function FileView({
           </button>
         </div>
       </div>
+      {lossy && (
+        <div className="editor-conflict">
+          <span>Not UTF-8 text: shown with � where its bytes could not be decoded, and read-only so a save cannot make that permanent.</span>
+        </div>
+      )}
       {state.kind === "stale" && (
         <div className="editor-conflict">
           <span>Changed on disk since it was opened — probably by claude.</span>
@@ -1261,6 +1296,7 @@ export const FileView = memo(function FileView({
             ref={textareaRef}
             className="editor-input selectable"
             value={draft}
+            readOnly={lossy}
             spellCheck={false}
             wrap="off"
             onChange={(event) => {

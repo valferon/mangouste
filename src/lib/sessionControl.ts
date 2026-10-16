@@ -63,6 +63,20 @@ export const MAX_TIMED = 50;
 /** The `origin` of a prompt scheduled through `mangouste --mcp`, which has no session. */
 export const OUTSIDE_ORIGIN = "outside";
 
+/**
+ * The permission mode for a session that a session started: through
+ * `new_session` or `fork_session`, or a prompt one scheduled.
+ *
+ * Never looser than `default`. The app-wide mode is the user's choice for
+ * sessions they start; handing it to one a model started means a chat the user
+ * keeps on prompts can open a sibling that runs in `bypassPermissions`, and a
+ * prompt injection that reaches `new_session` gets the same. `plan` is kept,
+ * being stricter still.
+ */
+export function controlSpawnMode(appMode: string): string {
+  return appMode === "plan" ? "plan" : "default";
+}
+
 /** Furthest ahead a one-off may be set. Past this it is a typo, not a plan. */
 const MAX_LEAD_MS = 366 * 24 * 60 * 60 * 1000;
 

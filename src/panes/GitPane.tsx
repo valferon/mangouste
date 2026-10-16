@@ -207,6 +207,9 @@ export const GitPane = memo(function GitPane({
     setNote(null);
     setBranchMode(null);
     setBranches(null);
+    // And the file list: until the new repo's status lands, the old one's rows
+    // would offer stage and discard on paths that are resolved against `cwd`.
+    setStatus(null);
   }, [cwd]);
 
   /**

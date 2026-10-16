@@ -300,10 +300,13 @@ export const Dashboard = memo(function Dashboard({
     try {
       setStats(await statsSummary());
       setError(null);
-      lastRefresh.current = Date.now();
     } catch (e) {
       setError(String(e));
     } finally {
+      // Stamped on failure too: stamped only on success, a scan that kept
+      // failing ran again on every sessions-changed event, which is the very
+      // load the throttle exists to stop.
+      lastRefresh.current = Date.now();
       inFlight.current = false;
       setLoading(false);
     }

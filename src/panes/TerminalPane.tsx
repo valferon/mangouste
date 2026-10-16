@@ -285,6 +285,8 @@ export function TerminalPane({
      * are held here and flushed once the instance is known.
      */
     let pendingData: Array<{ instance: number; data: string }> = [];
+    /** Exits seen before `ptyOpen` said which instance is ours, by instance. */
+    let pendingExits: number[] = [];
     const disposables: Array<() => void> = [];
 
     // Keystrokes out. Enter into a dead terminal is the respawn gesture, so it
@@ -392,11 +394,20 @@ export function TerminalPane({
       }
       if (event.instance === instance) term.write(decodeBase64(event.data));
     });
+    const markExited = () => {
+      deadRef.current = true;
+      term.write("\r\n\x1b[90m[process exited — press Enter for a new shell]\x1b[0m\r\n");
+    };
     const exitSubscription = onPtyExit((event) => {
-      if (event.id === id && event.instance === instance && !disposed) {
-        deadRef.current = true;
-        term.write("\r\n\x1b[90m[process exited — press Enter for a new shell]\x1b[0m\r\n");
+      if (event.id !== id || disposed) return;
+      // Held like early output: a shell that dies at once (a bad rc file, a
+      // missing cwd) can exit before the open's reply says which instance is
+      // ours, and dropping that exit left a dead pane looking alive.
+      if (instance === null) {
+        pendingExits.push(event.instance);
+        return;
       }
+      if (event.instance === instance) markExited();
     });
 
     const opened = ptyOpen(id, cwd, term.cols, term.rows, sessionRef.current)
@@ -408,8 +419,10 @@ export function TerminalPane({
           for (const event of pendingData) {
             if (event.instance === info.instance) term.write(decodeBase64(event.data));
           }
+          if (pendingExits.includes(info.instance)) markExited();
         }
         pendingData = [];
+        pendingExits = [];
         // Once per pane, and only while this effect still owns it. Enter into a
         // dead pane promises a shell, not another run of the program, so the
         // latch is set here and never cleared. What it is not is `generation
@@ -417,7 +430,7 @@ export function TerminalPane({
         // lost. `disposed` is what keeps StrictMode's discarded first mount
         // from typing into the pty its replacement has already taken over.
         const command = launchRef.current;
-        if (!disposed && command && !launchedRef.current) {
+        if (!disposed && command && !launchedRef.current && !deadRef.current) {
           launchedRef.current = true;
           writePty(`${command}\r`);
         }

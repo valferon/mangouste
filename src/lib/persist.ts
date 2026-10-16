@@ -84,6 +84,12 @@ export const KEYS = {
     composerHeight: "mangouste.composerHeight",
     /** The saved prompts the rail's Prompts view replays into a session. */
     quickPrompts: "mangouste.quickPrompts",
+    /**
+     * The minute each cron prompt last fired. Shared by every window, not kept
+     * in the one that fired it: when the window running the schedule closes,
+     * the next one takes over and must not fire that minute's run again.
+     */
+    cronFired: "mangouste.cronFired",
   },
   overlay: {
     sessionsSeen: "mangouste.sessionsSeen",
@@ -200,18 +206,25 @@ export function initStore(): StoreState {
   return "migrated";
 }
 
+/** A JSON object: arrays and null are `typeof "object"` too, and neither is one. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Read and validate a JSON value.
  *
  * `isValid` is the point: it is what turns "whatever was in there" into the type
  * the caller claims. A value that fails it is treated as absent.
  */
-export function readJson<T>(key: string, fallback: T, isValid: (value: unknown) => boolean): T {
+export function readJson<T>(key: string, fallback: T, isValid: (value: unknown) => value is T): T {
   try {
     const raw = localStorage.getItem(key);
     if (raw === null) return fallback;
     const parsed: unknown = JSON.parse(raw);
-    return isValid(parsed) ? (parsed as T) : fallback;
+    // A type guard, not a boolean, so the check is what proves the type: a
+    // validator that tested less than `T` claims no longer compiles.
+    return isValid(parsed) ? parsed : fallback;
   } catch {
     return fallback;
   }
@@ -287,11 +300,7 @@ export function writeBoolean(key: string, value: boolean): void {
  * enumerate as something map-shaped — so they yield {} outright.
  */
 export function readBoolMap(key: string): Record<string, boolean> {
-  const raw = readJson<Record<string, unknown>>(
-    key,
-    {},
-    (value) => typeof value === "object" && value !== null && !Array.isArray(value),
-  );
+  const raw = readJson<Record<string, unknown>>(key, {}, isRecord);
   const map: Record<string, boolean> = {};
   for (const [entry, flag] of Object.entries(raw)) {
     if (typeof flag === "boolean") map[entry] = flag;

@@ -163,6 +163,46 @@ export function readPrompts(): QuickPrompt[] {
   return cleanPrompts(readJson<unknown>(PROMPTS_KEY, [], Array.isArray));
 }
 
+/** Prompt id to the minute (epoch minutes) its cron last fired. */
+export type FiredLedger = Readonly<Record<string, number>>;
+
+const FIRED_KEY = KEYS.prefs.cronFired;
+
+function isLedger(value: unknown): value is FiredLedger {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((minute) => typeof minute === "number")
+  );
+}
+
+export function readFired(): FiredLedger {
+  return readJson<FiredLedger>(FIRED_KEY, {}, isLedger);
+}
+
+export function writeFired(ledger: FiredLedger): void {
+  writeJson(FIRED_KEY, ledger);
+}
+
+/**
+ * Claim `minute` for prompt `id`: the ledger to write when it has not fired
+ * yet in that minute, or null when it has.
+ *
+ * Entries for prompts no longer in `liveIds` are dropped on the way, so a
+ * deleted prompt does not keep its row forever.
+ */
+export function claimMinute(
+  ledger: FiredLedger,
+  id: string,
+  minute: number,
+  liveIds: ReadonlySet<string>,
+): FiredLedger | null {
+  if ((ledger[id] ?? -1) >= minute) return null;
+  const kept = Object.fromEntries(Object.entries(ledger).filter(([key]) => liveIds.has(key)));
+  return { ...kept, [id]: minute };
+}
+
 export function writePrompts(prompts: readonly QuickPrompt[]): void {
   writeJson(PROMPTS_KEY, prompts);
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PROMPTS_CHANGED_EVENT));

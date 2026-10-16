@@ -27,6 +27,14 @@ import {
   type UpstreamNews,
 } from "../lib/upstream";
 
+/** Enter or Space on a row that acts on click, as on a button. */
+function activate(event: { key: string; preventDefault: () => void }, run: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  run();
+}
+
+
 /**
  * How often the branch and its counts are re-read from refs on disk.
  *
@@ -587,7 +595,13 @@ function BranchPicker({
         />
         <div className="branch-list">
           {creatable && (
-            <div className="row" onClick={() => onCreate(filter.trim())}>
+            <div
+              className="row"
+              role="button"
+              tabIndex={0}
+              onClick={() => onCreate(filter.trim())}
+              onKeyDown={(event) => activate(event, () => onCreate(filter.trim()))}
+            >
               <PlusIcon />
               <span className="label">Create branch “{filter.trim()}”</span>
             </div>
@@ -597,7 +611,10 @@ function BranchPicker({
               key={`${row.remote ? "r" : "l"}:${row.name}`}
               className="row"
               data-selected={row.name === current}
+              role="button"
+              tabIndex={0}
               onClick={() => onPick(row.name)}
+              onKeyDown={(event) => activate(event, () => onPick(row.name))}
             >
               <BranchIcon />
               <span className="label">{row.name}</span>

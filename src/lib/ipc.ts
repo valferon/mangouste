@@ -638,11 +638,26 @@ export const onPermissionRequest = (
 
 /* ---------- session control ---------- */
 
-/** A session calling one of mangouste's MCP tools. Main window only. */
+/**
+ * A session calling one of mangouste's MCP tools. Scoped to this window: the
+ * backend sends each call to one window only (see `isControlWindow`), and a
+ * global `listen` would hear calls sent to every other window as well.
+ */
 export const onControlRequest = (
   handler: (request: ControlRequest) => void,
 ): Promise<UnlistenFn> =>
-  listen<ControlRequest>("control://request", (e) => handler(e.payload));
+  getCurrentWebviewWindow().listen<ControlRequest>("control://request", (e) =>
+    handler(e.payload),
+  );
+
+/**
+ * Whether this window runs the prompt schedule and takes control calls: `main`
+ * while it is open, the lowest-numbered window left once it is not.
+ */
+export const isControlWindow = () => invoke<boolean>("is_control_window");
+
+/** Enter this window into that election. Only once its control listener is up. */
+export const claimControl = () => invoke<void>("claim_control");
 
 /** Answer a control call: a result on success, a sentence for the model on failure. */
 export const controlRespond = (

@@ -280,6 +280,8 @@ export interface DirEntryInfo {
 export interface FileText {
   content: string;
   modifiedMs: number;
+  /** Not UTF-8: `content` shows U+FFFD in its place, so it opens read-only. */
+  lossy: boolean;
 }
 
 /** A file's leading bytes, base64, from `read_file_bytes`. */

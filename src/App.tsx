@@ -43,6 +43,8 @@ import {
   focusWindow,
   homeDir,
   onControlRequest,
+  isControlWindow,
+  claimControl,
   onSessionTransition,
   openExternal,
   openWindow,
@@ -82,6 +84,9 @@ import {
   readPrompts,
   removePrompt,
   writePrompts,
+  claimMinute,
+  readFired,
+  writeFired,
   DIRECT_KEEP,
   type DirectRequest,
   type PasteRequest,
@@ -95,6 +100,7 @@ import {
   planFork,
   planNewSession,
   planSchedule,
+  controlSpawnMode,
   type ControlRequest,
 } from "./lib/sessionControl";
 import { repoLabel } from "./lib/visitedRepos";
@@ -2188,20 +2194,27 @@ function Workbench() {
         return false;
       }
       const root = await repoRoot(where);
-      const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
+      const tab: ChatTab = {
+        ...newSessionTab(root),
+        sessionId: null,
+        surface: "chat",
+        // A prompt a session scheduled starts a session a session asked for.
+        ...(prompt.origin !== null ? { permissionMode: controlSpawnMode(permissionMode) } : {}),
+      };
       setTabs((current) => [...current, tab]);
       deliverPrompt(tab.id, prompt.text, true);
       setSystemMessage(`Scheduled “${prompt.label}” started in ${repoLabel(root)}.`);
       return true;
     },
-    [activeRepo, newSessionTab, deliverPrompt, runInSession],
+    [activeRepo, newSessionTab, deliverPrompt, runInSession, permissionMode],
   );
   const runScheduledRef = useRef(runScheduled);
   useEffect(() => {
     runScheduledRef.current = runScheduled;
   });
   /**
-   * The schedule clock. Main window only: the prompt list is shared by every
+   * The schedule clock. One window only, the one `isControlWindow` names
+   * (`main` while it is open): the prompt list is shared by every
    * window, and two windows each firing a run would be two sessions doing the
    * same job. Reads the list from the store on each tick, so an edit in any
    * window is picked up without a message between them.
@@ -2213,11 +2226,25 @@ function Workbench() {
    * (its session is in a terminal tab, its repo unknown) stays listed as "due
    * now" and is tried again at the next launch, not on every tick.
    */
-  const firedRef = useRef(new Map<string, number>());
   const triedOnceRef = useRef(new Set<string>());
   useEffect(() => {
-    if (!isMainWindow()) return;
+    // Every window keeps the timer and asks on each tick, because the role
+    // moves: close `main` with a second window open and that one takes over.
+    let warned = false;
     const tick = () => {
+      void isControlWindow()
+        .then((owns) => {
+          if (owns) runDue();
+        })
+        .catch((e: unknown) => {
+          // Said once: failing here means no window runs the schedule at all,
+          // which is worth knowing, and not worth knowing every 20 seconds.
+          if (warned) return;
+          warned = true;
+          setSystemMessage(`Scheduled prompts are paused: ${String(e)}.`);
+        });
+    };
+    const runDue = () => {
       const now = new Date();
       const minute = Math.floor(now.getTime() / 60_000);
       for (const prompt of dueOneOffs(readPrompts(), now)) {
@@ -2227,11 +2254,17 @@ function Workbench() {
           if (ran) writePrompts(removePrompt(readPrompts(), prompt.id));
         });
       }
-      for (const prompt of readPrompts()) {
-        if (!prompt.schedule || firedRef.current.get(prompt.id) === minute) continue;
+      const prompts = readPrompts();
+      const liveIds = new Set(prompts.map((prompt) => prompt.id));
+      for (const prompt of prompts) {
+        if (!prompt.schedule) continue;
         const parsed = parseCron(prompt.schedule);
         if (!parsed.ok || !cronMatches(parsed.cron, now)) continue;
-        firedRef.current.set(prompt.id, minute);
+        // Claimed in the shared store, not this window's memory: a window that
+        // takes the schedule over mid-minute sees what the last one fired.
+        const claimed = claimMinute(readFired(), prompt.id, minute, liveIds);
+        if (claimed === null) continue;
+        writeFired(claimed);
         void runScheduledRef.current(prompt);
       }
     };
@@ -2245,7 +2278,8 @@ function Workbench() {
   /**
    * A session calling mangouste's MCP tools (see `lib/sessionControl.ts`).
    *
-   * Main window only, like the clock: the backend sends these nowhere else.
+   * One window at a time, like the clock: the backend sends each call only to
+   * the window `isControlWindow` names, and the listener is scoped to its own.
    * Every call is answered, success or not, because the session's tool call
    * is blocked on the reply until the bridge gives up on it.
    */
@@ -2275,7 +2309,12 @@ function Workbench() {
           const plan = planNewSession(request.arguments, caller);
           if (!plan.ok) return plan;
           const root = await repoRoot(plan.value.project);
-          const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
+          const tab: ChatTab = {
+            ...newSessionTab(root),
+            sessionId: null,
+            surface: "chat",
+            permissionMode: controlSpawnMode(permissionMode),
+          };
           setTabs((current) => [...current, tab]);
           deliverDirect(tab.id, plan.value.text);
           if (plan.value.focus) {
@@ -2298,6 +2337,7 @@ function Workbench() {
             // The parent's transcript is what the fork opens on.
             resumeFile: known?.file ?? null,
             forkFrom: plan.value.session,
+            permissionMode: controlSpawnMode(permissionMode),
           };
           setTabs((current) => [...current, tab]);
           if (plan.value.text) deliverDirect(tab.id, plan.value.text);
@@ -2313,14 +2353,13 @@ function Workbench() {
           return { ok: false, error: `unknown tool ${String(request.tool)}` };
       }
     },
-    [newSessionTab, deliverDirect],
+    [newSessionTab, deliverDirect, permissionMode],
   );
   const handleControlRef = useRef(handleControl);
   useEffect(() => {
     handleControlRef.current = handleControl;
   });
   useEffect(() => {
-    if (!isMainWindow()) return;
     const unlisten = onControlRequest((request) => {
       void handleControlRef.current(request)
         .catch((e: unknown) => ({ ok: false as const, error: `mangouste failed: ${String(e)}` }))
@@ -2329,6 +2368,9 @@ function Workbench() {
           // The bridge has already given up on this call; nothing waits for it.
         });
     });
+    // Claimed only once subscribed: before that, a call routed here would
+    // reach nobody and wait out the bridge's reply timeout.
+    void unlisten.then(() => claimControl()).catch(() => {});
     return () => {
       void unlisten.then((stop) => stop());
     };
@@ -3237,7 +3279,7 @@ function Workbench() {
                       onPhase={tab.id === activeTab ? setPhase : noop}
                       onStatus={statusHandlerFor(tab.id)}
                       onStats={tab.id === activeTab ? handleChatStats : noop}
-                      permissionMode={permissionMode}
+                      permissionMode={tab.permissionMode ?? permissionMode}
                       model={modelAlias}
                       onModel={setModelAlias}
                       feedback={feedback}

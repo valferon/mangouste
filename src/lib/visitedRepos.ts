@@ -18,7 +18,7 @@
  */
 
 import { useCallback, useMemo, useState } from "react";
-import { KEYS, readJson, writeJson } from "./persist";
+import { KEYS, isRecord, readJson, writeJson } from "./persist";
 import type { ProjectGroup } from "./types";
 
 const VISITED_KEY = KEYS.overlay.reposVisited;
@@ -164,11 +164,7 @@ export function useVisitedRepos(): VisitedRepos {
   const [visits, setVisits] = useState<RepoVisits>(() =>
     pruneVisits(
       cleanVisits(
-        readJson<Record<string, unknown>>(
-          VISITED_KEY,
-          {},
-          (value) => typeof value === "object" && value !== null && !Array.isArray(value),
-        ),
+        readJson<Record<string, unknown>>(VISITED_KEY, {}, isRecord),
       ),
     ),
   );

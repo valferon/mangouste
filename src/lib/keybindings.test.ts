@@ -114,3 +114,39 @@ describe("detectMac", () => {
     expect(detectMac("", "")).toBe(false);
   });
 });
+
+/**
+ * One chord, one action. A duplicate is silent: whichever handler runs first
+ * wins and the other shortcut simply stops working. The pairs listed are
+ * shared on purpose, each half living where the other never fires.
+ */
+describe("chord uniqueness", () => {
+  const SHARED = new Set([
+    // A middle-click pastes in an editor and closes on a tab strip.
+    "closeTabAlt+primaryPaste",
+    // The terminal copies and pastes like everything else once Cmd frees it
+    // from Ctrl+C belonging to the shell.
+    "copy+terminalCopy",
+    "paste+terminalPaste",
+  ]);
+
+  const clashes = (chords: Record<string, string>) => {
+    const byChord = new Map<string, string[]>();
+    for (const [name, chord] of Object.entries(chords)) {
+      if (chord === "") continue;
+      byChord.set(chord, [...(byChord.get(chord) ?? []), name]);
+    }
+    return [...byChord.values()]
+      .filter((names) => names.length > 1)
+      .map((names) => names.sort().join("+"))
+      .filter((pair) => !SHARED.has(pair));
+  };
+
+  it("has no unplanned duplicates on Linux and Windows", () => {
+    expect(clashes(resolveChords(CHORD, false))).toEqual([]);
+  });
+
+  it("has no unplanned duplicates on macOS", () => {
+    expect(clashes(MAC)).toEqual([]);
+  });
+});

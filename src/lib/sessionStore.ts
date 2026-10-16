@@ -52,7 +52,7 @@ function isMark(value: unknown): value is Mark {
   );
 }
 
-function isPlainObject(value: unknown): boolean {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

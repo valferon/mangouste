@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addPrompt,
   appendToDraft,
+  claimMinute,
   cleanPrompts,
   deriveLabel,
   groupOf,
@@ -179,5 +180,21 @@ describe("appendToDraft", () => {
 
   it("appends on its own line", () => {
     expect(appendToDraft("half a thought \n", "hello")).toBe("half a thought\nhello");
+  });
+});
+
+describe("claimMinute", () => {
+  const live = new Set(["a", "b"]);
+
+  it("fires a cron once per minute, whichever window asks second", () => {
+    const first = claimMinute({}, "a", 100, live);
+    expect(first).toEqual({ a: 100 });
+    // The window that took over mid-minute reads the same store.
+    expect(claimMinute(first ?? {}, "a", 100, live)).toBeNull();
+    expect(claimMinute(first ?? {}, "a", 101, live)).toEqual({ a: 101 });
+  });
+
+  it("drops the entries of prompts that are gone", () => {
+    expect(claimMinute({ gone: 5, b: 7 }, "a", 100, live)).toEqual({ a: 100, b: 7 });
   });
 });

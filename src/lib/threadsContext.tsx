@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   memberOf,
   onThreadsChanged,
@@ -49,11 +49,20 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Bumped per reload. A change event and a save's own reload can be in flight
+   * together, and whichever list resolved last won, older or not.
+   */
+  const reloads = useRef(0);
   const reload = useCallback(async () => {
+    const mine = ++reloads.current;
     try {
-      setThreads(sortThreads(await threadsList()));
+      const listed = await threadsList();
+      if (mine !== reloads.current) return;
+      setThreads(sortThreads(listed));
       setError(null);
     } catch (err) {
+      if (mine !== reloads.current) return;
       setError(message(err));
     }
   }, []);

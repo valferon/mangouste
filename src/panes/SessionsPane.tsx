@@ -537,6 +537,12 @@ export const SessionsPane = memo(function SessionsPane({
   const queryRef = useRef("");
   /** Query the auto-escalation already fired for; it fires once per query. */
   const autoRan = useRef<string | null>(null);
+  /**
+   * Bumped per sweep. The result is already checked against `queryRef`; this
+   * is for the busy flag and the error, which an older sweep finishing late
+   * would otherwise clear or set on behalf of the newer one still running.
+   */
+  const deepSweep = useRef(0);
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
@@ -546,7 +552,9 @@ export const SessionsPane = memo(function SessionsPane({
       setGroups(scanned);
       onGroups(scanned);
     } catch {
-      setGroups([]);
+      // Kept, not cleared: one failed scan (a transcript mid-rotation, a slow
+      // disk) used to empty the whole sidebar until the next poll. What was
+      // listed a moment ago is a better answer than nothing.
     } finally {
       inFlight.current = false;
     }
@@ -830,6 +838,8 @@ export const SessionsPane = memo(function SessionsPane({
     async (mode: "literal" | "haiku") => {
       const raw = query.trim();
       if (!raw) return;
+      const sweep = ++deepSweep.current;
+      const current = () => sweep === deepSweep.current;
       setDeepBusy(mode);
       setDeepError(null);
       try {
@@ -839,7 +849,7 @@ export const SessionsPane = memo(function SessionsPane({
         if (mode === "haiku") {
           const expanded = await expandSearchTerms(raw);
           if (expanded.length === 0) {
-            setDeepError("Haiku suggested no usable terms");
+            if (current()) setDeepError("Haiku suggested no usable terms");
             return;
           }
           sentTerms = expanded;
@@ -859,9 +869,9 @@ export const SessionsPane = memo(function SessionsPane({
           hits: new Map(hits.map((hit) => [hit.id, hit])),
         });
       } catch (error) {
-        setDeepError(String(error));
+        if (current()) setDeepError(String(error));
       } finally {
-        setDeepBusy(null);
+        if (current()) setDeepBusy(null);
       }
     },
     [query],

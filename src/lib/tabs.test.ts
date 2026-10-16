@@ -408,3 +408,45 @@ describe("successorTab", () => {
     );
   });
 });
+
+describe("a chat tab's own permission mode", () => {
+  it("survives a store and restore, so a resume does not loosen it", () => {
+    const tab: Tab = {
+      kind: "chat",
+      id: "chat|/repo|s-9",
+      cwd: "/repo",
+      sessionId: "s-9",
+      resumeFile: "/t/s-9.jsonl",
+      surface: "chat",
+      permissionMode: "default",
+    };
+    const stored = toStoredTab(tab);
+    expect(stored).toMatchObject({ permissionMode: "default" });
+    expect(isStoredTab(stored)).toBe(true);
+    expect(restoreTab(stored as StoredTab)).toEqual(tab);
+  });
+
+  it("rejects a stored mode that is not a string", () => {
+    expect(
+      isStoredTab({
+        kind: "chat",
+        cwd: "/repo",
+        sessionId: "s-1",
+        resumeFile: null,
+        permissionMode: 7,
+      }),
+    ).toBe(false);
+  });
+
+  it("is left out for a tab on the app-wide mode", () => {
+    const stored = toStoredTab({
+      kind: "chat",
+      id: "t",
+      cwd: "/repo",
+      sessionId: "s-1",
+      resumeFile: null,
+      surface: "chat",
+    });
+    expect(stored).not.toHaveProperty("permissionMode");
+  });
+});

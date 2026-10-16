@@ -150,11 +150,15 @@ export const SearchPane = memo(function SearchPane({
     return () => clearTimeout(timer);
   }, [query, run]);
 
-  // A result set belongs to the repo it was found in.
+  // A result set belongs to the repo it was found in. So does a search still
+  // in flight: without the bump, the old repo's hits landed under the new one,
+  // replace buttons and all, and its `busy` was never cleared.
   useEffect(() => {
+    generation.current += 1;
     setOutcome(null);
     setError(null);
     setNote(null);
+    setBusy(false);
   }, [root]);
 
   /** Starts at the mounted value, so a restored view does not grab the caret. */

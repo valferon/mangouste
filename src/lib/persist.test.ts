@@ -6,6 +6,7 @@ import {
   readBoolean,
   readBoolMap,
   readEnum,
+  isRecord,
   readJson,
   readNumber,
   readString,
@@ -166,20 +167,23 @@ describe("readJson", () => {
     );
   });
 
-  const isObject = (value: unknown) =>
-    typeof value === "object" && value !== null && !Array.isArray(value);
+  const isObject = isRecord;
 
   it("returns a value that satisfies the guard", () => {
     expect(readJson("obj", {}, isObject)).toEqual({ a: 1 });
   });
 
   it("falls back when the guard rejects the shape", () => {
-    expect(readJson("arr", { fallback: true }, isObject)).toEqual({ fallback: true });
+    expect(readJson<Record<string, unknown>>("arr", { fallback: true }, isObject)).toEqual({
+      fallback: true,
+    });
   });
 
   it("falls back on a half-written value rather than throwing", () => {
     // A crash mid-write leaves exactly this.
-    expect(readJson("torn", { fallback: true }, isObject)).toEqual({ fallback: true });
+    expect(readJson<Record<string, unknown>>("torn", { fallback: true }, isObject)).toEqual({
+      fallback: true,
+    });
   });
 });
 

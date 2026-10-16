@@ -1066,7 +1066,22 @@ const ToolBlock = memo(function ToolBlock({
 
   return (
     <div className="tool-block" data-error={result?.isError ?? false}>
-      <div className="tool-head" onClick={() => setOpen((v) => !v)}>
+      <div
+        className="tool-head"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(event) => {
+          // Reachable by keyboard like the disclosure it is. Only on the head
+          // itself, so Enter in the path link inside still opens the file.
+          if (event.target !== event.currentTarget) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+      >
         <span className="twisty">{open ? "▾" : "▸"}</span>
         <span className="tool-name">{block.name}</span>
         {intent === null ? (
@@ -2722,7 +2737,6 @@ export const ChatPane = memo(function ChatPane({
       updatedInput?: unknown,
     ) => {
       logDebug(chatId, "permission", `${behavior} · ${request.toolName}${always ? " (always)" : ""}`);
-      if (always) alwaysAllowRef.current.add(request.toolName);
       // A refused question is not a refused command: say which it was, or the
       // model reads "denied" as "not allowed to ask" and asks again.
       const refusal =
@@ -2734,9 +2748,30 @@ export const ChatPane = memo(function ChatPane({
           message: behavior === "deny" ? refusal : undefined,
           updatedInput,
         });
-      } catch {
-        // The request may have already timed out; the card still resolves.
+      } catch (e) {
+        const error = String(e);
+        // The CLI already stopped waiting (timed out, typed over): there is
+        // nothing left to answer, so the card resolves. Anything else means the
+        // answer never reached the CLI, which is still blocked on it — marking
+        // the card decided would leave the turn hung behind a card that can no
+        // longer be clicked.
+        if (!error.includes("no such pending permission request")) {
+          logDebug(chatId, "permission", `answer not delivered: ${error}`);
+          appendItem({
+            kind: "notice",
+            key: nextKey(),
+            text: `Answer not delivered: ${error}. The prompt is still waiting.`,
+            tone: "warn",
+            action: null,
+          });
+          return;
+        }
       }
+      // Granted only once the answer has gone through. Granted before the
+      // await, an ask for the same tool arriving meanwhile was waved through
+      // on an answer that might never land, and undoing it on failure would
+      // also undo a grant an earlier card had made.
+      if (always) alwaysAllowRef.current.add(request.toolName);
       setPhase("receiving");
       setItems((current) =>
         current.map((item) =>
@@ -2746,7 +2781,7 @@ export const ChatPane = memo(function ChatPane({
         ),
       );
     },
-    [chatId],
+    [appendItem, chatId],
   );
 
   useEffect(() => {

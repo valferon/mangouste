@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { cleanPrompts, dueOneOffs, normaliseDraft, type QuickPrompt } from "./quickPrompts";
 import {
   MAX_TIMED,
+  controlSpawnMode,
   describeScheduled,
   findSession,
   planCancel,
@@ -252,5 +253,17 @@ describe("findSession", () => {
     ] as ProjectGroup[];
     expect(findSession(groups, "s-1")).toEqual({ cwd: "/repo", file: "/t/s-1.jsonl" });
     expect(findSession(groups, "nope")).toBeNull();
+  });
+});
+
+describe("controlSpawnMode", () => {
+  it("never hands a session-started session a mode looser than default", () => {
+    expect(controlSpawnMode("bypassPermissions")).toBe("default");
+    expect(controlSpawnMode("acceptEdits")).toBe("default");
+    expect(controlSpawnMode("default")).toBe("default");
+  });
+
+  it("keeps plan, which is stricter still", () => {
+    expect(controlSpawnMode("plan")).toBe("plan");
   });
 });

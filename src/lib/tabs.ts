@@ -48,6 +48,13 @@ export interface ChatTab {
    * Never persisted: a tab is only stored once it has a session of its own.
    */
   forkFrom?: string;
+  /**
+   * The permission mode this tab's process starts in, when it is not the
+   * app-wide one. Set for sessions another session started (see
+   * `controlSpawnMode`), and kept across a restore so a resume does not hand
+   * them the looser global mode after all.
+   */
+  permissionMode?: string;
 }
 
 /**
@@ -153,6 +160,8 @@ export type StoredTab =
       resumeFile: string | null;
       /** Absent in entries written before sessions could run in a terminal. */
       surface?: SessionSurface;
+      /** Absent for a tab that runs in the app-wide mode. */
+      permissionMode?: string;
     }
   | { kind: "file"; cwd: string; path: string }
   /** A history tab is its repo and nothing else: everything it shows is read
@@ -179,6 +188,7 @@ export function toStoredTab(tab: Tab): StoredTab | null {
         sessionId: tab.sessionId,
         resumeFile: tab.resumeFile,
         surface: tab.surface,
+        ...(tab.permissionMode ? { permissionMode: tab.permissionMode } : {}),
       };
     case "file":
       return { kind: "file", cwd: tab.cwd, path: tab.path };
@@ -234,7 +244,8 @@ export function isStoredTab(value: unknown): value is StoredTab {
         // rather than restoring a tab with no renderer.
         (value.surface === undefined ||
           value.surface === "chat" ||
-          value.surface === "terminal")
+          value.surface === "terminal") &&
+        (value.permissionMode === undefined || typeof value.permissionMode === "string")
       );
     case "file":
       // A file entry written before tabs were repo-owned has no cwd, so it
@@ -305,6 +316,7 @@ export function restoreTab(stored: StoredTab): Tab {
         sessionId: stored.sessionId,
         resumeFile: stored.resumeFile,
         surface: stored.surface ?? "chat",
+        ...(stored.permissionMode ? { permissionMode: stored.permissionMode } : {}),
       };
     case "file":
       return {
