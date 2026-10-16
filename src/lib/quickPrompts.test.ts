@@ -20,6 +20,9 @@ const prompt = (id: string, overrides: Partial<QuickPrompt> = {}): QuickPrompt =
   newSession: false,
   project: null,
   schedule: null,
+  at: null,
+  session: null,
+  origin: null,
   ...overrides,
 });
 
@@ -68,24 +71,24 @@ describe("cleanPrompts", () => {
 
 describe("normaliseDraft", () => {
   it("refuses an empty text", () => {
-    expect(normaliseDraft({ label: "x", text: " \n ", submit: true, newSession: false, project: null, schedule: null })).toBeNull();
+    expect(normaliseDraft({ label: "x", text: " \n ", submit: true, newSession: false, project: null, schedule: null, at: null, session: null, origin: null })).toBeNull();
   });
 
   it("trims the label and keeps the text verbatim", () => {
     expect(
-      normaliseDraft({ label: "  go ", text: "  a\nb ", submit: true, newSession: false, project: null, schedule: null }),
-    ).toEqual({ label: "go", text: "  a\nb ", submit: true, newSession: false, project: null, schedule: null });
+      normaliseDraft({ label: "  go ", text: "  a\nb ", submit: true, newSession: false, project: null, schedule: null, at: null, session: null, origin: null }),
+    ).toEqual({ label: "go", text: "  a\nb ", submit: true, newSession: false, project: null, schedule: null, at: null, session: null, origin: null });
   });
 
   it("keeps a project only for a new-session prompt", () => {
-    const draft = { label: "", text: "x", submit: false, project: "/repo", schedule: null };
+    const draft = { label: "", text: "x", submit: false, project: "/repo", schedule: null, at: null, session: null, origin: null };
     expect(normaliseDraft({ ...draft, newSession: true })?.project).toBe("/repo");
     expect(normaliseDraft({ ...draft, newSession: false })?.project).toBeNull();
   });
 });
 
 describe("schedules", () => {
-  const base = { label: "", text: "x", submit: false, newSession: false, project: "/r" };
+  const base = { label: "", text: "x", submit: false, newSession: false, project: "/r", at: null, session: null, origin: null };
 
   it("makes a scheduled prompt a new session that sends", () => {
     expect(normaliseDraft({ ...base, schedule: " 0 9 * * 1-5 " })).toEqual({
@@ -95,6 +98,9 @@ describe("schedules", () => {
       newSession: true,
       project: "/r",
       schedule: "0 9 * * 1-5",
+      at: null,
+      session: null,
+      origin: null,
     });
   });
 
@@ -121,14 +127,14 @@ describe("list edits", () => {
   const list = [prompt("a"), prompt("b"), prompt("c")];
 
   it("adds at the end without touching the input", () => {
-    const next = addPrompt(list, { label: "", text: "new one", submit: true, newSession: false, project: null, schedule: null }, "d");
+    const next = addPrompt(list, { label: "", text: "new one", submit: true, newSession: false, project: null, schedule: null, at: null, session: null, origin: null }, "d");
     expect(next.map((p) => p.id)).toEqual(["a", "b", "c", "d"]);
     expect(next[3]).toEqual(prompt("d", { label: "new one", text: "new one", submit: true }));
     expect(list).toHaveLength(3);
   });
 
   it("does not add an empty prompt", () => {
-    expect(addPrompt(list, { label: "x", text: "", submit: false, newSession: false, project: null, schedule: null }, "d")).toEqual(list);
+    expect(addPrompt(list, { label: "x", text: "", submit: false, newSession: false, project: null, schedule: null, at: null, session: null, origin: null }, "d")).toEqual(list);
   });
 
   it("updates in place", () => {
@@ -139,6 +145,9 @@ describe("list edits", () => {
       newSession: true,
       project: "/r",
       schedule: null,
+      at: null,
+      session: null,
+      origin: null,
     });
     expect(next[1]).toEqual(prompt("b", { label: "B", text: "bee", submit: true, newSession: true, project: "/r" }));
     expect(list[1]).toEqual(prompt("b"));

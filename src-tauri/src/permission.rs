@@ -466,6 +466,20 @@ fn uuid_like() -> String {
 /// in the pipe, so no card ever reached a window and the turn hung on the tool.
 /// Reading stays on this thread so `notifications/cancelled` is always seen.
 pub fn run_permission_server(socket_path: String, chat_id: Option<String>) {
+    serve(socket_path, chat_id, true)
+}
+
+/// Run as a standalone MCP server offering only the control tools.
+///
+/// Entered as `mangouste --mcp`, for a `claude` started outside the app
+/// (`claude mcp add mangouste -- mangouste --mcp`). It has no chat, so it has
+/// no permission asks to make and leaves `approve` out of its list.
+pub fn run_control_server() {
+    let socket = crate::chats::runtime_dir().join("permission.sock");
+    serve(socket.to_string_lossy().into_owned(), None, false)
+}
+
+fn serve(socket_path: String, chat_id: Option<String>, with_approve: bool) {
     let stdin = std::io::stdin();
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
     // Keyed by the JSON-RPC id's text form, since ids may be numbers or strings.
@@ -491,27 +505,56 @@ pub fn run_permission_server(socket_path: String, chat_id: Option<String>) {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "mangouste", "version": env!("CARGO_PKG_VERSION") },
             }),
-            "tools/list" => serde_json::json!({
-                "tools": [{
-                    "name": "approve",
-                    "description": "Ask the mangouste user to approve a tool call",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "tool_name": { "type": "string" },
-                            "input": { "type": "object" },
-                            "tool_use_id": { "type": "string" },
+            "tools/list" => {
+                let mut tools = Vec::new();
+                if with_approve {
+                    tools.push(serde_json::json!({
+                        "name": "approve",
+                        "description": "Ask the mangouste user to approve a tool call",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tool_name": { "type": "string" },
+                                "input": { "type": "object" },
+                                "tool_use_id": { "type": "string" },
+                            },
+                            "required": ["tool_name", "input"],
                         },
-                        "required": ["tool_name", "input"],
-                    },
-                }],
-            }),
+                    }));
+                }
+                tools.extend(crate::control::tool_definitions(chat_id.is_some()));
+                serde_json::json!({ "tools": tools })
+            }
             "tools/call" => {
                 let arguments = message
                     .get("params")
                     .and_then(|p| p.get("arguments"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                let name = message
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("approve")
+                    .to_string();
+                // Anything but the permission tool is a control call: forwarded
+                // to the app's control socket and answered as ordinary tool
+                // output, not as a permission verdict.
+                if !with_approve || name != "approve" {
+                    let socket = crate::control::socket_beside(&socket_path);
+                    let chat_id = chat_id.clone();
+                    let stdout = Arc::clone(&stdout);
+                    std::thread::spawn(move || {
+                        let (text, is_error) =
+                            crate::control::call(&socket, chat_id.as_deref(), &name, &arguments);
+                        let result = serde_json::json!({
+                            "content": [{ "type": "text", "text": text }],
+                            "isError": is_error,
+                        });
+                        write_response(&stdout, id, result);
+                    });
+                    continue;
+                }
                 let key = id.as_ref().map(|id| id.to_string());
                 let socket_path = socket_path.clone();
                 let chat_id = chat_id.clone();

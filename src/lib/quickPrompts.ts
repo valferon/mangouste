@@ -32,20 +32,69 @@ export interface QuickPrompt {
    * worth trusting, and nobody there to press Enter.
    */
   schedule: string | null;
+  /**
+   * A one-off run time, as an ISO timestamp. Fired once and then removed, and,
+   * unlike a cron run, fired late when it came due while the app was closed: a
+   * follow-up somebody asked for is still wanted an hour after its minute.
+   * Ignored when `schedule` is set.
+   */
+  at: string | null;
+  /**
+   * The session a timed run goes to, by uuid, instead of a fresh one: a
+   * follow-up in the conversation that asked for it. Null is a new session in
+   * `project`.
+   */
+  session: string | null;
+  /**
+   * Who scheduled it, when a session did: its uuid, or `outside` for
+   * `mangouste --mcp`. Null for a prompt made in the Prompts view. Sessions
+   * can list and cancel only the prompts they made (see `sessionControl.ts`).
+   */
+  origin: string | null;
 }
 
 /** Which of the pane's lists a prompt sits in. Also what reordering respects. */
 export type PromptGroup = "here" | "new" | "scheduled";
 
 export function groupOf(prompt: QuickPrompt): PromptGroup {
-  if (prompt.schedule) return "scheduled";
+  if (isTimed(prompt)) return "scheduled";
   return prompt.newSession ? "new" : "here";
 }
+
+/** Runs on its own, from the schedule clock, rather than only on a click. */
+export function isTimed(prompt: Pick<QuickPrompt, "schedule" | "at">): boolean {
+  return prompt.schedule !== null || prompt.at !== null;
+}
+
+/** An ISO timestamp that names a real instant. */
+export function isInstant(value: string): boolean {
+  return value.trim() !== "" && !Number.isNaN(Date.parse(value));
+}
+
+/** One-off prompts whose time has come, oldest first. */
+export function dueOneOffs(prompts: readonly QuickPrompt[], now: Date): QuickPrompt[] {
+  return prompts
+    .filter((prompt) => prompt.schedule === null && prompt.at !== null)
+    .filter((prompt) => Date.parse(prompt.at!) <= now.getTime())
+    .sort((a, b) => Date.parse(a.at!) - Date.parse(b.at!));
+}
+
+/**
+ * Fired when this window writes the list. `storage` only reaches the *other*
+ * windows, and the list is now also written from outside the pane (a session
+ * scheduling a follow-up, a one-off removing itself once it has run).
+ */
+export const PROMPTS_CHANGED_EVENT = "mangouste:prompts-changed";
 
 /** What the editor hands back; the id is the list's business. */
 export type QuickPromptDraft = Omit<QuickPrompt, "id">;
 
 export const PROMPTS_KEY = KEYS.prefs.quickPrompts;
+
+export const newPromptId = (): string =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 /** A button label is one line, and short enough to stay a button. */
 const LABEL_MAX = 80;
@@ -70,7 +119,10 @@ function isPrompt(value: unknown): value is QuickPrompt {
     // Added after the first release: absent is the old behaviour, not corrupt.
     (entry.newSession === undefined || typeof entry.newSession === "boolean") &&
     (entry.project === undefined || entry.project === null || typeof entry.project === "string") &&
-    (entry.schedule === undefined || entry.schedule === null || typeof entry.schedule === "string")
+    (entry.schedule === undefined || entry.schedule === null || typeof entry.schedule === "string") &&
+    (entry.at === undefined || entry.at === null || typeof entry.at === "string") &&
+    (entry.session === undefined || entry.session === null || typeof entry.session === "string") &&
+    (entry.origin === undefined || entry.origin === null || typeof entry.origin === "string")
   );
 }
 
@@ -87,6 +139,10 @@ export function cleanPrompts(value: unknown): QuickPrompt[] {
   for (const entry of value) {
     if (!isPrompt(entry) || seen.has(entry.id)) continue;
     seen.add(entry.id);
+    // A schedule that no longer parses (hand-edited, or from a newer build's
+    // syntax) is dropped rather than left to never fire without saying so.
+    const schedule = entry.schedule && parseCron(entry.schedule).ok ? entry.schedule.trim() : null;
+    const at = !schedule && entry.at && isInstant(entry.at) ? entry.at : null;
     prompts.push({
       id: entry.id,
       label: entry.label.trim() || deriveLabel(entry.text),
@@ -94,9 +150,10 @@ export function cleanPrompts(value: unknown): QuickPrompt[] {
       submit: entry.submit,
       newSession: entry.newSession ?? false,
       project: entry.project || null,
-      // A schedule that no longer parses (hand-edited, or from a newer build's
-      // syntax) is dropped rather than left to never fire without saying so.
-      schedule: entry.schedule && parseCron(entry.schedule).ok ? entry.schedule.trim() : null,
+      schedule,
+      at,
+      session: (schedule || at) && entry.session ? entry.session : null,
+      origin: entry.origin || null,
     });
   }
   return prompts;
@@ -108,6 +165,7 @@ export function readPrompts(): QuickPrompt[] {
 
 export function writePrompts(prompts: readonly QuickPrompt[]): void {
   writeJson(PROMPTS_KEY, prompts);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(PROMPTS_CHANGED_EVENT));
 }
 
 /**
@@ -118,14 +176,21 @@ export function normaliseDraft(draft: QuickPromptDraft): QuickPromptDraft | null
   if (draft.text.trim() === "") return null;
   const schedule = draft.schedule?.trim() || null;
   if (schedule && !parseCron(schedule).ok) return null;
-  const newSession = draft.newSession || schedule !== null;
+  // A cron schedule replaces a one-off time; it never runs alongside one.
+  const at = !schedule && draft.at && isInstant(draft.at) ? draft.at : null;
+  const timed = schedule !== null || at !== null;
+  const newSession = draft.newSession || timed;
   return {
     label: draft.label.trim() || deriveLabel(draft.text),
     text: draft.text,
-    submit: draft.submit || schedule !== null,
+    submit: draft.submit || timed,
     newSession,
     project: newSession ? draft.project || null : null,
     schedule,
+    at,
+    session: timed ? draft.session || null : null,
+    // Kept through an edit, so the session that made it can still cancel it.
+    origin: draft.origin ?? null,
   };
 }
 
@@ -200,3 +265,19 @@ export interface PasteRequest {
   text: string;
   submit: boolean;
 }
+
+/**
+ * A turn for one pane that bypasses its composer: a run nobody clicked (a
+ * follow-up arriving in a session someone may be typing in), where appending
+ * to the draft would send their half-message too.
+ *
+ * Kept as a list per pane, not one slot like `PasteRequest`: two follow-ups due
+ * in the same tick land in one render, and a slot would keep only the second.
+ */
+export interface DirectRequest {
+  token: number;
+  text: string;
+}
+
+/** How many direct requests a pane's list keeps. Served ones are history. */
+export const DIRECT_KEEP = 20;

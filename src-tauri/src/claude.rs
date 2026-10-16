@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use tauri::{State, Window};
 
 use crate::chats::{self, ChatManager, ChatStatus, StartOptions};
+use crate::control::{ControlReply, ControlState};
 use crate::permission::{PermissionDecision, PermissionState};
 use crate::pty::{self, PtyState};
 
@@ -162,6 +163,15 @@ pub fn permission_respond(
         ));
     }
     permission.respond(decision)
+}
+
+/// Answer a control call a session made through the MCP server.
+#[tauri::command]
+pub fn control_respond(
+    control: State<'_, Arc<ControlState>>,
+    reply: ControlReply,
+) -> Result<(), String> {
+    control.respond(reply)
 }
 
 #[tauri::command]

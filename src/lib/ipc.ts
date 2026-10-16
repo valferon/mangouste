@@ -38,6 +38,7 @@ import type {
   StatsSummary,
   TerminalInfo,
 } from "./types";
+import type { ControlRequest } from "./sessionControl";
 
 /* ---------- external links ---------- */
 
@@ -634,6 +635,25 @@ export const onPermissionRequest = (
   getCurrentWebviewWindow().listen<PermissionRequest>("permission://request", (e) =>
     handler(e.payload),
   );
+
+/* ---------- session control ---------- */
+
+/** A session calling one of mangouste's MCP tools. Main window only. */
+export const onControlRequest = (
+  handler: (request: ControlRequest) => void,
+): Promise<UnlistenFn> =>
+  listen<ControlRequest>("control://request", (e) => handler(e.payload));
+
+/** Answer a control call: a result on success, a sentence for the model on failure. */
+export const controlRespond = (
+  id: string,
+  outcome: { ok: true; result: unknown } | { ok: false; error: string },
+) =>
+  invoke<void>("control_respond", {
+    reply: outcome.ok
+      ? { id, ok: true, result: outcome.result ?? null, error: null }
+      : { id, ok: false, result: null, error: outcome.error },
+  });
 
 /** An ask the CLI stopped waiting on (timed out, or typed over), by request id. */
 export const onPermissionWithdrawn = (handler: (id: string) => void): Promise<UnlistenFn> =>

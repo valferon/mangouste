@@ -14,8 +14,11 @@ import { repoLabel } from "../lib/visitedRepos";
 import {
   addPrompt,
   groupOf,
+  isTimed,
   movePrompt,
+  newPromptId,
   normaliseDraft,
+  PROMPTS_CHANGED_EVENT,
   PROMPTS_KEY,
   readPrompts,
   removePrompt,
@@ -24,6 +27,7 @@ import {
   type QuickPrompt,
   type QuickPromptDraft,
 } from "../lib/quickPrompts";
+import { whenCaption } from "../lib/sessionControl";
 
 interface QuickPromptsPaneProps {
   /** Put this prompt into the session in front, or a new one when there is none. */
@@ -49,6 +53,9 @@ const EMPTY_DRAFT: QuickPromptDraft = {
   newSession: false,
   project: null,
   schedule: null,
+  at: null,
+  session: null,
+  origin: null,
 };
 
 /** How often the "next run" captions are recomputed. Runs are per minute. */
@@ -68,11 +75,6 @@ const projectName = (project: string | null): string =>
 
 /** "new" is the add form; any other string is the id of the prompt being edited. */
 type Editing = "new" | string | null;
-
-const newId = (): string =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 /**
  * The editor for one prompt, used both to add and to edit.
@@ -256,14 +258,20 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
   /** The row asking "delete?", so one stray click on the bin deletes nothing. */
   const [confirming, setConfirming] = useState<string | null>(null);
 
-  // Another window edited the list. `storage` fires only in the windows that
-  // did not write, so this never echoes our own save back at us.
+  // Another window edited the list, or something in this one did: a session
+  // scheduling a follow-up, a one-off removing itself once it ran. `storage`
+  // only fires in the windows that did not write, hence the second event.
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key === PROMPTS_KEY) setPrompts(readPrompts());
     };
+    const onChanged = () => setPrompts(readPrompts());
     window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    window.addEventListener(PROMPTS_CHANGED_EVENT, onChanged);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(PROMPTS_CHANGED_EVENT, onChanged);
+    };
   }, []);
 
   const commit = useCallback((next: QuickPrompt[]) => {
@@ -273,7 +281,7 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
 
   const saveDraft = (draft: QuickPromptDraft) => {
     commit(
-      editing === "new" ? addPrompt(prompts, draft, newId()) : updatePrompt(prompts, editing!, draft),
+      editing === "new" ? addPrompt(prompts, draft, newPromptId()) : updatePrompt(prompts, editing!, draft),
     );
     setEditing(null);
   };
@@ -284,7 +292,7 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
 
   const rowMenu = (prompt: QuickPrompt): MenuEntry[] => [
     {
-      label: prompt.schedule ? "Run Now" : prompt.submit ? "Send" : "Paste into Session",
+      label: isTimed(prompt) ? "Run Now" : prompt.submit ? "Send" : "Paste into Session",
       run: () => onRun(prompt),
     },
     !prompt.newSession && {
@@ -342,8 +350,11 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
         </div>
       );
     }
-    const Glyph = prompt.schedule ? ClockIcon : prompt.submit ? SendIcon : PasteIcon;
-    const when = prompt.schedule ? nextCaption(prompt.schedule, now) : null;
+    const Glyph = isTimed(prompt) ? ClockIcon : prompt.submit ? SendIcon : PasteIcon;
+    const when = whenCaption(prompt, now);
+    const where = prompt.session
+      ? `its session ${prompt.session.slice(0, 8)}`
+      : projectName(prompt.project);
     return (
       <div
         key={prompt.id}
@@ -361,10 +372,10 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
         }}
         onContextMenu={(event) => menu.openContextMenu(event, rowMenu(prompt))}
         title={
-          prompt.schedule
-            ? `Runs on “${prompt.schedule}” (${when}), in a new session in ${projectName(
-                prompt.project,
-              )}. Click to run now:\n${prompt.text}`
+          isTimed(prompt)
+            ? `Runs ${prompt.schedule ? `on “${prompt.schedule}”` : "once"} (${when}), ${
+                prompt.session ? `as a follow-up in ${where}` : `in a new session in ${where}`
+              }. Click to run now:\n${prompt.text}`
             : `${prompt.submit ? "Sends" : "Pastes, doesn't send"}${
                 prompt.newSession ? `, in a new session in ${projectName(prompt.project)}` : ""
               }:\n${prompt.text}`
@@ -375,7 +386,7 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
         {prompt.newSession && (
           <span className="prompt-meta">
             {when ? `${when} · ` : ""}
-            {projectName(prompt.project)}
+            {where}
           </span>
         )}
         <div className="prompt-actions" onClick={(event) => event.stopPropagation()}>

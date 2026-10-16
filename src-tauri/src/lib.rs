@@ -2,6 +2,7 @@ mod alerts;
 mod changes;
 mod chats;
 mod claude;
+mod control;
 mod env;
 mod fileops;
 mod format;
@@ -36,7 +37,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 // whichever second window `windows::open_window` has since minted.
 use windows::MAIN_WINDOW;
 
-pub use permission::run_permission_server;
+pub use permission::{run_control_server, run_permission_server};
 
 pub const EVENT_SESSIONS_CHANGED: &str = "sessions://changed";
 
@@ -191,6 +192,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(chats::ChatManager::default()))
         .manage(Arc::new(permission::PermissionState::default()))
+        .manage(Arc::new(control::ControlState::default()))
         .manage(pty::PtyState::default())
         .manage(threads::ThreadStore::default())
         .manage(treewatch::TreeWatchState::default())
@@ -289,6 +291,37 @@ pub fn run() {
                     .show(|_| std::process::exit(0));
                 return Ok(());
             }
+
+            // The control bridge waits for the collision check above: only the
+            // instance that owns the permission socket may take the one beside
+            // it. Calls go to the main window alone, since it runs the prompt
+            // schedule; a second window answering too would act twice.
+            let control: tauri::State<'_, Arc<control::ControlState>> = app.state();
+            let control_handle = app.handle().clone();
+            let callers = Arc::clone(&manager);
+            control::start_bridge(
+                Arc::clone(&control),
+                chats::runtime_dir().join(control::SOCKET_NAME),
+                move |request| {
+                    // Same rule as the permission bridge: a chat id this
+                    // process does not hold is a previous run's survivor.
+                    if let Some(chat_id) = request.chat_id.as_deref() {
+                        let status = callers
+                            .statuses()
+                            .into_iter()
+                            .find(|status| status.chat_id == chat_id && status.alive)
+                            .ok_or("mangouste no longer owns this session")?;
+                        request.session_id = status.session_id;
+                        request.cwd = Some(status.cwd);
+                    }
+                    if control_handle.get_webview_window(MAIN_WINDOW).is_none() {
+                        return Err("mangouste's main window is not open".into());
+                    }
+                    control_handle
+                        .emit_to(MAIN_WINDOW, control::EVENT_REQUEST, &*request)
+                        .map_err(|e| e.to_string())
+                },
+            );
 
             // Only now is this instance the real one. The window is configured
             // hidden so neither branch above can flash an empty frame — which is
@@ -396,6 +429,7 @@ pub fn run() {
             stats::stats_summary,
             // tool permissions
             claude::permission_respond,
+            claude::control_respond,
             // desktop notifications
             alerts::post_notification,
         ]);

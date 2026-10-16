@@ -295,6 +295,8 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src-tauri/src/chats.rs` | Owns the child processes; kills them with their window |
 | `src-tauri/src/windows.rs` | A second window on the same process, and its label |
 | `src-tauri/src/permission.rs` | The MCP server the CLI asks for tool approval |
+| `src-tauri/src/control.rs` | The same server's session-control tools, bridged to the main window |
+| `src/lib/sessionControl.ts` | What those tool calls may do, checked before App does it |
 | `src-tauri/src/stats.rs` | Corpus-wide tokens and cost, resumed by byte offset |
 | `src-tauri/src/usage.rs` | Anthropic usage windows, opt-in |
 
@@ -1018,6 +1020,42 @@ scheduled prompt runs it now, in front.
 right-click reorders. The label is optional: a blank one is the prompt's first
 line. The list is a preference, so every window shares it and an edit in one
 shows up in the others.
+
+### Sessions scheduling their own follow-ups
+
+Every chat mangouste spawns already runs its `mangouste` MCP server for
+permission prompts, and that server also offers the session a few tools of its
+own:
+
+| Tool | What it does |
+|---|---|
+| `schedule_prompt` | Adds a timed prompt: once (`at`, `in_minutes`) or recurring (`cron`). By default it is a follow-up sent back into the calling session; `target: "new_session"` starts a fresh one in a repo instead. |
+| `list_scheduled` / `cancel_scheduled` | Read and remove the timed prompts the calling session made. Prompts made by hand, or by another session, are neither shown nor cancellable. |
+| `new_session` | Opens a new session in a repo, in the background unless `focus` is set, and sends it a first prompt. |
+| `fork_session` | Opens a fork of the calling session (`--resume … --fork-session`) in a new tab, optionally with a prompt. The original is left alone. |
+
+So "check whether CI went green in 20 minutes", "rerun the flaky suite every
+morning" or "try approach B in a fork" can be asked of the session itself. What
+it schedules shows in the Prompts view like anything you made by hand.
+
+A one-off differs from a cron run in one way: it is removed from the list once
+it has run, and if it came due while mangouste was closed it runs at the next
+launch rather than being skipped. One that could not run (its session open in a
+terminal tab, say) stays listed as "due now" and is tried again next launch. A follow-up reaches its session's tab when one is
+open (or reopens the session behind whatever is in front) and is sent as a turn
+of its own, so a half-typed message in that composer is not sent with it.
+
+The calls go over `control.sock`, a 0600 socket next to `permission.sock`, to
+the main window. They pass through the CLI's permission check like any other MCP
+tool, so outside bypass mode you approve each one on a card. A session may only
+schedule into or fork **itself**, and only start new sessions in **its own
+repo**: it cannot aim turns at another session or another repo, which is how a
+prompt injection read in one place would otherwise reach a session elsewhere,
+possibly one in bypass mode. At most 50 timed prompts are held at once.
+
+A `claude` started outside the app can use the same tools with
+`claude mcp add mangouste -- mangouste --mcp`. That server is not tied to a chat,
+so it must name a `session_id` or a `project` itself.
 
 ## Remote control
 

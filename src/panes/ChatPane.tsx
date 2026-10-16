@@ -103,7 +103,10 @@ import {
 import { Resizer } from "../layout/Split";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
-import { appendToDraft, type PasteRequest } from "../lib/quickPrompts";
+import { appendToDraft, type DirectRequest, type PasteRequest } from "../lib/quickPrompts";
+
+/** One empty list, so a pane with none does not see a new one each render. */
+const NO_DIRECT: DirectRequest[] = [];
 import { useMenu, type MenuEntry } from "../lib/menu";
 import type {
   ClaudeFrame,
@@ -139,6 +142,12 @@ interface ChatPaneProps {
   cold: boolean;
   /** Session uuid to resume; `null` starts a fresh transcript. */
   resume: string | null;
+  /**
+   * Resume `resume` as a fork: the CLI copies the conversation into a new
+   * session id and leaves the original alone. Only until the fork's own id is
+   * known; after that the pane resumes the fork like any other session.
+   */
+  fork?: boolean;
   /** Transcript path backing `resume`, used to render history. */
   resumeFile: string | null;
   /**
@@ -185,6 +194,8 @@ interface ChatPaneProps {
   initialDraft?: string;
   /** A saved prompt to drop into the composer, and send when it asks to be. */
   pasteRequest?: PasteRequest | null;
+  /** Turns to send without touching the composer, served once each by token. */
+  directRequests?: DirectRequest[];
   onStats: (stats: {
     sessionId: string | null;
     model: string | null;
@@ -1809,6 +1820,8 @@ export const ChatPane = memo(function ChatPane({
   onFeedback,
   initialDraft,
   pasteRequest = null,
+  directRequests = NO_DIRECT,
+  fork = false,
 }: ChatPaneProps) {
   const menu = useMenu();
   // One fact for every pane, like the editor's blame column: a tab behind must
@@ -2013,6 +2026,7 @@ export const ChatPane = memo(function ChatPane({
    */
   const resumeRef = useRef(resume);
   const resumeFileRef = useRef(resumeFile);
+  const forkRef = useRef(fork);
   /** Read at spawn time, so a pane warming up honours a request made while cold. */
   const anchorRef = useRef(anchor);
   /** Mirror of `anchored`, for the effects that must not depend on it. */
@@ -2025,6 +2039,7 @@ export const ChatPane = memo(function ChatPane({
   useEffect(() => {
     resumeRef.current = resume;
     resumeFileRef.current = resumeFile;
+    forkRef.current = fork;
     anchorRef.current = anchor;
     anchoredRef.current = anchored;
     onSessionIdRef.current = onSessionId;
@@ -2284,7 +2299,10 @@ export const ChatPane = memo(function ChatPane({
       permissionMode: spawnMode,
       model: spawnModelAlias === MODEL_DEFAULT ? null : spawnModelAlias,
       // The only part of a feedback level the CLI has to know about.
-      extraArgs: feedbackArgs(spawnLevel),
+      extraArgs: [
+        ...feedbackArgs(spawnLevel),
+        ...(resumeTarget && forkRef.current ? ["--fork-session"] : []),
+      ],
       debug: cliDebugEnabled(),
     };
     const attach = mode === "attach" ? claudeStart : claudeRestart;
@@ -2422,7 +2440,13 @@ export const ChatPane = memo(function ChatPane({
         const resumeTarget = resumeRef.current;
         // A resume that lands on a different id means the CLI could not reopen
         // the transcript and silently started a new one. Worth saying out loud.
-        if (resumeTarget && frame.session_id !== resumeTarget && sessionIdRef.current === resumeTarget) {
+        // A fork lands on a new id by design.
+        if (
+          resumeTarget &&
+          !forkRef.current &&
+          frame.session_id !== resumeTarget &&
+          sessionIdRef.current === resumeTarget
+        ) {
           onSystemMessageRef.current(`Resume of ${resumeTarget.slice(0, 8)} failed; started new session ${frame.session_id.slice(0, 8)}.`);
         }
         sessionIdRef.current = frame.session_id;
@@ -2996,6 +3020,52 @@ export const ChatPane = memo(function ChatPane({
 
   /* ---------- composing ---------- */
 
+  /** Show a user turn and hand it to the CLI. The composer is the caller's. */
+  const dispatchTurn = useCallback(
+    async (text: string, images: PendingImage[]) => {
+      setSticky(true);
+      appendItem({
+        kind: "user",
+        key: nextKey(),
+        text:
+          images.length > 0
+            ? `${text}${text ? "\n" : ""}[${images.length} image${images.length > 1 ? "s" : ""} attached]`
+            : text,
+      });
+      // This turn was asked for, so the result before it closed exactly what it
+      // said it closed.
+      closedTurnKeyRef.current = null;
+      setRunning(true);
+      setCutOff(false);
+      setPhase("sending");
+      setTurnStartedAt(Date.now());
+      logDebug(chatId, "send", text ? clipForSpinner(text) : "[images]");
+      try {
+        if (images.length === 0) {
+          await claudeSend(chatId, text);
+        } else {
+          // Images must precede the text block, matching how the API reads them.
+          const content = [
+            ...images.map((image) => ({
+              type: "image",
+              source: { type: "base64", media_type: image.mediaType, data: image.data },
+            })),
+            ...(text ? [{ type: "text", text }] : []),
+          ];
+          await claudeSendRaw(chatId, {
+            type: "user",
+            message: { role: "user", content },
+          });
+        }
+      } catch (e) {
+        setRunning(false);
+        setPhase("send failed");
+        onSystemMessage(`send failed: ${e}`);
+      }
+    },
+    [chatId, appendItem, setSticky],
+  );
+
   const send = useCallback(async () => {
     const text = draft.trim();
     // An image with no caption is still a message worth sending.
@@ -3024,46 +3094,27 @@ export const ChatPane = memo(function ChatPane({
     setDraft("");
     setCaret(0);
     setAttachments([]);
-    setSticky(true);
-    appendItem({
-      kind: "user",
-      key: nextKey(),
-      text:
-        attachments.length > 0
-          ? `${text}${text ? "\n" : ""}[${attachments.length} image${attachments.length > 1 ? "s" : ""} attached]`
-          : text,
-    });
-    // This turn was asked for, so the result before it closed exactly what it
-    // said it closed.
-    closedTurnKeyRef.current = null;
-    setRunning(true);
-    setCutOff(false);
-    setPhase("sending");
-    setTurnStartedAt(Date.now());
-    logDebug(chatId, "send", text ? clipForSpinner(text) : "[images]");
-    try {
-      if (attachments.length === 0) {
-        await claudeSend(chatId, text);
-      } else {
-        // Images must precede the text block, matching how the API reads them.
-        const content = [
-          ...attachments.map((image) => ({
-            type: "image",
-            source: { type: "base64", media_type: image.mediaType, data: image.data },
-          })),
-          ...(text ? [{ type: "text", text }] : []),
-        ];
-        await claudeSendRaw(chatId, {
-          type: "user",
-          message: { role: "user", content },
-        });
-      }
-    } catch (e) {
-      setRunning(false);
-      setPhase("send failed");
-      onSystemMessage(`send failed: ${e}`);
-    }
-  }, [draft, attachments, alive, chatId, appendItem, setSticky]);
+    await dispatchTurn(text, attachments);
+  }, [draft, attachments, alive, chatId, appendItem, setSticky, dispatchTurn]);
+
+  /*
+   * A turn sent from outside the composer: a session's scheduled follow-up
+   * landing here. It goes straight to the CLI and leaves the draft alone, since
+   * whatever is half-typed belongs to the person, not to the schedule. Queued
+   * until the process is up, like a pasted prompt's send.
+   */
+  const servedDirectRef = useRef(0);
+  useEffect(() => {
+    if (!alive) return;
+    const fresh = directRequests.filter((request) => request.token > servedDirectRef.current);
+    if (fresh.length === 0) return;
+    servedDirectRef.current = Math.max(...fresh.map((request) => request.token));
+    // In order, one frame each, each written before the next is sent; the CLI
+    // queues a turn that arrives while one runs.
+    void (async () => {
+      for (const request of fresh) await dispatchTurn(request.text, []);
+    })();
+  }, [alive, directRequests, dispatchTurn]);
 
   /*
    * A prompt from the rail. It lands after whatever is already typed rather

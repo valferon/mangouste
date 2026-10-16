@@ -43,6 +43,11 @@ export interface ChatTab {
    * Never persisted: a restored tab is resuming, not starting over.
    */
   draft?: string;
+  /**
+   * The session this tab is a fork of, until the fork reports its own id.
+   * Never persisted: a tab is only stored once it has a session of its own.
+   */
+  forkFrom?: string;
 }
 
 /**

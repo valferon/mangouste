@@ -2,10 +2,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // One non-window mode is dispatched before Tauri initialises: the
-    // permission-prompt MCP server the CLI spawns. It must not open a window.
+    // Two non-window modes are dispatched before Tauri initialises: the
+    // permission-prompt MCP server the CLI spawns, and the same server's
+    // control tools on their own, for a `claude` run outside the app. Neither
+    // may open a window.
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--mcp" {
+            mangouste_lib::run_control_server();
+            return;
+        }
         if arg == "--permission-server" {
             let socket = args.next();
             // `--permission-chat <id>` follows, naming the chat this server asks

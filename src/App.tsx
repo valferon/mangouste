@@ -38,9 +38,11 @@ import { PaneBoundary } from "./panes/PaneBoundary";
 import {
   claudeKill,
   claudeStatus,
+  controlRespond,
   discoverRepos,
   focusWindow,
   homeDir,
+  onControlRequest,
   onSessionTransition,
   openExternal,
   openWindow,
@@ -74,7 +76,27 @@ import {
   SourceControlIcon,
 } from "./lib/icons";
 import { cronMatches, parseCron } from "./lib/cron";
-import { readPrompts, type PasteRequest, type QuickPrompt } from "./lib/quickPrompts";
+import {
+  dueOneOffs,
+  newPromptId,
+  readPrompts,
+  removePrompt,
+  writePrompts,
+  DIRECT_KEEP,
+  type DirectRequest,
+  type PasteRequest,
+  type QuickPrompt,
+} from "./lib/quickPrompts";
+import {
+  callerOf,
+  describeScheduled,
+  findSession,
+  planCancel,
+  planFork,
+  planNewSession,
+  planSchedule,
+  type ControlRequest,
+} from "./lib/sessionControl";
 import { repoLabel } from "./lib/visitedRepos";
 import { claimedByShell, runChord, type Command } from "./lib/commands";
 import { CHORD, formatChord } from "./lib/keybindings";
@@ -1045,7 +1067,11 @@ function Workbench() {
     setTabs((current) =>
       current.map((tab) =>
         tab.kind === "chat" && tab.id === tabId && tab.sessionId !== sessionId
-          ? { ...tab, sessionId }
+          ? tab.forkFrom
+            ? // The fork has its own id now. The parent's transcript was only
+              // ever the history it opened on; resuming from here is the fork.
+              { ...tab, sessionId, forkFrom: undefined, resumeFile: null }
+            : { ...tab, sessionId }
           : tab,
       ),
     );
@@ -2030,9 +2056,80 @@ function Workbench() {
     const request = { token: pasteTokenRef.current, text, submit };
     setPasteRequests((current) => ({ ...current, [tabId]: request }));
   }, []);
+  /**
+   * Send a turn into a pane without going through its composer, warming the
+   * pane first if it was restored and never shown: a cold pane spawns nothing,
+   * so the turn would wait for a click that may never come.
+   */
+  const [directRequests, setDirectRequests] = useState<Record<string, DirectRequest[]>>({});
+  const deliverDirect = useCallback((tabId: string, text: string) => {
+    pasteTokenRef.current += 1;
+    const request = { token: pasteTokenRef.current, text };
+    setDirectRequests((current) => ({
+      ...current,
+      [tabId]: [...(current[tabId] ?? []), request].slice(-DIRECT_KEEP),
+    }));
+    setColdTabs((current) => {
+      if (!current.has(tabId)) return current;
+      const next = new Set(current);
+      next.delete(tabId);
+      return next;
+    });
+  }, []);
+  /** Mirror of the rail's scan, for lookups from timers and event handlers. */
+  const sessionGroupsRef = useRef(sessionGroups);
+  useEffect(() => {
+    sessionGroupsRef.current = sessionGroups;
+  }, [sessionGroups]);
+  /**
+   * A follow-up: a turn sent into an existing session rather than a new one.
+   *
+   * Lands in the tab already holding the session when there is one, and
+   * otherwise reopens it in a tab behind whatever is in front. Either way it is
+   * a turn of its own, so a half-typed message in that composer stays put.
+   * Returns where it went, or why it could not.
+   */
+  const runInSession = useCallback(
+    (sessionId: string, text: string, project: string | null, focus: boolean) => {
+      const open = tabsRef.current.find(
+        (tab): tab is ChatTab => tab.kind === "chat" && tab.sessionId === sessionId,
+      );
+      if (open && open.surface !== "chat") {
+        return { ok: false as const, error: "that session is open in a terminal tab, which mangouste cannot type into" };
+      }
+      const known = findSession(sessionGroupsRef.current, sessionId);
+      const cwd = open?.cwd ?? known?.cwd ?? project;
+      if (!cwd) return { ok: false as const, error: "mangouste does not know where that session lives" };
+      // The id `openSessionTab` mints, so a later click in the rail finds
+      // this tab rather than opening a second one onto the same session.
+      const tab: ChatTab = open ?? {
+        kind: "chat",
+        id: `chat|${cwd}|${sessionId}`,
+        cwd,
+        sessionId,
+        resumeFile: known?.file ?? null,
+        surface: "chat",
+      };
+      if (!open) setTabs((current) => (current.some((t) => t.id === tab.id) ? current : [...current, tab]));
+      deliverDirect(tab.id, text);
+      if (focus) {
+        void repoRoot(cwd).then((root) => {
+          setActiveRepo(root);
+          setActiveTab(tab.id);
+        });
+      }
+      return { ok: true as const, cwd };
+    },
+    [deliverDirect],
+  );
   const runPrompt = useCallback(
     async (prompt: QuickPrompt) => {
       const deliver = (tabId: string, submit: boolean) => deliverPrompt(tabId, prompt.text, submit);
+      if (prompt.session) {
+        const ran = runInSession(prompt.session, prompt.text, prompt.project, true);
+        if (!ran.ok) setSystemMessage(`“${prompt.label}” not sent: ${ran.error}.`);
+        return;
+      }
       if (activeChat && !prompt.newSession) {
         deliver(activeChat.id, prompt.submit);
         return;
@@ -2054,7 +2151,7 @@ function Workbench() {
       // left as a draft: nobody chose to start a session with it.
       deliver(tab.id, prompt.newSession && prompt.submit);
     },
-    [activeChat, activeRepo, newSessionTab, deliverPrompt],
+    [activeChat, activeRepo, newSessionTab, deliverPrompt, runInSession],
   );
   const handleRunPrompt = useCallback(
     (prompt: QuickPrompt) => void runPrompt(prompt),
@@ -2073,20 +2170,31 @@ function Workbench() {
    * must not pull the workbench out from under a half-typed message; the run
    * shows up in the rail like any other session, and the status line says so.
    */
+  /** True when the run went somewhere; false when it was skipped, and why is on the status line. */
   const runScheduled = useCallback(
-    async (prompt: QuickPrompt) => {
+    async (prompt: QuickPrompt): Promise<boolean> => {
+      if (prompt.session) {
+        const ran = runInSession(prompt.session, prompt.text, prompt.project, false);
+        setSystemMessage(
+          ran.ok
+            ? `Scheduled “${prompt.label}” sent to its session in ${repoLabel(ran.cwd)}.`
+            : `Scheduled “${prompt.label}” skipped: ${ran.error}.`,
+        );
+        return ran.ok;
+      }
       const where = prompt.project ?? activeRepo;
       if (!where) {
         setSystemMessage(`Scheduled “${prompt.label}” skipped: no repo to run it in.`);
-        return;
+        return false;
       }
       const root = await repoRoot(where);
       const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
       setTabs((current) => [...current, tab]);
       deliverPrompt(tab.id, prompt.text, true);
       setSystemMessage(`Scheduled “${prompt.label}” started in ${repoLabel(root)}.`);
+      return true;
     },
-    [activeRepo, newSessionTab, deliverPrompt],
+    [activeRepo, newSessionTab, deliverPrompt, runInSession],
   );
   const runScheduledRef = useRef(runScheduled);
   useEffect(() => {
@@ -2098,15 +2206,27 @@ function Workbench() {
    * same job. Reads the list from the store on each tick, so an edit in any
    * window is picked up without a message between them.
    *
-   * No catch-up: a run whose minute passed while the app was closed or the
-   * machine asleep is skipped, not replayed late, the way cron itself does.
+   * No catch-up for cron: a run whose minute passed while the app was closed
+   * or the machine asleep is skipped, not replayed late, the way cron itself
+   * does. A one-off is the exception: it runs late rather than never, and is
+   * removed from the list once it has gone somewhere. One that could not run
+   * (its session is in a terminal tab, its repo unknown) stays listed as "due
+   * now" and is tried again at the next launch, not on every tick.
    */
   const firedRef = useRef(new Map<string, number>());
+  const triedOnceRef = useRef(new Set<string>());
   useEffect(() => {
     if (!isMainWindow()) return;
     const tick = () => {
       const now = new Date();
       const minute = Math.floor(now.getTime() / 60_000);
+      for (const prompt of dueOneOffs(readPrompts(), now)) {
+        if (triedOnceRef.current.has(prompt.id)) continue;
+        triedOnceRef.current.add(prompt.id);
+        void runScheduledRef.current(prompt).then((ran) => {
+          if (ran) writePrompts(removePrompt(readPrompts(), prompt.id));
+        });
+      }
       for (const prompt of readPrompts()) {
         if (!prompt.schedule || firedRef.current.get(prompt.id) === minute) continue;
         const parsed = parseCron(prompt.schedule);
@@ -2120,6 +2240,98 @@ function Workbench() {
     const timer = window.setInterval(tick, SCHEDULE_TICK_MS);
     tick();
     return () => window.clearInterval(timer);
+  }, []);
+
+  /**
+   * A session calling mangouste's MCP tools (see `lib/sessionControl.ts`).
+   *
+   * Main window only, like the clock: the backend sends these nowhere else.
+   * Every call is answered, success or not, because the session's tool call
+   * is blocked on the reply until the bridge gives up on it.
+   */
+  const handleControl = useCallback(
+    async (request: ControlRequest): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> => {
+      const caller = callerOf(request);
+      const now = new Date();
+      switch (request.tool) {
+        case "schedule_prompt": {
+          const prompts = readPrompts();
+          const planned = planSchedule(request.arguments, caller, prompts, now, newPromptId());
+          if (!planned.ok) return planned;
+          writePrompts([...prompts, planned.value]);
+          setSystemMessage(`A session scheduled “${planned.value.label}”.`);
+          return { ok: true, result: describeScheduled([planned.value], now, caller)[0] };
+        }
+        case "list_scheduled":
+          return { ok: true, result: describeScheduled(readPrompts(), now, caller) };
+        case "cancel_scheduled": {
+          const prompts = readPrompts();
+          const id = planCancel(request.arguments, prompts, caller);
+          if (!id.ok) return id;
+          writePrompts(removePrompt(prompts, id.value));
+          return { ok: true, result: { cancelled: id.value } };
+        }
+        case "new_session": {
+          const plan = planNewSession(request.arguments, caller);
+          if (!plan.ok) return plan;
+          const root = await repoRoot(plan.value.project);
+          const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
+          setTabs((current) => [...current, tab]);
+          deliverDirect(tab.id, plan.value.text);
+          if (plan.value.focus) {
+            setActiveRepo(root);
+            setActiveTab(tab.id);
+          }
+          setSystemMessage(`A session opened a new session in ${repoLabel(root)}.`);
+          return { ok: true, result: { opened: true, project: root } };
+        }
+        case "fork_session": {
+          const plan = planFork(request.arguments, caller);
+          if (!plan.ok) return plan;
+          const known = findSession(sessionGroupsRef.current, plan.value.session);
+          const cwd = (plan.value.session === caller.sessionId ? caller.cwd : null) ?? known?.cwd;
+          if (!cwd) return { ok: false, error: "mangouste does not know where that session lives" };
+          const tab: ChatTab = {
+            ...newSessionTab(cwd),
+            sessionId: null,
+            surface: "chat",
+            // The parent's transcript is what the fork opens on.
+            resumeFile: known?.file ?? null,
+            forkFrom: plan.value.session,
+          };
+          setTabs((current) => [...current, tab]);
+          if (plan.value.text) deliverDirect(tab.id, plan.value.text);
+          if (plan.value.focus) {
+            const root = await repoRoot(cwd);
+            setActiveRepo(root);
+            setActiveTab(tab.id);
+          }
+          setSystemMessage(`A session forked itself into a new tab in ${repoLabel(cwd)}.`);
+          return { ok: true, result: { forkedFrom: plan.value.session, project: cwd } };
+        }
+        default:
+          return { ok: false, error: `unknown tool ${String(request.tool)}` };
+      }
+    },
+    [newSessionTab, deliverDirect],
+  );
+  const handleControlRef = useRef(handleControl);
+  useEffect(() => {
+    handleControlRef.current = handleControl;
+  });
+  useEffect(() => {
+    if (!isMainWindow()) return;
+    const unlisten = onControlRequest((request) => {
+      void handleControlRef.current(request)
+        .catch((e: unknown) => ({ ok: false as const, error: `mangouste failed: ${String(e)}` }))
+        .then((outcome) => controlRespond(request.id, outcome))
+        .catch(() => {
+          // The bridge has already given up on this call; nothing waits for it.
+        });
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
   }, []);
 
   // Follow the front tab, so the status panel describes what you are looking at.
@@ -3013,7 +3225,8 @@ function Workbench() {
                       cwd={tab.cwd}
                       visible={tab.id === activeTab}
                       cold={coldTabs.has(tab.id)}
-                      resume={tab.sessionId}
+                      resume={tab.sessionId ?? tab.forkFrom ?? null}
+                      fork={tab.sessionId === null && tab.forkFrom !== undefined}
                       resumeFile={tab.resumeFile}
                       // A request names its session, so the pane for a different
                       // one ignores it instead of jumping.
@@ -3031,6 +3244,7 @@ function Workbench() {
                       onFeedback={setFeedback}
                       initialDraft={tab.draft}
                       pasteRequest={pasteRequestFor(tab.id)}
+                      directRequests={directRequests[tab.id]}
                     />
                   )}
                   </PaneBoundary>
