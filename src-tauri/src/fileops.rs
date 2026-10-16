@@ -563,20 +563,28 @@ mod tests {
         assert!(delete_path("/tmp/../etc/passwd".into()).is_err());
     }
 
-    /// A case-folding volume reports `foo` as taken by `Foo`. Simulated with a
-    /// hard link: one entry under both names, which is what that volume shows.
+    /// A case-folding volume reports `foo` as taken by `Foo`. On one (macOS's
+    /// default) that is the real thing; elsewhere it is simulated with a hard
+    /// link, one entry under both names, which is what such a volume shows.
     #[test]
     #[cfg(unix)]
     fn a_case_only_rename_is_not_a_collision_with_itself() {
         let dir = scratch("case-rename");
         std::fs::write(dir.join("Foo"), "x\n").unwrap();
-        std::fs::hard_link(dir.join("Foo"), dir.join("foo")).unwrap();
+        let folds_case = occupied(&dir.join("foo"));
+        if !folds_case {
+            std::fs::hard_link(dir.join("Foo"), dir.join("foo")).unwrap();
+        }
         assert!(is_case_only_rename(&dir.join("Foo"), &dir.join("foo")));
-
-        std::fs::write(dir.join("Bar"), "x\n").unwrap();
-        std::fs::write(dir.join("bar"), "y\n").unwrap();
-        assert!(!is_case_only_rename(&dir.join("Bar"), &dir.join("bar")));
         assert!(!is_case_only_rename(&dir.join("Foo"), &dir.join("Bar")));
+
+        // Two distinct files differing only by case cannot exist on a
+        // case-folding volume, so the collision half only runs where they can.
+        if !folds_case {
+            std::fs::write(dir.join("Bar"), "x\n").unwrap();
+            std::fs::write(dir.join("bar"), "y\n").unwrap();
+            assert!(!is_case_only_rename(&dir.join("Bar"), &dir.join("bar")));
+        }
     }
 
     /// `remove_dir_all` down a link would empty the directory it points at.
