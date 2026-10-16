@@ -79,6 +79,46 @@ export function windowLabel(): string {
   return cached;
 }
 
+/** Matches `windows::REPO_GLOBAL` in Rust. */
+const REPO_GLOBAL = "__MANGOUSTE_OPEN_REPO__";
+
+/** sessionStorage flag: this webview has already applied its opened-for repo. */
+const REPO_CONSUMED = "mangouste.openRepoConsumed";
+
+/**
+ * The repo this window was opened for, or "" when it was opened plain or has
+ * already started on it.
+ *
+ * Set by Rust in an init script, so it is there before the first render reads
+ * it. But an init script runs on every page load, reloads included, and a
+ * window that has since moved to another repo must not snap back on F5: so it
+ * is applied once, and sessionStorage, which survives a reload of this webview
+ * and nothing else, remembers that it was. Takes `scope` and `storage` for its
+ * test; the real ones are `window` and `sessionStorage`.
+ */
+export function openedForRepo(
+  scope: object = globalThis,
+  storage: Pick<Storage, "getItem" | "setItem"> | null = safeSessionStorage(),
+): string {
+  const value = (scope as Record<string, unknown>)[REPO_GLOBAL];
+  if (typeof value !== "string" || !value) return "";
+  try {
+    if (storage?.getItem(REPO_CONSUMED)) return "";
+    storage?.setItem(REPO_CONSUMED, "1");
+  } catch {
+    // No storage is no reason to drop the repo the window was opened for.
+  }
+  return value;
+}
+
+function safeSessionStorage(): Storage | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** True in the window `tauri.conf.json` declares — the one a launch opens. */
 export function isMainWindow(): boolean {
   return windowLabel() === MAIN;

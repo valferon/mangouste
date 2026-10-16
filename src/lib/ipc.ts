@@ -166,14 +166,19 @@ export const onSessionsChanged = (handler: () => void): Promise<UnlistenFn> =>
 /**
  * A session's status changed, as the first scan to notice saw it.
  *
- * Delivered to one window only — Rust picks it, preferring the focused one —
+ * Delivered to one window only — Rust picks the one running the session, else
+ * the focused one —
  * so two windows do not raise two notifications for one event. See
  * `src-tauri/src/alerts.rs`.
  */
 export const onSessionTransition = (
   handler: (transition: SessionTransition) => void,
 ): Promise<UnlistenFn> =>
-  listen<SessionTransition>("sessions://transition", (e) => handler(e.payload));
+  // This window's listener: Rust sends each transition to one window, and a
+  // global `listen` would hear the ones meant for the others.
+  getCurrentWebviewWindow().listen<SessionTransition>("sessions://transition", (e) =>
+    handler(e.payload),
+  );
 
 /** Raise a desktop notification. Policy lives in `src/lib/alerts.ts`. */
 export const postNotification = (title: string, body: string) =>
@@ -283,8 +288,9 @@ export const onClaudeExit = (
 
 /* ---------- terminal ---------- */
 
-export const ptyOpen = (id: string, cwd: string, cols: number, rows: number) =>
-  invoke<TerminalInfo>("pty_open", { id, cwd, cols, rows });
+/** `session` is the Claude session a session tab's terminal runs, if any. */
+export const ptyOpen = (id: string, cwd: string, cols: number, rows: number, session?: string) =>
+  invoke<TerminalInfo>("pty_open", { id, cwd, cols, rows, session });
 export const ptyWrite = (id: string, data: string) => invoke<void>("pty_write", { id, data });
 export const ptyResize = (id: string, cols: number, rows: number) =>
   invoke<void>("pty_resize", { id, cols, rows });
@@ -562,9 +568,10 @@ export const gitMerge = (cwd: string, branch: string) =>
  *
  * Resolves to the new window's label. Rust picks it, because the label decides
  * which stored layout the window comes back with and only Rust can see which
- * ones are already taken.
+ * ones are already taken. With `repo`, the new window starts on that repo
+ * instead of the one its label last had.
  */
-export const openWindow = () => invoke<string>("open_window");
+export const openWindow = (repo?: string) => invoke<string>("open_window", { repo });
 
 /**
  * Raise the window with this label.
@@ -622,7 +629,11 @@ export const permissionRespond = (
 export const onPermissionRequest = (
   handler: (request: PermissionRequest) => void,
 ): Promise<UnlistenFn> =>
-  listen<PermissionRequest>("permission://request", (e) => handler(e.payload));
+  // This window's listener, not the global one: Rust sends an ask only to the
+  // window running its chat, and a global `listen` hears every window's.
+  getCurrentWebviewWindow().listen<PermissionRequest>("permission://request", (e) =>
+    handler(e.payload),
+  );
 
 /** An ask the CLI stopped waiting on (timed out, or typed over), by request id. */
 export const onPermissionWithdrawn = (handler: (id: string) => void): Promise<UnlistenFn> =>

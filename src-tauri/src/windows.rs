@@ -16,7 +16,10 @@
 //! rather than per process, since a window that goes away can no longer answer
 //! a permission prompt for the chats it raised.
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Window};
+use std::collections::HashSet;
+
+use parking_lot::Mutex;
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, Window};
 
 /// Label of the window `tauri.conf.json` declares. Every other one is minted.
 pub const MAIN_WINDOW: &str = "main";
@@ -32,6 +35,32 @@ const CASCADE: f64 = 36.0;
 
 /// Fallback size, used only when the asking window will not report its own.
 const DEFAULT_SIZE: (f64, f64) = (1600.0, 1000.0);
+
+/// Labels of windows that are gone but whose children are still being reaped.
+///
+/// Ownership is recorded as the bare label, so a label handed out again before
+/// its old window's sweep finished would be the same owner to `chats.rs` and
+/// `pty.rs`: the new window would attach to the dying window's chats, and the
+/// sweep would then kill the new window's own. Holding the label back until the
+/// sweep is done keeps the two apart; `window-3` is a fine name meanwhile.
+#[derive(Default)]
+pub struct Reaping(Mutex<HashSet<String>>);
+
+impl Reaping {
+    /// Hold `label` back. Called from `Destroyed`, before the sweep starts.
+    pub fn begin(&self, label: &str) {
+        self.0.lock().insert(label.to_string());
+    }
+
+    /// Release `label` once its children are gone.
+    pub fn end(&self, label: &str) {
+        self.0.lock().remove(label);
+    }
+
+    fn labels(&self) -> Vec<String> {
+        self.0.lock().iter().cloned().collect()
+    }
+}
 
 /// The lowest free label, given the ones already taken.
 ///
@@ -63,13 +92,35 @@ pub fn window_name(label: &str) -> String {
     format!("window {number}")
 }
 
-/// Open another window onto this process.
+/// Global the new window's frontend reads its starting repo from. Mirrors
+/// `REPO_GLOBAL` in `src/lib/windowScope.ts`.
+const REPO_GLOBAL: &str = "__MANGOUSTE_OPEN_REPO__";
+
+/// Script that hands a new window the repo it was opened for, before any of
+/// the frontend runs.
+///
+/// An init script rather than a query string: the URL is the dev server's in
+/// development and the bundled asset in a build, and only the script reaches
+/// both the same way. The path goes through JSON so a quote or a backslash in
+/// it is data, not script.
+fn repo_script(repo: &str) -> String {
+    let literal = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string());
+    format!("window.{REPO_GLOBAL} = {literal};")
+}
+
+/// Open another window onto this process, on `repo` when one is given.
 ///
 /// Sync on purpose: window creation is main-loop work on every platform this
 /// targets, and it is bounded — there is nothing here to park on.
 #[tauri::command]
-pub fn open_window(app: AppHandle, window: Window) -> Result<String, String> {
-    let taken: Vec<String> = app.webview_windows().keys().cloned().collect();
+pub fn open_window(
+    app: AppHandle,
+    window: Window,
+    reaping: State<'_, Reaping>,
+    repo: Option<String>,
+) -> Result<String, String> {
+    let mut taken: Vec<String> = app.webview_windows().keys().cloned().collect();
+    taken.extend(reaping.labels());
     let label = next_label(&taken);
 
     // Inherit the asking window's size, so a window opened from a tiled or
@@ -88,6 +139,10 @@ pub fn open_window(app: AppHandle, window: Window) -> Result<String, String> {
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
         .resizable(true);
+
+    if let Some(repo) = repo.as_deref().filter(|r| !r.is_empty()) {
+        builder = builder.initialization_script(repo_script(repo));
+    }
 
     // Cascade off the asker rather than landing exactly on top of it. A failure
     // to read the position is not worth refusing the window over: let the window
@@ -147,6 +202,25 @@ mod tests {
         assert_eq!(window_name("window-2"), "window 2");
         // A label with no number behind it still has to name something.
         assert_eq!(window_name("window-"), "window 1");
+    }
+
+    #[test]
+    fn a_label_still_being_reaped_is_not_handed_out() {
+        let reaping = Reaping::default();
+        reaping.begin("window-2");
+        let mut taken = vec!["main".to_string()];
+        taken.extend(reaping.labels());
+        assert_eq!(next_label(&taken), "window-3");
+        reaping.end("window-2");
+        assert_eq!(next_label(&["main".to_string()]), "window-2");
+    }
+
+    #[test]
+    fn a_repo_path_is_handed_over_as_a_string_literal() {
+        assert_eq!(
+            repo_script("/home/me/it's \"here\""),
+            r#"window.__MANGOUSTE_OPEN_REPO__ = "/home/me/it's \"here\"";"#
+        );
     }
 
     /// The reuse that makes a returning window find its own stored layout.

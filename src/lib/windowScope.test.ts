@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keySuffix, scopeKey, windowName, windowNumber, windowTint } from "./windowScope";
+import { keySuffix, openedForRepo, scopeKey, windowName, windowNumber, windowTint } from "./windowScope";
 
 describe("keySuffix", () => {
   it("leaves the main window's keys exactly as they were", () => {
@@ -59,5 +59,31 @@ describe("windowName", () => {
   it("counts from one, the way a person would", () => {
     expect(windowName("main")).toBe("window 1");
     expect(windowName("window-3")).toBe("window 3");
+  });
+});
+
+describe("openedForRepo", () => {
+  const storage = () => {
+    const items = new Map<string, string>();
+    return {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => void items.set(key, value),
+    };
+  };
+  const scope = { __MANGOUSTE_OPEN_REPO__: "/home/me/repo" };
+
+  it("reads the repo Rust handed the window", () => {
+    expect(openedForRepo(scope, storage())).toBe("/home/me/repo");
+  });
+
+  it("applies it once, so a reload keeps the repo the window moved to", () => {
+    const store = storage();
+    expect(openedForRepo(scope, store)).toBe("/home/me/repo");
+    expect(openedForRepo(scope, store)).toBe("");
+  });
+
+  it("is empty for a window opened plain", () => {
+    expect(openedForRepo({}, storage())).toBe("");
+    expect(openedForRepo({ __MANGOUSTE_OPEN_REPO__: 42 }, storage())).toBe("");
   });
 });

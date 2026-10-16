@@ -89,6 +89,14 @@ impl PermissionState {
         sender.send(decision).map_err(|e| e.to_string())
     }
 
+    /// The chat a pending ask belongs to, if the ask is still pending.
+    pub fn chat_of(&self, id: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .get(id)
+            .and_then(|(request, _)| request.chat_id.clone())
+    }
+
     /// Deny and drop every pending ask for one chat.
     ///
     /// Called when the chat is killed: its bridge threads would otherwise park

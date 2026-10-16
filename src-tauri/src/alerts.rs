@@ -272,11 +272,30 @@ pub fn dispatch(app: &AppHandle, transitions: &[Transition]) {
         }
     }
 
-    if let Some(window) = alert_window(app) {
-        for transition in transitions {
-            let _ = window.emit(EVENT_TRANSITION, transition);
+    let fallback = alert_window(app).map(|window| window.label().to_string());
+    for transition in transitions {
+        // `emit_to`, not `emit`: on a window `emit` still broadcasts to every
+        // webview, which is two notifications with two windows open.
+        if let Some(label) =
+            session_window(app, &transition.session_id).or_else(|| fallback.clone())
+        {
+            let _ = app.emit_to(label.as_str(), EVENT_TRANSITION, transition);
         }
     }
+}
+
+/// The window running this session, if one is: in a pane or in a terminal.
+///
+/// That window is the one that knows whether the session is on screen, so it
+/// is the one asked. A session nothing here runs — a `claude` in some other
+/// terminal — goes to `alert_window`.
+fn session_window(app: &AppHandle, session_id: &str) -> Option<String> {
+    let chats = app.state::<std::sync::Arc<crate::chats::ChatManager>>();
+    let terminals = app.state::<crate::pty::PtyState>();
+    chats
+        .owner_of_session(session_id)
+        .or_else(|| crate::pty::owner_of_session(&terminals, session_id))
+        .filter(|label| app.get_webview_window(label).is_some())
 }
 
 /// Raise a desktop notification.

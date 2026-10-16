@@ -38,6 +38,11 @@ interface TerminalPaneProps {
    * still running.
    */
   launch?: string;
+  /**
+   * The Claude session `launch` runs, for a session tab. Handed to Rust so the
+   * session has an owning window, like a pane-run chat does.
+   */
+  session?: string;
   /** A saved prompt to paste at the prompt, then Enter when it asks to be sent. */
   pasteRequest?: PasteRequest | null;
 }
@@ -112,6 +117,7 @@ export function TerminalPane({
   focusRequest = 0,
   paneActions,
   launch,
+  session,
   pasteRequest = null,
 }: TerminalPaneProps) {
   const menu = useMenu();
@@ -157,6 +163,11 @@ export function TerminalPane({
   useEffect(() => {
     launchRef.current = launch;
   }, [launch]);
+  /** The session `launch` runs. A ref for the same reason as `launchRef`. */
+  const sessionRef = useRef(session);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
   /**
    * Whether the launch command has actually reached a pty.
    *
@@ -388,7 +399,7 @@ export function TerminalPane({
       }
     });
 
-    const opened = ptyOpen(id, cwd, term.cols, term.rows)
+    const opened = ptyOpen(id, cwd, term.cols, term.rows, sessionRef.current)
       .then((info) => {
         instance = info.instance;
         // Flush output that arrived while the reply was in flight, dropping

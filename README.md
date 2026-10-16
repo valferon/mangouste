@@ -5,8 +5,9 @@
 A lightweight watcher and coordinator for many concurrent Claude Code sessions.
 Single-window and multi-repo, so it also replaces running one VSCode window per
 repository — but the reason it exists is the *n* sessions, not the one window.
-A second window is `Ctrl+Shift+N` when one screen is not enough; it is the same
-process, watching the same sessions.
+A second window is `Ctrl+Shift+N` when one screen is not enough, or
+`Shift+Enter` on a repo in `Ctrl+P` to open it there; it is the same process,
+watching the same sessions.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐

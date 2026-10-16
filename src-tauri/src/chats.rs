@@ -372,6 +372,18 @@ impl ChatManager {
             .map(|(_, chat)| chat.owner.clone())
     }
 
+    /// Which window owns the live chat under this id, if one does.
+    ///
+    /// What a permission ask is routed by: the prompt belongs to the window
+    /// running the chat, not to every window that still has a tab for its id.
+    pub fn owner_of_chat(&self, chat_id: &str) -> Option<String> {
+        self.chats
+            .lock()
+            .get(chat_id)
+            .filter(|chat| chat.alive.load(Ordering::SeqCst))
+            .map(|chat| chat.owner.clone())
+    }
+
     pub fn statuses(&self) -> Vec<ChatStatus> {
         self.chats
             .lock()
@@ -1127,7 +1139,17 @@ fn own_exe() -> Option<PathBuf> {
     None
 }
 
-fn build_args(options: &StartOptions, permission_config: Option<&std::path::Path>) -> Vec<String> {
+/// `resume_written` says whether the session being resumed has a transcript on
+/// disk. A chat learns its session id from the CLI's first frames, before any
+/// turn is written, so a tab closed or reloaded before its first prompt carries
+/// an id `claude` never saved. `--resume` on that dies with "No conversation
+/// found" and an `error_during_execution` result; `--session-id` starts it
+/// fresh under the same id, so the tab and the rail still agree on it.
+fn build_args(
+    options: &StartOptions,
+    permission_config: Option<&std::path::Path>,
+    resume_written: bool,
+) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
         "--verbose".into(),
@@ -1140,7 +1162,7 @@ fn build_args(options: &StartOptions, permission_config: Option<&std::path::Path
         "--include-partial-messages".into(),
     ];
     if let Some(resume) = &options.resume {
-        args.push("--resume".into());
+        args.push(if resume_written { "--resume" } else { "--session-id" }.into());
         args.push(resume.clone());
     }
     if let Some(model) = &options.model {
@@ -1228,6 +1250,33 @@ pub fn start(
             }
         }
     }
+    // The same session live under another id: a tab opened as "New session"
+    // keeps its `new-N` chat id, and a reloaded window restores that tab under
+    // the uuid instead. Another window's chat is refused, as above. This
+    // window's is the orphan its reload left behind — a window never holds two
+    // tabs for one session, `openSessionTab` dedupes by uuid — so it is ended
+    // before the resume, rather than left appending to the same transcript.
+    let orphan = options.resume.as_deref().and_then(|session| {
+        manager
+            .chats
+            .lock()
+            .iter()
+            .find(|(chat_id, chat)| {
+                **chat_id != options.chat_id
+                    && chat.alive.load(Ordering::SeqCst)
+                    && holds_session(chat_id, chat.session_id.lock().as_deref(), session)
+            })
+            .map(|(chat_id, chat)| (chat_id.clone(), chat.owner.clone()))
+    });
+    if let Some((orphan_id, orphan_owner)) = orphan {
+        if orphan_owner != owner {
+            return Err(format!(
+                "this session is open in {}",
+                crate::windows::window_name(&orphan_owner)
+            ));
+        }
+        manager.kill(&orphan_id, None);
+    }
     // Not live: clear any dead entry before spawning over it. A dead chat is
     // nobody's — its window may even be gone — so whichever window asks next
     // gets it, and becomes its owner by spawning the process it refers to.
@@ -1249,7 +1298,11 @@ pub fn start(
     let mut command = Command::new(claude_binary());
     crate::env::with_child_path(&mut command);
     command
-        .args(build_args(&options, permission_config.as_deref()))
+        .args(build_args(
+            &options,
+            permission_config.as_deref(),
+            options.resume.as_deref().and_then(transcript_path).is_some(),
+        ))
         .env("CLAUDE_CODE_ENTRYPOINT", chat_entrypoint())
         .current_dir(&options.cwd)
         .stdin(Stdio::piped())
@@ -1638,8 +1691,24 @@ mod tests {
     fn user_extra_args_still_land_last() {
         let mut options = options();
         options.extra_args = Some(vec!["--fallback-model".into(), "haiku".into()]);
-        let args = build_args(&options, None);
+        let args = build_args(&options, None, false);
         assert_eq!(args.last().map(String::as_str), Some("haiku"));
+    }
+
+    #[test]
+    fn resume_without_transcript_starts_fresh_under_the_same_id() {
+        let mut options = options();
+        options.resume = Some("debe6876-0000-4000-8000-000000000000".into());
+        let flag_for = |written| {
+            let args = build_args(&options, None, written);
+            let at = args
+                .iter()
+                .position(|a| a == "debe6876-0000-4000-8000-000000000000")
+                .expect("id passed");
+            args[at - 1].clone()
+        };
+        assert_eq!(flag_for(true), "--resume");
+        assert_eq!(flag_for(false), "--session-id");
     }
 
     #[test]

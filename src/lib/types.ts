@@ -529,6 +529,10 @@ export interface TerminalInfo {
   instance: number;
   cwd: string;
   alive: boolean;
+  /** Label of the window that opened it. */
+  owner: string;
+  /** The Claude session a session tab's terminal runs, if any. */
+  sessionId: string | null;
 }
 
 /** A single line from a `--output-format stream-json` process. */

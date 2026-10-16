@@ -197,6 +197,7 @@ pub fn run() {
         .manage(sessions::SessionCache::default())
         .manage(stats::StatsCache::default())
         .manage(recap::RecapCache::default())
+        .manage(windows::Reaping::default())
         .setup(|app| {
             trace("setup");
             watch_sessions(app.handle().clone());
@@ -220,6 +221,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let withdrawn_handle = app.handle().clone();
             let owner = Arc::clone(&manager);
+            let router = Arc::clone(&manager);
             // Raising the window is what a second launch of a single-instance
             // app is asking for, so the running instance answers `show` by
             // doing exactly that. `unminimize` first: `set_focus` alone leaves
@@ -229,7 +231,17 @@ pub fn run() {
                 Arc::clone(&permission),
                 socket,
                 move |request| {
-                    let _ = handle.emit(permission::EVENT_REQUEST, request);
+                    // To the window running the chat, not to every window: a
+                    // cold tab elsewhere with the same chat id would otherwise
+                    // show the prompt too, and answer it.
+                    let owner = request
+                        .chat_id
+                        .as_deref()
+                        .and_then(|chat_id| router.owner_of_chat(chat_id));
+                    let _ = match owner {
+                        Some(owner) => handle.emit_to(owner.as_str(), permission::EVENT_REQUEST, request),
+                        None => handle.emit(permission::EVENT_REQUEST, request),
+                    };
                 },
                 move |request| {
                     let _ = withdrawn_handle.emit(permission::EVENT_WITHDRAWN, &request.id);
@@ -404,12 +416,16 @@ pub fn run() {
         }
         let handle = window.app_handle().clone();
         let label = window.label().to_string();
+        // Held back synchronously, on the main thread `open_window` also runs
+        // on, so no window can be minted under this label until the sweep ends.
+        handle.state::<windows::Reaping>().begin(&label);
         std::thread::spawn(move || {
             let terminals: tauri::State<'_, pty::PtyState> = handle.state();
             pty::close_owned_by(&terminals, &label);
             let manager: tauri::State<'_, Arc<chats::ChatManager>> = handle.state();
             manager.kill_owned_by(&label);
             treewatch::drop_window(&handle, &label);
+            handle.state::<windows::Reaping>().end(&label);
         });
     });
 

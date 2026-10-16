@@ -1979,6 +1979,8 @@ export const ChatPane = memo(function ChatPane({
   const bodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stickyRef = useRef(true);
+  /** Where the log was last seen scrolled to: tells a scroll up from a growth. */
+  const lastScrollTopRef = useRef(0);
   /**
    * Pin the log to its tail, or let it go.
    *
@@ -2810,12 +2812,25 @@ export const ChatPane = memo(function ChatPane({
 
   /* ---------- scrolling ---------- */
 
+  /*
+   * Only a scroll up lets go of the tail.
+   *
+   * The scroll event the pin itself raises is dispatched a frame later, and by
+   * then the log may have grown again: a tool row pins, then the
+   * `AskUserQuestion` card lands under it, and the event reads a card's height
+   * of distance from the bottom. Judged on distance alone that looked like the
+   * user scrolling away, so the log unpinned and the card was left below the
+   * fold. A pinned log that has not moved up is still following.
+   */
   const onScroll = useCallback(() => {
     const element = logRef.current;
     if (!element) return;
-    const distanceFromBottom =
-      element.scrollHeight - element.scrollTop - element.clientHeight;
-    const sticky = distanceFromBottom < STICKY_THRESHOLD_PX;
+    const top = element.scrollTop;
+    const movedUp = top < lastScrollTopRef.current - 1;
+    lastScrollTopRef.current = top;
+    const distanceFromBottom = element.scrollHeight - top - element.clientHeight;
+    const sticky =
+      distanceFromBottom < STICKY_THRESHOLD_PX || (stickyRef.current && !movedUp);
     if (sticky !== stickyRef.current) setSticky(sticky);
   }, [setSticky]);
 

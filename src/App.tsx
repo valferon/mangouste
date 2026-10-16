@@ -45,6 +45,7 @@ import {
   openExternal,
   openWindow,
   postNotification,
+  ptyList,
   renameSession,
   revealPath,
   sessionOwner,
@@ -138,6 +139,7 @@ import {
 import {
   idScope,
   isMainWindow,
+  openedForRepo,
   windowLabel,
   windowName,
   windowTint,
@@ -241,6 +243,19 @@ const TERMINAL_CHAT_FLOOR = 320;
 const DASHBOARD_TAB = "dashboard";
 
 /**
+ * Unique per webview load, so a fresh tab's `new-<n>` id never repeats one the
+ * previous load minted: the counter restarts with the page, the chats in Rust
+ * do not, and a repeated id attaches to whatever session the old tab became.
+ */
+const NEW_SESSION_LOAD = Date.now().toString(36);
+
+/**
+ * The repo quick-open opened this window for, read once per load: the read
+ * consumes it, and StrictMode runs a state initializer twice.
+ */
+const OPENED_FOR_REPO = openedForRepo();
+
+/**
  * The tab strip as the last run left it, rebuilt synchronously.
  *
  * Called from the `tabs` initializer rather than an effect because the repo
@@ -249,9 +264,10 @@ const DASHBOARD_TAB = "dashboard";
  * Restored rows are deduped by id and by session on the way in — openSessionTab
  * dedupes by sessionId so two processes can never append to one transcript,
  * and a store written by a crash mid-update could hold the same session twice.
- * The `new-<n>` counter needs no seeding against these ids: `toStoredTab`
- * drops unstarted sessions, so a restored id always carries a uuid, never a
- * counter value the next fresh tab could collide with.
+ * Restored ids always carry a uuid (`toStoredTab` drops unstarted sessions),
+ * but the backend outlives a reload and still holds chats under the last
+ * load's `new-<n>` ids; `NEW_SESSION_LOAD` is what keeps a fresh tab from
+ * minting one of those again and attaching to it.
  */
 function loadRestoredTabs(): Tab[] {
   if (!readBoolean(KEYS.prefs.restoreTabs, true)) return [];
@@ -463,8 +479,10 @@ function Workbench() {
     costUsd: null,
     title: null,
   });
+  // A window opened from quick-open for a repo starts there, over whatever
+  // repo its reused label last had.
   const [activeRepo, setActiveRepo] = useState<string>(
-    () => readString(ACTIVE_REPO_KEY),
+    () => OPENED_FOR_REPO || readString(ACTIVE_REPO_KEY),
   );
 
   const [tabs, setTabs] = useState<Tab[]>(loadRestoredTabs);
@@ -976,8 +994,9 @@ function Workbench() {
     let stopped = false;
     const scan = async () => {
       let statuses;
+      let terminals;
       try {
-        statuses = await claudeStatus();
+        [statuses, terminals] = await Promise.all([claudeStatus(), ptyList()]);
       } catch {
         return;
       }
@@ -985,6 +1004,11 @@ function Workbench() {
       const next = new Map<string, string>();
       for (const status of statuses) {
         if (status.alive && status.sessionId) next.set(status.sessionId, status.owner);
+      }
+      // A session on the terminal surface is `claude` typed into a pty, which
+      // the chat manager never sees: its owner is the window holding the pty.
+      for (const terminal of terminals) {
+        if (terminal.alive && terminal.sessionId) next.set(terminal.sessionId, terminal.owner);
       }
       // Replaced only when something actually moved: the rail is memoised on
       // this map, and a fresh Map every tick would re-render every row.
@@ -1263,7 +1287,7 @@ function Workbench() {
       // Window-scoped: the counter restarts with each webview, and an id a
       // second window repeated would attach it to the first window's process
       // instead of spawning its own.
-      id: `chat|${cwd}|${idScope()}new-${(newSessionCounter.current += 1)}`,
+      id: `chat|${cwd}|${idScope()}new-${NEW_SESSION_LOAD}-${(newSessionCounter.current += 1)}`,
       cwd,
       sessionId: surface === "terminal" ? mintSessionId() : null,
       resumeFile: null,
@@ -2976,6 +3000,7 @@ function Workbench() {
                         id={tab.id}
                         cwd={tab.cwd}
                         launch={claudeLaunch(tab.sessionId, tab.resumeFile)}
+                        session={tab.sessionId}
                         refitToken={refitToken + tabActivation}
                         themeKey={theme}
                         focusRequest={tab.id === activeTab ? tabActivation : 0}
@@ -3230,6 +3255,15 @@ function Workbench() {
           onPick={(path) => {
             void selectRepo(path);
             setQuickOpen(false);
+          }}
+          onPickNewWindow={(path) => {
+            setQuickOpen(false);
+            // A repo root, as `selectRepo` would make it: the new window's
+            // restored tabs are matched against the root, not a subdirectory.
+            const known = knownRepoRoot(path);
+            void (known !== null ? Promise.resolve(known) : repoRoot(path)).then(
+              (root) => openWindow(root),
+            );
           }}
           onClose={() => setQuickOpen(false)}
         />

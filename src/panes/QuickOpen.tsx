@@ -15,6 +15,8 @@ interface QuickOpenProps {
   groups: ProjectGroup[];
   repos: RepoInfo[];
   onPick: (path: string) => void;
+  /** Open the repo in a new window instead of switching this one. */
+  onPickNewWindow: (path: string) => void;
   onClose: () => void;
 }
 
@@ -59,7 +61,15 @@ function relativeAge(ms: number): string {
  * the full path — so "pay" finds `payments-service` and "ws/an" finds
  * `~/workspace/ansible`.
  */
-export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
+/**
+ * True when a click or Enter asks for a new window: Ctrl/Cmd or Shift held,
+ * the modifiers a browser uses for "open in new window" on a link.
+ */
+export function wantsNewWindow(event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) {
+  return event.ctrlKey || event.metaKey || event.shiftKey;
+}
+
+export function QuickOpen({ groups, repos, onPick, onPickNewWindow, onClose }: QuickOpenProps) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -104,7 +114,9 @@ export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
     } else if (event.key === "Enter") {
       event.preventDefault();
       const picked = matches[cursor];
-      if (picked) onPick(picked.path);
+      if (!picked) return;
+      if (wantsNewWindow(event)) onPickNewWindow(picked.path);
+      else onPick(picked.path);
     }
   };
 
@@ -132,7 +144,11 @@ export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
               className="quickopen-row"
               data-cursor={index === cursor}
               onMouseEnter={() => setCursor(index)}
-              onClick={() => onPick(entry.path)}
+              onClick={(event) =>
+                wantsNewWindow(event) ? onPickNewWindow(entry.path) : onPick(entry.path)
+              }
+              // Middle click, as on a link.
+              onAuxClick={(event) => event.button === 1 && onPickNewWindow(entry.path)}
               title={entry.path}
             >
               {entry.live > 0 && <span className="status-dot" data-status="active" />}
@@ -143,9 +159,22 @@ export function QuickOpen({ groups, repos, onPick, onClose }: QuickOpenProps) {
                   {entry.total} · {relativeAge(entry.lastActivityMs)}
                 </span>
               )}
+              <button
+                type="button"
+                className="qo-new-window"
+                title="Open in new window (Shift+Enter)"
+                aria-label={`Open ${entry.label} in new window`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPickNewWindow(entry.path);
+                }}
+              >
+                ⧉
+              </button>
             </div>
           ))}
         </div>
+        <div className="quickopen-hint">Enter to open · Shift+Enter or Ctrl+click for a new window</div>
       </div>
     </div>
   );

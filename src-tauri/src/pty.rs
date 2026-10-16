@@ -70,6 +70,11 @@ struct Terminal {
     /// running with nothing on screen attached to it.
     owner: String,
     cwd: String,
+    /// The Claude session this terminal was opened to run, for a session tab
+    /// on the terminal surface. Recorded so the session has an owner like a
+    /// pane-run chat does: `claude` typed into a pty is invisible to
+    /// `ChatManager`, and without this a second window would resume it again.
+    session: Option<String>,
 }
 
 #[derive(Default)]
@@ -92,6 +97,76 @@ pub struct TerminalInfo {
     pub instance: u64,
     pub cwd: String,
     pub alive: bool,
+    /// Label of the window that opened it.
+    pub owner: String,
+    /// The Claude session it runs, for a session tab on the terminal surface.
+    pub session_id: Option<String>,
+}
+
+/// Which window holds a live terminal running this session, if one does.
+///
+/// A live shell is not enough: `claude` can exit and leave the prompt behind,
+/// and a terminal that only *was* the session must not refuse it to every other
+/// window until somebody closes the tab. So a candidate is confirmed against
+/// the process table, after the map is released.
+pub fn owner_of_session(state: &PtyState, session_id: &str) -> Option<String> {
+    let owner = state
+        .terminals
+        .lock()
+        .values()
+        .find(|t| t.alive.load(Ordering::SeqCst) && t.session.as_deref() == Some(session_id))
+        .map(|t| t.owner.clone())?;
+    session_running(session_id).then_some(owner)
+}
+
+/// Whether some process's command line names this session, which is how a
+/// session tab's terminal launches `claude` (`--session-id` or `--resume`).
+///
+/// Errs towards "running" when `ps` cannot be read: a false owner raises a
+/// window, a false free spawns a second `claude` on one transcript.
+fn session_running(session_id: &str) -> bool {
+    match std::process::Command::new("ps")
+        .args(["-Ao", "args="])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            names_session(&String::from_utf8_lossy(&output.stdout), session_id)
+        }
+        _ => true,
+    }
+}
+
+/// Pure half of `session_running`, for its test.
+fn names_session(table: &str, session_id: &str) -> bool {
+    table
+        .lines()
+        .any(|line| line.split_whitespace().any(|arg| arg == session_id) && line.contains("claude"))
+}
+
+/// Why `label` may not open terminal `id` for `session`, if it may not.
+///
+/// Another window's live terminal under the same id would be closed by the
+/// reopen below, and a session already running elsewhere — in a terminal or a
+/// pane — would get a second `claude` appending to its transcript.
+fn foreign_owner(
+    state: &PtyState,
+    chats: &crate::chats::ChatManager,
+    id: &str,
+    session: Option<&str>,
+    label: &str,
+) -> Option<String> {
+    let by_id = state
+        .terminals
+        .lock()
+        .get(id)
+        .filter(|t| t.alive.load(Ordering::SeqCst))
+        .map(|t| t.owner.clone());
+    let by_session =
+        session.and_then(|s| owner_of_session(state, s).or_else(|| chats.owner_of_session(s)));
+    by_id
+        .into_iter()
+        .chain(by_session)
+        .find(|owner| owner != label)
 }
 
 /// The user's shell. See `crate::env::user_shell` for why `$SHELL` alone is not
@@ -109,14 +184,17 @@ fn login_shell() -> String {
 /// mounts a pane twice and the first cleanup defers its `pty_close` behind the
 /// first open's reply, so both opens are genuinely in flight together.
 #[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
 pub fn pty_open(
     app: AppHandle,
     window: tauri::Window,
     state: State<'_, PtyState>,
+    chats: State<'_, std::sync::Arc<crate::chats::ChatManager>>,
     id: String,
     cwd: String,
     cols: u16,
     rows: u16,
+    session: Option<String>,
 ) -> Result<TerminalInfo, String> {
     // Serialise the close-then-spawn below: two concurrent opens of one id
     // would both find nothing to close, both spawn a login shell, and the
@@ -125,6 +203,12 @@ pub fn pty_open(
     // Waiting rather than rejecting, because the caller that arrives second is
     // the one whose pane is bound to the terminal it asked for.
     let _open_guard = state.open_guard.lock();
+    if let Some(owner) = foreign_owner(&state, &chats, &id, session.as_deref(), window.label()) {
+        return Err(format!(
+            "this session is open in {}",
+            crate::windows::window_name(&owner)
+        ));
+    }
     close_terminal(&state, &id, None);
     let instance = state.next_instance.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -177,6 +261,7 @@ pub fn pty_open(
             alive: Arc::clone(&alive),
             owner: window.label().to_string(),
             cwd: cwd.clone(),
+            session: session.clone(),
         },
     );
     // Belt and braces behind `open_guard`: there should be nothing here to
@@ -269,6 +354,8 @@ pub fn pty_open(
         instance,
         cwd,
         alive: true,
+        owner: window.label().to_string(),
+        session_id: session,
     })
 }
 
@@ -429,6 +516,35 @@ pub fn pty_list(state: State<'_, PtyState>) -> Vec<TerminalInfo> {
             // job still holds the pty therefore reads as alive, which is what a
             // write to that pty still finds.
             alive: terminal.alive.load(Ordering::SeqCst),
+            owner: terminal.owner.clone(),
+            session_id: terminal.session.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: &str = "47307543-0a1b-4c2d-8e3f-123456789abc";
+
+    #[test]
+    fn a_claude_launched_on_the_session_is_running() {
+        let table = format!("-bash\nclaude --resume {ID}\n");
+        assert!(names_session(&table, ID));
+        let table = format!("node /usr/lib/claude/cli.js --session-id {ID}\n");
+        assert!(names_session(&table, ID));
+    }
+
+    /// The shell left behind after `claude` exits does not hold the session.
+    #[test]
+    fn a_bare_shell_or_another_session_is_not() {
+        assert!(!names_session("-bash\nvim notes.md\n", ID));
+        assert!(!names_session(
+            "claude --resume 00000000-0000-0000-0000-000000000000\n",
+            ID
+        ));
+        // The id in some other program's args is not the session running.
+        assert!(!names_session(&format!("grep {ID} log\n"), ID));
+    }
 }

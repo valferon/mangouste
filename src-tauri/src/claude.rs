@@ -14,14 +14,30 @@ use tauri::{State, Window};
 
 use crate::chats::{self, ChatManager, ChatStatus, StartOptions};
 use crate::permission::{PermissionDecision, PermissionState};
+use crate::pty::{self, PtyState};
 
 /// Spawn a chat, or attach to the live process already running that id.
 #[tauri::command]
 pub fn claude_start(
     manager: State<'_, Arc<ChatManager>>,
+    terminals: State<'_, PtyState>,
     window: Window,
     options: StartOptions,
 ) -> Result<ChatStatus, String> {
+    // A session running in another window's terminal is invisible to the chat
+    // manager, so it is checked here: resuming it in a pane would be a second
+    // `claude` on one transcript.
+    if let Some(owner) = options
+        .resume
+        .as_deref()
+        .and_then(|session| pty::owner_of_session(&terminals, session))
+        .filter(|owner| owner != window.label())
+    {
+        return Err(format!(
+            "this session is open in {}",
+            crate::windows::window_name(&owner)
+        ));
+    }
     chats::start(&manager, window.label(), options)
 }
 
@@ -125,11 +141,26 @@ pub fn claude_kill(
 }
 
 /// Answer a pending tool-permission prompt.
+///
+/// Only from the window running the chat: a cold tab in another window that
+/// happens to carry the same chat id must not approve a tool for a session it
+/// is not showing.
 #[tauri::command]
 pub fn permission_respond(
+    manager: State<'_, Arc<ChatManager>>,
     permission: State<'_, Arc<PermissionState>>,
+    window: Window,
     decision: PermissionDecision,
 ) -> Result<(), String> {
+    let owner = permission
+        .chat_of(&decision.id)
+        .and_then(|chat_id| manager.owner_of_chat(&chat_id));
+    if let Some(owner) = owner.filter(|owner| owner != window.label()) {
+        return Err(format!(
+            "this session is open in {}",
+            crate::windows::window_name(&owner)
+        ));
+    }
     permission.respond(decision)
 }
 
@@ -147,6 +178,12 @@ pub fn claude_status(manager: State<'_, Arc<ChatManager>>) -> Vec<ChatStatus> {
 /// says which one that is. `None` means nothing live holds the session, so this
 /// window is free to resume it.
 #[tauri::command]
-pub fn session_owner(manager: State<'_, Arc<ChatManager>>, session_id: String) -> Option<String> {
-    manager.owner_of_session(&session_id)
+pub fn session_owner(
+    manager: State<'_, Arc<ChatManager>>,
+    terminals: State<'_, PtyState>,
+    session_id: String,
+) -> Option<String> {
+    manager
+        .owner_of_session(&session_id)
+        .or_else(|| pty::owner_of_session(&terminals, &session_id))
 }
