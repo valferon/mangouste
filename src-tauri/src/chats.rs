@@ -1162,7 +1162,14 @@ fn build_args(
         "--include-partial-messages".into(),
     ];
     if let Some(resume) = &options.resume {
-        args.push(if resume_written { "--resume" } else { "--session-id" }.into());
+        args.push(
+            if resume_written {
+                "--resume"
+            } else {
+                "--session-id"
+            }
+            .into(),
+        );
         args.push(resume.clone());
     }
     if let Some(model) = &options.model {
@@ -1301,7 +1308,11 @@ pub fn start(
         .args(build_args(
             &options,
             permission_config.as_deref(),
-            options.resume.as_deref().and_then(transcript_path).is_some(),
+            options
+                .resume
+                .as_deref()
+                .and_then(transcript_path)
+                .is_some(),
         ))
         .env("CLAUDE_CODE_ENTRYPOINT", chat_entrypoint())
         .current_dir(&options.cwd)
