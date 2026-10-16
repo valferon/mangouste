@@ -18,7 +18,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::Command;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -361,12 +360,7 @@ pub struct RepoFacts {
 }
 
 fn git(cwd: &str, args: &[&str]) -> Option<String> {
-    let output = crate::env::with_child_path(&mut Command::new("git"))
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = crate::git::git_command(cwd).args(args).output().ok()?;
     output
         .status
         .success()

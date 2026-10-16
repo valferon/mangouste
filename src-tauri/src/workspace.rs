@@ -1,5 +1,6 @@
 //! Repo discovery and lazy file-tree listing for the left sidebar.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -147,59 +148,109 @@ pub fn discover_repos(root: String) -> Result<Vec<RepoInfo>, String> {
     Ok(repos)
 }
 
-/// Substring file search for quick-open, ranked so shorter paths win ties.
+/// The newest file search each window has asked for, so an older one still
+/// walking can stop: `@` completion asks again on every pause in typing, and
+/// in a large repo each walk outlived several of the ones that replaced it.
+static FILE_SEARCHES: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+static FILE_SEARCH_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Substring file search for quick-open and `@` completion.
+///
+/// A new search from the same window supersedes the one before it, which
+/// returns empty; the caller has already moved on and discards it.
 #[tauri::command(async)]
 pub fn search_files(
+    window: tauri::Window,
     root: String,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<DirEntryInfo>, String> {
-    let root_path = PathBuf::from(&root);
+    let label = window.label().to_string();
+    let serial = FILE_SEARCH_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FILE_SEARCHES.lock().insert(label.clone(), serial);
+    let current = || FILE_SEARCHES.lock().get(&label) == Some(&serial);
+    find_files(&root, &query, limit, current)
+}
+
+/// How a hit ranks: a match in the file name before one only in the folders
+/// above it, then shorter paths, then by path so equal ranks come back in a
+/// stable order. Lower is better.
+type FileRank = (bool, usize, String);
+
+/// Body of [`search_files`], with `current` polled to notice it is superseded.
+///
+/// Ranked over every match, not the first few hundred in walk order: walk
+/// order is directory order, so `foo.ts` three folders down lost to a hundred
+/// files under `foo-old/` that happened to be listed first. Only the best
+/// `limit` are kept while walking, and only those are stat'ed.
+fn find_files(
+    root: &str,
+    query: &str,
+    limit: Option<usize>,
+    current: impl Fn() -> bool,
+) -> Result<Vec<DirEntryInfo>, String> {
+    let root_path = PathBuf::from(root);
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
     let needle = query.to_lowercase();
-    // Clamped: the frontend owns this value, and `usize::MAX` would overflow
-    // the walk cap below.
-    let limit = limit.unwrap_or(200).min(1000);
-    let mut hits: Vec<DirEntryInfo> = Vec::new();
+    // Clamped: the frontend owns this value.
+    let limit = limit.unwrap_or(200).clamp(1, 1000);
+    let mut best: std::collections::BinaryHeap<FileRank> = std::collections::BinaryHeap::new();
 
-    for entry in WalkBuilder::new(&root_path)
+    for (seen, entry) in WalkBuilder::new(&root_path)
         .hidden(true)
         .git_ignore(true)
         .follow_links(false)
         .build()
         .flatten()
+        .enumerate()
     {
+        if seen % 256 == 0 && !current() {
+            return Ok(Vec::new());
+        }
         if entry.depth() == 0 || entry.file_type().is_none_or(|t| t.is_dir()) {
             continue;
         }
         let path = entry.path();
         let relative = path.strip_prefix(&root_path).unwrap_or(path);
-        let relative_str = relative.to_string_lossy();
-        if !needle.is_empty() && !relative_str.to_lowercase().contains(&needle) {
+        let relative_str = relative.to_string_lossy().to_lowercase();
+        if !needle.is_empty() && !relative_str.contains(&needle) {
             continue;
         }
-        let metadata = entry.metadata().ok();
-        hits.push(DirEntryInfo {
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            path: path.to_string_lossy().into_owned(),
-            is_dir: false,
-            size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
-            modified_ms: metadata.as_ref().map(modified_ms).unwrap_or(0),
-        });
-        // Cap the walk generously, then rank and trim below.
-        if hits.len() >= limit.saturating_mul(5) {
+        let in_name = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&needle));
+        let path = path.to_string_lossy().into_owned();
+        best.push((!in_name, path.len(), path));
+        if best.len() > limit {
+            best.pop();
+        }
+        // With nothing typed every file matches; the first `limit` by rank
+        // among a walk this long is as good an answer as the whole tree's.
+        if needle.is_empty() && seen > limit.saturating_mul(50) {
             break;
         }
     }
 
-    hits.sort_by_key(|h| h.path.len());
-    hits.truncate(limit);
-    Ok(hits)
+    Ok(best
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, _, path)| {
+            let metadata = std::fs::metadata(&path).ok();
+            DirEntryInfo {
+                name: Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                is_dir: false,
+                size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+                modified_ms: metadata.as_ref().map(modified_ms).unwrap_or(0),
+                path,
+            }
+        })
+        .collect())
 }
 
 /// A file's text together with the mtime it was read at.
@@ -211,6 +262,10 @@ pub fn search_files(
 pub struct FileText {
     pub content: String,
     pub modified_ms: u64,
+    /// The bytes were not UTF-8, and `content` has U+FFFD where they stood.
+    /// Such text is for reading: written back, every replacement character
+    /// would be permanent, so the editor opens it read-only and replace skips it.
+    pub lossy: bool,
 }
 
 /// Shared body of `read_text_file` and `read_text_file_meta`, and the one reader
@@ -246,9 +301,14 @@ pub(crate) fn read_text(path: &Path, max_bytes: Option<u64>) -> Result<FileText,
     if bytes.contains(&0) {
         return Err("binary file".to_string());
     }
+    let (content, lossy) = match String::from_utf8(bytes) {
+        Ok(text) => (text, false),
+        Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
+    };
     Ok(FileText {
-        content: String::from_utf8_lossy(&bytes).into_owned(),
+        content,
         modified_ms: modified_ms(&metadata),
+        lossy,
     })
 }
 
@@ -391,6 +451,13 @@ pub(crate) fn save_text(
             ));
         }
     }
+    // Defence behind the `lossy` flag, which is what keeps a lossy buffer from
+    // being saved in the first place. Only on a checked save: the bytes on disk
+    // now are the ones the buffer was read from exactly when the mtime still
+    // matches, and a forced overwrite is the user saying the disk can go.
+    if expected_modified_ms.is_some() && !on_disk_is_utf8(&target)? {
+        return Err("not UTF-8 text: saving would replace its non-UTF-8 bytes".to_string());
+    }
 
     let parent = target
         .parent()
@@ -422,6 +489,24 @@ pub(crate) fn save_text(
     Ok(std::fs::metadata(&target)
         .map(|m| modified_ms(&m))
         .unwrap_or(0))
+}
+
+/// Whether what is on disk now decodes as UTF-8, read no further than the
+/// largest file the editor could have opened.
+///
+/// A sequence cut short by that cap is not a decode error: only bytes that are
+/// invalid where they stand are.
+fn on_disk_is_utf8(path: &Path) -> Result<bool, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(READ_BUDGET_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(match std::str::from_utf8(&bytes) {
+        Ok(_) => true,
+        Err(error) => error.error_len().is_none(),
+    })
 }
 
 /// Home directory, so the frontend can default the repo root without guessing.
@@ -467,6 +552,50 @@ mod tests {
         // And `None` is the deliberate overwrite the conflict banner offers.
         write_text_file(path, "forced\n".into(), None).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "forced\n");
+    }
+
+    /// Ranked over every match, not the first few in walk order.
+    #[test]
+    fn a_file_name_match_beats_folders_full_of_path_matches() {
+        let dir = scratch("find-rank");
+        std::fs::create_dir_all(dir.join("foo-old")).unwrap();
+        for i in 0..150 {
+            std::fs::write(dir.join("foo-old").join(format!("x{i}.txt")), "").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("src/deep/er")).unwrap();
+        std::fs::write(dir.join("src/deep/er/foo.ts"), "").unwrap();
+
+        let root = dir.to_string_lossy().into_owned();
+        let hits = find_files(&root, "foo", Some(20), || true).unwrap();
+        assert_eq!(hits.len(), 20);
+        assert_eq!(hits[0].name, "foo.ts");
+    }
+
+    #[test]
+    fn a_superseded_file_search_stops_and_returns_nothing() {
+        let dir = scratch("find-cancel");
+        std::fs::write(dir.join("a.txt"), "").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        assert!(find_files(&root, "a", None, || false).unwrap().is_empty());
+    }
+
+    /// A Latin-1 file opens with U+FFFD in place of its accents; saving that
+    /// buffer would make every one of them permanent.
+    #[test]
+    fn write_refuses_to_overwrite_a_file_that_is_not_utf8() {
+        let dir = scratch("latin1");
+        let file = dir.join("caf.txt");
+        std::fs::write(&file, b"caf\xe9\n").unwrap();
+        let opened = read_text(&file, None).unwrap();
+        assert!(opened.content.contains('\u{fffd}'));
+        assert!(opened.lossy, "what the editor keys read-only off");
+        std::fs::write(dir.join("ok.txt"), "café\n").unwrap();
+        assert!(!read_text(&dir.join("ok.txt"), None).unwrap().lossy);
+
+        let path = file.to_string_lossy().into_owned();
+        let refused = write_text_file(path, opened.content, Some(opened.modified_ms));
+        assert!(refused.unwrap_err().contains("not UTF-8"));
+        assert_eq!(std::fs::read(&file).unwrap(), b"caf\xe9\n");
     }
 
     /// The save publishes through a rename, which without resolving the link

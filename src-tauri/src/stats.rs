@@ -523,10 +523,12 @@ fn ingest_line(line: &str, scan: &mut FileScan) {
     }
 
     scan.stats.models.add(&model, &tokens);
-    if timestamp.len() >= 10 {
+    // `get`, not `[..10]`: the length test counts bytes, so a non-ASCII byte in
+    // the first ten would panic the slice, and with it every summary after.
+    if let Some(day) = timestamp.get(..10) {
         scan.stats
             .days
-            .entry(timestamp[..10].to_string())
+            .entry(day.to_string())
             .or_default()
             .add(&model, &tokens);
     }
@@ -1037,6 +1039,18 @@ mod tests {
             scan.stats.first_ms,
             parse_iso_ms("2026-08-22T20:14:59.987Z")
         );
+    }
+
+    /// Ten bytes is not ten characters: a multi-byte timestamp used to panic
+    /// the day slice, and the scan with it.
+    #[test]
+    fn a_non_ascii_timestamp_does_not_panic_the_day_bucket() {
+        let mut scan = FileScan::default();
+        ingest_line(
+            r#"{"type":"assistant","timestamp":"2026-08-2é0:14:59Z","message":{"role":"assistant","id":"msg_1","model":"claude-opus-5","content":[],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            &mut scan,
+        );
+        assert_eq!(scan.stats.models.totals().turns, 1);
     }
 
     #[test]

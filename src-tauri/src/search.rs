@@ -484,6 +484,11 @@ pub fn replace_matches(
         });
         let outcome = (|| -> Result<usize, String> {
             let file = read_text(std::path::Path::new(&target.path), Some(MAX_FILE_BYTES))?;
+            if file.lossy {
+                return Err(
+                    "not UTF-8 text: replacing would rewrite its non-UTF-8 bytes".to_string(),
+                );
+            }
             if let Some(expected) = target.modified_ms {
                 if file.modified_ms != expected {
                     return Err("changed on disk since it was searched".to_string());

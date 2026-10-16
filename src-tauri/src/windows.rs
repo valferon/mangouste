@@ -92,6 +92,74 @@ pub fn window_name(label: &str) -> String {
     format!("window {number}")
 }
 
+/// The window that takes control calls and runs the prompt schedule: `main`
+/// while it is open, otherwise the lowest-numbered window still standing.
+///
+/// Not `main` outright: closing it with a second window open leaves the app
+/// running, and with the role pinned to a label nothing can mint again, every
+/// control call failed and no scheduled prompt fired until a restart.
+pub fn control_window(labels: &[String]) -> Option<String> {
+    labels
+        .iter()
+        .min_by_key(|label| window_number(label))
+        .cloned()
+}
+
+/// A label's place in the order windows are counted in. One nobody minted
+/// sorts last rather than ahead of the real ones.
+fn window_number(label: &str) -> u32 {
+    if label == MAIN_WINDOW {
+        return 1;
+    }
+    label
+        .strip_prefix(LABEL_PREFIX)
+        .and_then(|n| n.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
+/// Windows able to take a control call: their listener is registered, and
+/// they have not started closing.
+///
+/// Open is not enough on either end. A window `open_window` just built is in
+/// the window map before its frontend has subscribed, and one past
+/// `CloseRequested` is still in it until `Destroyed`; a call sent to either
+/// reaches no listener and parks until the bridge's reply timeout.
+#[derive(Default)]
+pub struct ControlReady(Mutex<HashSet<String>>);
+
+impl ControlReady {
+    pub fn release(&self, label: &str) {
+        self.0.lock().remove(label);
+    }
+}
+
+/// The label of the window [`control_window`] picks among those ready now.
+pub fn current_control_window(app: &AppHandle) -> Option<String> {
+    let ready = app.state::<ControlReady>();
+    let ready = ready.0.lock();
+    let labels: Vec<String> = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| ready.contains(label))
+        .collect();
+    control_window(&labels)
+}
+
+/// Called by a window once its control listener is up.
+#[tauri::command]
+pub fn claim_control(window: Window, ready: State<'_, ControlReady>) {
+    ready.0.lock().insert(window.label().to_string());
+}
+
+/// Whether the asking window is the one that runs the prompt schedule.
+///
+/// Asked on every scheduler tick rather than once: the answer moves when the
+/// window holding the role closes.
+#[tauri::command]
+pub fn is_control_window(app: AppHandle, window: Window) -> bool {
+    current_control_window(&app).as_deref() == Some(window.label())
+}
+
 /// Global the new window's frontend reads its starting repo from. Mirrors
 /// `REPO_GLOBAL` in `src/lib/windowScope.ts`.
 const REPO_GLOBAL: &str = "__MANGOUSTE_OPEN_REPO__";
@@ -228,5 +296,19 @@ mod tests {
     fn fills_the_gap_a_closed_window_left() {
         let taken = vec!["main".to_string(), "window-3".to_string()];
         assert_eq!(next_label(&taken), "window-2");
+    }
+
+    #[test]
+    fn control_passes_to_the_lowest_window_left_when_main_closes() {
+        let labels = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            control_window(&labels(&["window-2", "main"])).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            control_window(&labels(&["window-10", "window-3"])).as_deref(),
+            Some("window-3")
+        );
+        assert_eq!(control_window(&[]), None);
     }
 }

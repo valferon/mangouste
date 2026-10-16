@@ -18,7 +18,7 @@
 //! session" and never offers the permission tool.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
@@ -138,21 +138,68 @@ where
     });
 }
 
+/// Longest control call a bridge will buffer. A call is a tool name and its
+/// arguments; a megabyte is far past any prompt worth scheduling.
+pub(crate) const MAX_CONTROL_BYTES: u64 = 1024 * 1024;
+
+/// How long a bridge waits for the request line once a peer has connected.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Why a bridge connection produced no request line.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RequestError {
+    /// Nothing usable arrived: a probe that hung up, a silent peer, an I/O error.
+    Empty,
+    /// The line ran past the cap. Worth an answer, unlike `Empty`: the peer is
+    /// waiting on one, and a dropped connection reads to it as a crash.
+    TooLarge,
+}
+
+/// Read the one request line a bridge connection opens with, up to `max_bytes`.
+///
+/// Each connection gets its own thread, so a peer that connects and says
+/// nothing would park one forever, and one that never sends a newline would
+/// grow the buffer without end. Bounded on both counts. The timeout is cleared
+/// again before returning: the permission bridge goes on to block on this same
+/// socket to notice the CLI hanging up, and that wait has no deadline.
+pub(crate) fn read_request_line(
+    stream: &UnixStream,
+    max_bytes: u64,
+) -> Result<String, RequestError> {
+    stream
+        .set_read_timeout(Some(REQUEST_READ_TIMEOUT))
+        .map_err(|_| RequestError::Empty)?;
+    let clone = stream.try_clone().map_err(|_| RequestError::Empty)?;
+    let mut line = String::new();
+    let read = BufReader::new(clone).take(max_bytes).read_line(&mut line);
+    stream
+        .set_read_timeout(None)
+        .map_err(|_| RequestError::Empty)?;
+    if read.is_err() || line.trim().is_empty() {
+        return Err(RequestError::Empty);
+    }
+    // Stopped by the cap rather than ended by a newline: not a whole request.
+    if !line.ends_with('\n') {
+        return Err(if line.len() as u64 >= max_bytes {
+            RequestError::TooLarge
+        } else {
+            RequestError::Empty
+        });
+    }
+    Ok(line)
+}
+
 fn handle_call<F>(state: &ControlState, emit: &F, stream: UnixStream)
 where
     F: Fn(&mut ControlRequest) -> Result<(), String>,
 {
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(clone) => clone,
-        Err(_) => return,
-    });
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-        return;
-    }
-    let reply = match parse_call(&line) {
-        Ok(request) => dispatch(state, emit, request),
-        Err(error) => failure(error),
+    let reply = match read_request_line(&stream, MAX_CONTROL_BYTES) {
+        Ok(line) => match parse_call(&line) {
+            Ok(request) => dispatch(state, emit, request),
+            Err(error) => failure(error),
+        },
+        Err(RequestError::TooLarge) => failure("control call too large".into()),
+        Err(RequestError::Empty) => return,
     };
     let mut stream = stream;
     let _ = writeln!(stream, "{reply}");
@@ -434,5 +481,25 @@ mod tests {
         assert!(is_error);
         assert_eq!(text, r#"list_scheduled from Some("chat-1")"#);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Over the cap is answered as too large, not mistaken for a hang-up, and
+    /// the caps are per bridge: what is too large here is one call's worth.
+    #[test]
+    fn a_request_line_past_its_cap_is_told_apart_from_nothing() {
+        let (server, mut client) = UnixStream::pair().expect("pair");
+        writeln!(client, "{}", "x".repeat(2048)).expect("write");
+        assert_eq!(
+            read_request_line(&server, 1024),
+            Err(RequestError::TooLarge)
+        );
+
+        let (server, mut client) = UnixStream::pair().expect("pair");
+        writeln!(client, "{}", "x".repeat(2048)).expect("write");
+        assert!(read_request_line(&server, 4096).is_ok());
+
+        let (server, client) = UnixStream::pair().expect("pair");
+        drop(client);
+        assert_eq!(read_request_line(&server, 1024), Err(RequestError::Empty));
     }
 }

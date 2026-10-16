@@ -73,7 +73,9 @@ fn keychain_credentials() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let output = Command::new("security")
+    // By absolute path: whatever `security` comes first on PATH would be handed
+    // the keychain read, and the credentials with it.
+    let output = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output()
         .ok()?;
@@ -123,7 +125,8 @@ fn read_access_token() -> Result<String, String> {
         .get("claudeAiOauth")
         .ok_or("no Claude OAuth entry in credentials; sign in with the CLI first")?;
 
-    // Warn rather than fail on an expired token: the endpoint is authoritative.
+    // Refused here rather than sent: an expired token only comes back from the
+    // endpoint as a bare 401, and this says what to do about it.
     if let Some(expires_at) = oauth.get("expiresAt").and_then(|v| v.as_i64()) {
         let expires_ms = if expires_at < 1_000_000_000_000 {
             expires_at * 1000

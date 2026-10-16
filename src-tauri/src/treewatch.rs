@@ -33,7 +33,8 @@ const TREE_DEBOUNCE: Duration = Duration::from_millis(100);
 const TREE_BATCH_MAX: Duration = Duration::from_millis(500);
 
 struct TreeWatch {
-    watcher: RecommendedWatcher,
+    /// Shared with the event handler, which re-arms a watch the kernel dropped.
+    watcher: std::sync::Arc<Mutex<RecommendedWatcher>>,
     /// Shared with the event handler, which maps paths back to watched dirs.
     dirs: std::sync::Arc<Mutex<Watched>>,
 }
@@ -115,6 +116,8 @@ fn spawn(on_change: impl Fn(Vec<String>) + Send + 'static) -> Result<TreeWatch, 
         }
     })
     .map_err(|e| format!("tree watcher failed to start: {e}"))?;
+    let watcher = std::sync::Arc::new(Mutex::new(watcher));
+    let rearm = std::sync::Arc::downgrade(&watcher);
 
     // Ends when the watcher is dropped: that drops the sender, and `recv` fails.
     std::thread::spawn(move || {
@@ -128,10 +131,15 @@ fn spawn(on_change: impl Fn(Vec<String>) + Send + 'static) -> Result<TreeWatch, 
             }
             let changed = {
                 let watched = watched.lock().unwrap_or_else(|e| e.into_inner());
-                affected_dirs(
+                let changed = affected_dirs(
                     batch.iter().map(|e| (&e.kind, e.paths.as_slice())),
                     &watched,
-                )
+                );
+                if let Some(watcher) = rearm.upgrade() {
+                    let mut watcher = watcher.lock().unwrap_or_else(|e| e.into_inner());
+                    rearm_removed(&batch, &watched, &mut watcher);
+                }
+                changed
             };
             if !changed.is_empty() {
                 on_change(
@@ -146,24 +154,70 @@ fn spawn(on_change: impl Fn(Vec<String>) + Send + 'static) -> Result<TreeWatch, 
     Ok(TreeWatch { watcher, dirs })
 }
 
+/// Re-watch watched directories this batch removed or created again.
+///
+/// inotify drops a watch with the directory it was on, but `watched` still
+/// lists it, so `sync` took it for held and never asked again: a
+/// `rm -rf dist && mkdir dist`, or a checkout that swaps a folder out, left
+/// that folder silent until it was collapsed and reopened. The tree's own set
+/// of expanded folders has not changed, so nothing would call `sync` anyway.
+///
+/// Kept in `watched` either way: the remove and the create can land in two
+/// batches, and the create (seen through the parent's watch) is what re-arms a
+/// folder that was not back yet when its removal was handled.
+fn rearm_removed(batch: &[Event], watched: &Watched, watcher: &mut RecommendedWatcher) {
+    let mut removed = BTreeSet::new();
+    let mut touched = BTreeSet::new();
+    for event in batch {
+        let is_remove = matches!(event.kind, EventKind::Remove(_));
+        if !is_remove && !matches!(event.kind, EventKind::Create(_)) {
+            continue;
+        }
+        for dir in event.paths.iter().filter_map(|path| watched.get(path)) {
+            if is_remove {
+                removed.insert(dir.clone());
+            }
+            touched.insert(dir.clone());
+        }
+    }
+    for dir in touched {
+        if removed.contains(&dir) {
+            let _ = watcher.unwatch(&dir);
+        }
+        if dir.is_dir() {
+            watch_dir(watcher, &dir);
+        }
+    }
+}
+
+/// Watch one directory, saying so when the kernel refuses: ENOSPC on the
+/// inotify limit is the usual one, and silently it reads as a tree that stopped
+/// updating for no reason.
+fn watch_dir(watcher: &mut RecommendedWatcher, dir: &Path) -> bool {
+    match watcher.watch(dir, RecursiveMode::NonRecursive) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("tree watch on {} failed: {e}", dir.display());
+            false
+        }
+    }
+}
+
 impl TreeWatch {
     /// Apply the difference between what is watched and `wanted`.
     fn sync(&mut self, wanted: HashSet<PathBuf>) {
         let mut current = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut watcher = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
         let held: HashSet<PathBuf> = current.values().cloned().collect();
         for dir in held.difference(&wanted) {
-            let _ = self.watcher.unwatch(dir);
+            let _ = watcher.unwatch(dir);
             current.retain(|_, original| original != dir);
         }
         for dir in wanted {
             if held.contains(&dir) || !Path::new(&dir).is_dir() {
                 continue;
             }
-            if self
-                .watcher
-                .watch(&dir, RecursiveMode::NonRecursive)
-                .is_ok()
-            {
+            if watch_dir(&mut watcher, &dir) {
                 if let Ok(canonical) = dir.canonicalize() {
                     current.insert(canonical, dir.clone());
                 }
@@ -308,6 +362,35 @@ mod tests {
         std::fs::remove_file(root.join("a.txt")).unwrap();
         let seen = wait_for(&rx, &[&root]);
         assert!(!seen.contains(&*sub.to_string_lossy()), "{seen:?}");
+
+        drop(watch);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder deleted and made again keeps reporting: inotify dropped the
+    /// first watch with the first folder.
+    #[test]
+    fn a_recreated_folder_is_watched_again() {
+        let root = std::env::temp_dir().join(format!("mg-treewatch-re-{}", std::process::id()));
+        let sub = root.join("dist");
+        std::fs::create_dir_all(&sub).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watch = spawn(move |dirs| {
+            let _ = tx.send(dirs);
+        })
+        .unwrap();
+        watch.sync([root.clone(), sub.clone()].into_iter().collect());
+
+        std::fs::remove_dir_all(&sub).unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        wait_for(&rx, &[&root]);
+        // Let the batch that re-arms the watch finish before writing.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        while rx.try_recv().is_ok() {}
+
+        std::fs::write(sub.join("a.txt"), "x").unwrap();
+        let seen = wait_for(&rx, &[&sub]);
+        assert!(seen.contains(&*sub.to_string_lossy()), "{seen:?}");
 
         drop(watch);
         let _ = std::fs::remove_dir_all(&root);

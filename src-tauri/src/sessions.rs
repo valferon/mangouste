@@ -473,9 +473,40 @@ fn probe_sidechain(transcript: &Path, session_id: &str, now: u64) -> SidechainPr
     }
 }
 
+/// True when an agent's log ends on its final answer: the newest user or
+/// assistant record is an assistant turn that stopped on `end_turn`.
+///
+/// The CLI keeps appending `attachment` records after that answer (Stop-hook
+/// output, token reminders), so those are skipped rather than read as activity.
+/// An agent resumed later appends a user record and counts as running again. A
+/// tail too short to hold a whole record finds nothing and leaves the agent
+/// running, which is what the mtime alone said before.
+fn agent_finished(path: &Path) -> bool {
+    let Ok(tail) = read_tail(path, TAIL_BYTES) else {
+        return false;
+    };
+    parsed_lines(&tail)
+        .iter()
+        .rev()
+        .find(|record| {
+            matches!(
+                record.get("type").and_then(|t| t.as_str()),
+                Some("user" | "assistant")
+            )
+        })
+        .is_some_and(|record| {
+            record.get("type").and_then(|t| t.as_str()) == Some("assistant")
+                && record
+                    .pointer("/message/stop_reason")
+                    .and_then(|s| s.as_str())
+                    == Some("end_turn")
+        })
+}
+
 /// One flat directory of agent logs: newest mtime across them — bar a recent one
-/// the agent's meta says was killed, whose final flush is not liveness — plus the
-/// agents still writing inside the active window, newest first.
+/// the agent's meta says was killed, or one that has already answered, whose
+/// final flush is not liveness — plus the agents still writing inside the active
+/// window, newest first.
 fn scan_agent_dir(dir: &Path, now: u64) -> (u64, Vec<RunningAgent>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (0, Vec::new());
@@ -527,6 +558,11 @@ fn scan_agent_dir(dir: &Path, now: u64) -> (u64, Vec<RunningAgent>) {
                 agent_type = kind;
             }
             description = str_field(&meta, "description").unwrap_or_default();
+        }
+        // Same for one that has handed back its answer: the write that made the
+        // mtime fresh was that answer, not work still in flight.
+        if agent_finished(&path) {
+            continue;
         }
         newest = newest.max(mtime);
 
@@ -1149,14 +1185,38 @@ pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
     }
     // One appended write of a whole line, which is safe beside the CLI's own
     // appends; a reader that catches a torn line skips it and heals next scan.
+    // Built first and written with one `write_all`: `writeln!` on a bare `File`
+    // is a `write(2)` per formatting fragment, and the CLI can still be
+    // appending between them. A CLI killed mid-record left no newline, so one
+    // goes first, or the marker would be glued onto that fragment.
+    let mut line = String::new();
+    if !ends_with_newline(path) {
+        line.push('\n');
+    }
+    line.push_str(&record.to_string());
+    line.push('\n');
     std::fs::OpenOptions::new()
         .append(true)
         .open(path)
         .and_then(|mut file| {
             use std::io::Write;
-            writeln!(file, "{record}")
+            file.write_all(line.as_bytes())
         })
         .is_ok()
+}
+
+/// Whether a file's last byte is a newline. An empty or unreadable file counts
+/// as ending cleanly: there is no fragment to separate from.
+fn ends_with_newline(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return true;
+    };
+    if file.seek(SeekFrom::End(-1)).is_err() {
+        return true;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)
+        .map_or(true, |()| last[0] == b'\n')
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -2680,5 +2740,59 @@ mod status_tests {
         assert!(!is_interrupt_marker(
             &serde_json::json!({"content": "interrupt the turn"})
         ));
+    }
+
+    /// A CLI killed mid-record leaves no trailing newline; the marker must
+    /// still land on a line of its own.
+    #[test]
+    fn the_interrupt_marker_starts_a_new_line_after_a_torn_record() {
+        let dir = std::env::temp_dir().join("mangouste-interrupt-torn");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("2f8c1d40-0000-4000-8000-000000000002.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","uuid":"11111111-1111-4111-8111-111111111111","timestamp":"2026-09-09T10:00:00.000Z","message":{"role":"user","content":"go"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"2222"#,
+            ),
+        )
+        .expect("write transcript");
+
+        assert!(append_interrupt_marker(
+            &path,
+            "2f8c1d40-0000-4000-8000-000000000002"
+        ));
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let last = text.lines().last().expect("a line");
+        let record: serde_json::Value = serde_json::from_str(last).expect("marker is whole JSON");
+        assert!(record.get("message").is_some_and(is_interrupt_marker));
+        assert!(text.ends_with('\n'));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn an_agent_that_has_answered_is_not_running_while_its_log_is_fresh() {
+        let dir = std::env::temp_dir().join("mangouste-agent-finished");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let asked = r#"{"type":"user","message":{"role":"user","content":"review it"}}"#;
+        let working = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]}}"#;
+        let answered = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#;
+        let hook = r#"{"type":"attachment","attachment":{"type":"hook_non_blocking_error"}}"#;
+        for (name, lines) in [
+            ("agent-done", vec![asked, answered, hook]),
+            ("agent-busy", vec![asked, working]),
+            ("agent-resumed", vec![asked, answered, asked]),
+        ] {
+            std::fs::write(dir.join(format!("{name}.jsonl")), lines.join("\n") + "\n")
+                .expect("write log");
+        }
+
+        let (_, running) = scan_agent_dir(&dir, now_ms());
+        let mut ids: Vec<&str> = running.iter().map(|agent| agent.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["agent-busy", "agent-resumed"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

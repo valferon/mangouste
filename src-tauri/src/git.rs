@@ -64,10 +64,31 @@ fn explain(stderr: &str) -> String {
     message.to_string()
 }
 
-fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = crate::env::with_child_path(&mut Command::new("git"))
-        .args(args)
+/// A `git` child set up the way every call in this app wants it.
+///
+/// `GIT_OPTIONAL_LOCKS=0` stops the status and diff polls from taking
+/// `index.lock` to refresh stat info: with several sessions committing in the
+/// same repo, a poll that holds the lock is a `git commit` that fails.
+/// `GIT_LITERAL_PATHSPECS=1` makes every path a path: `app/[id].tsx` is a
+/// Next.js route, not a glob that also matches `app/i.tsx` — which, for
+/// `git clean`, is a file deleted that nobody asked to delete.
+pub(crate) fn git_command(cwd: &str) -> Command {
+    let mut command = Command::new("git");
+    crate::env::with_child_path(&mut command)
         .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1");
+    command
+}
+
+fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
+    run_git(git_command(cwd), args)
+}
+
+/// Run a prepared `git` child to completion, failing with git's own words.
+fn run_git(mut command: Command, args: &[&str]) -> Result<String, String> {
+    let output = command
+        .args(args)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
@@ -88,9 +109,8 @@ pub(crate) fn git_out(cwd: &str, args: &[&str]) -> Result<String, String> {
 /// `git` where exit 1 means "the files differ" rather than a failure, which is
 /// what `diff --no-index` uses it for.
 pub(crate) fn git_diff_out(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = crate::env::with_child_path(&mut Command::new("git"))
+    let output = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() && output.status.code() != Some(1) {
@@ -226,7 +246,11 @@ pub fn git_log(
     }
 
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let stdout = git(&cwd, &borrowed)?;
+    // The one call where a path is typed rather than picked: the history
+    // filter box is free text, and `src/*.ts` there is meant as a glob.
+    let mut command = git_command(&cwd);
+    command.env_remove("GIT_LITERAL_PATHSPECS");
+    let stdout = run_git(command, &borrowed)?;
     let commits = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -456,9 +480,8 @@ fn patch_cut_marker() -> String {
 /// `allow_diff_exit` tolerates exit 1, which `diff --no-index` uses to mean
 /// "the files differ" rather than to report a failure.
 fn git_patch(cwd: &str, args: &[&str], allow_diff_exit: bool) -> Result<String, String> {
-    let mut child = crate::env::with_child_path(&mut Command::new("git"))
+    let mut child = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -502,7 +525,7 @@ fn git_patch(cwd: &str, args: &[&str], allow_diff_exit: bool) -> Result<String, 
 /// The sha came from the frontend: validate it, and pair every use with
 /// `--end-of-options`, so a crafted value like `--output=/path` can neither
 /// reach git nor become a flag if it did.
-fn checked_sha(sha: &str) -> Result<(), String> {
+pub(crate) fn checked_sha(sha: &str) -> Result<(), String> {
     if sha.len() < 4 || sha.len() > 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("not a commit sha: {sha}"));
     }
@@ -570,7 +593,13 @@ pub fn git_diff_file(cwd: String, path: String, staged: Option<bool>) -> Result<
     args.push("--");
     args.push(&path);
     let patch = git_patch(&cwd, &args, false)?;
-    if !patch.is_empty() {
+    // Only an untracked file has no tracked side. A tracked one with nothing to
+    // show (fully staged, or the status list a beat behind the disk) has
+    // nothing to show, and the fallback below would paint it as wholly added.
+    if !patch.is_empty()
+        || staged.unwrap_or(false)
+        || git(&cwd, &["ls-files", "--error-unmatch", "--", &path]).is_ok()
+    {
         return Ok(patch);
     }
     // An untracked file has no tracked side to compare against, so `git diff`
@@ -895,17 +924,16 @@ pub fn git_commit(cwd: String, message: String, amend: Option<bool>) -> Result<S
 /// the app is killed. Failing fast with git's own error is far better: the user
 /// can fix their credential helper and retry.
 fn git_network(cwd: &str, args: &[&str]) -> Result<String, String> {
-    let output = crate::env::with_child_path(&mut Command::new("git"))
+    let mut command = git_command(cwd);
+    command
         .args(args)
-        .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Unset rather than set: an empty GIT_ASKPASS is still "run this", so
         // removing the variables is what actually disables the GUI prompters.
         .env_remove("GIT_ASKPASS")
         .env_remove("SSH_ASKPASS")
-        .env("SSH_ASKPASS_REQUIRE", "never")
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+        .env("SSH_ASKPASS_REQUIRE", "never");
+    let output = output_within(command, NETWORK_TIMEOUT)?;
     // Progress goes to stderr even on success, so both streams are returned and
     // the caller shows whichever is non-empty.
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -915,6 +943,91 @@ fn git_network(cwd: &str, args: &[&str]) -> Result<String, String> {
     }
     let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
     Ok(combined.trim().to_string())
+}
+
+/// Longest a fetch, pull or push may run. Generous, since a first push of a
+/// big repo over a slow link is legitimately slow; the point is that a stalled
+/// remote cannot hold a worker thread, and the button's spinner, forever.
+const NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// `Command::output` with a deadline, for a child that may never finish.
+///
+/// The child runs in a session of its own. `ssh` asks for a passphrase or a
+/// host key on `/dev/tty`, not on stdin, so an app launched from a terminal
+/// handed every network call a terminal to hang on, out of sight; with no
+/// controlling terminal it fails at once with an error the user can act on.
+/// The new session also makes git a process group leader, so the deadline's
+/// kill takes `ssh` and any credential helper down with it.
+fn output_within(
+    mut command: Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe, touches no memory of ours, and
+        // is the only thing run between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Ok(None) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(child.id() as i32, libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "git gave up after {} minutes without finishing",
+                    timeout.as_secs() / 60
+                ));
+            }
+            Err(e) => return Err(format!("failed to run git: {e}")),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// A branch or remote name coming from the frontend. Rejects anything that
@@ -1809,5 +1922,83 @@ mod tracking_tests {
         .expect("log");
         assert_eq!(touched.len(), 1);
         assert_eq!(touched[0].subject, "other");
+    }
+
+    /// A Next.js route segment is a file name, not a glob: discarding
+    /// `app/[id].tsx` must not also delete the `app/i.tsx` it would match.
+    #[test]
+    fn discarding_a_bracketed_path_deletes_only_that_file() {
+        let dir = repo("discard-literal");
+        commit(&dir, "base");
+        std::fs::create_dir_all(dir.join("app")).expect("mkdir");
+        for name in ["[id].tsx", "i.tsx", "d.tsx"] {
+            std::fs::write(dir.join("app").join(name), "x\n").expect("write");
+        }
+        git_discard(
+            dir.to_string_lossy().into_owned(),
+            Vec::new(),
+            vec!["app/[id].tsx".into()],
+        )
+        .expect("discard");
+        assert!(!dir.join("app/[id].tsx").exists());
+        assert!(dir.join("app/i.tsx").exists());
+        assert!(dir.join("app/d.tsx").exists());
+    }
+
+    /// The history filter is typed, so a glob there still filters, even with
+    /// every other call reading paths literally.
+    #[test]
+    fn the_history_path_filter_still_takes_a_glob() {
+        let dir = repo("log-glob");
+        std::fs::write(dir.join("a.ts"), "x\n").expect("write");
+        run(&dir, &["add", "a.ts"]);
+        run(&dir, &["commit", "--quiet", "-m", "ts"]);
+        commit(&dir, "txt");
+        let touched = git_log(
+            dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            Some(true),
+            Some(LogFilter {
+                path: Some("*.ts".into()),
+                ..LogFilter::default()
+            }),
+        )
+        .expect("log");
+        assert_eq!(touched.len(), 1);
+        assert_eq!(touched[0].subject, "ts");
+    }
+
+    /// The empty-file fallback is for untracked files only: a tracked file
+    /// with nothing staged must not show as wholly added.
+    #[test]
+    fn a_tracked_file_with_no_diff_is_not_shown_as_added() {
+        let dir = repo("diff-fallback");
+        commit(&dir, "base\n");
+        let cwd = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            git_diff_file(cwd.clone(), "f.txt".into(), Some(true)).expect("staged"),
+            ""
+        );
+        assert_eq!(
+            git_diff_file(cwd.clone(), "f.txt".into(), None).expect("worktree"),
+            ""
+        );
+        std::fs::write(dir.join("new.txt"), "x\n").expect("write");
+        assert!(git_diff_file(cwd, "new.txt".into(), None)
+            .expect("untracked")
+            .contains("+x"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_child_past_its_deadline_is_killed_with_its_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & sleep 30"]);
+        let started = std::time::Instant::now();
+        let err = output_within(command, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(err.contains("gave up"), "{err}");
+        // The grandchild held stdout open; had it survived, draining would wait it out.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

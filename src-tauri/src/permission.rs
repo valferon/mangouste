@@ -29,6 +29,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 
+use crate::control::{read_request_line, RequestError};
+
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -279,6 +281,11 @@ where
     Ok(())
 }
 
+/// Longest ask the bridge will buffer. Far above the control cap: an ask
+/// carries the tool's whole input, which for a `Write` is the file itself, and
+/// a generated lockfile or fixture runs to megabytes.
+const MAX_ASK_BYTES: u64 = 64 * 1024 * 1024;
+
 fn handle_ask<F, G, H>(
     state: Arc<PermissionState>,
     emit: &F,
@@ -291,14 +298,22 @@ fn handle_ask<F, G, H>(
     G: Fn(&str) -> bool + Send + Sync + 'static,
     H: Fn() + Send + Sync + 'static,
 {
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(clone) => clone,
-        Err(_) => return,
-    });
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-        return;
-    }
+    let line = match read_request_line(&stream, MAX_ASK_BYTES) {
+        Ok(line) => line,
+        // Denied out loud rather than hung up on: a dropped connection is a
+        // bridge crash to the CLI, and the model would retry the same write.
+        Err(RequestError::TooLarge) => {
+            let reply = serde_json::json!({
+                "behavior": "deny",
+                "message": "this tool call is too large for mangouste to show for approval",
+            });
+            let mut stream = stream;
+            let _ = writeln!(stream, "{reply}");
+            let _ = stream.flush();
+            return;
+        }
+        Err(RequestError::Empty) => return,
+    };
 
     // Not an ask at all: a second launch reaching us through the only channel it
     // has, to hand its turn over rather than start a rival. Checked against the
@@ -339,17 +354,26 @@ fn handle_ask<F, G, H>(
     // so a killed instance's survivors still find the bridge. Waiting on `recv`
     // for a prompt that no window can render is an indefinite park, so deny it
     // and let the CLI report a refusal it can act on.
-    if let Some(chat_id) = request.chat_id.as_deref() {
-        if !owns_chat(chat_id) {
-            let mut stream = stream;
-            let reply = serde_json::json!({
-                "behavior": "deny",
-                "message": "mangouste no longer owns this session",
-            });
-            let _ = writeln!(stream, "{reply}");
-            let _ = stream.flush();
-            return;
-        }
+    //
+    // An ask naming no chat at all is refused the same way. Every chat this app
+    // starts passes `--permission-chat`, and `cancel_for` matches on the id, so
+    // an anonymous ask is one nothing would ever release.
+    let refuse = |stream: &UnixStream| {
+        let reply = serde_json::json!({
+            "behavior": "deny",
+            "message": "mangouste no longer owns this session",
+        });
+        let mut stream = stream;
+        let _ = writeln!(stream, "{reply}");
+        let _ = stream.flush();
+    };
+    let Some(chat_id) = request.chat_id.clone() else {
+        refuse(&stream);
+        return;
+    };
+    if !owns_chat(&chat_id) {
+        refuse(&stream);
+        return;
     }
 
     // `AskUserQuestion` used to be answered right here, on the reasoning that
@@ -364,6 +388,15 @@ fn handle_ask<F, G, H>(
         .pending
         .lock()
         .insert(id.clone(), (request.clone(), sender));
+    // Checked again now the ask is registered. A kill drops the chat and then
+    // sweeps `pending`; one landing between the check above and the insert
+    // swept before this ask was there to be found, and nothing else would
+    // release it. Either the sweep saw it, or this sees the chat gone.
+    if !owns_chat(&chat_id) {
+        state.pending.lock().remove(&id);
+        refuse(&stream);
+        return;
+    }
     emit(&request);
     watch_for_hangup(&state, &id, &stream, withdrawn);
 

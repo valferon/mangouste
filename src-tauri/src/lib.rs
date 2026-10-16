@@ -200,6 +200,7 @@ pub fn run() {
         .manage(stats::StatsCache::default())
         .manage(recap::RecapCache::default())
         .manage(windows::Reaping::default())
+        .manage(windows::ControlReady::default())
         .setup(|app| {
             trace("setup");
             watch_sessions(app.handle().clone());
@@ -282,7 +283,7 @@ pub fn run() {
                 // thread during `setup` deadlocks the loop that would draw it.
                 app.dialog()
                     .message(format!(
-                        "The running window owns the permission bridge at {}.\n\n                         A second instance would compete with it for tool prompts, \
+                        "The running window owns the permission bridge at {}.\n\nA second instance would compete with it for tool prompts, \
                          so this one will not start. Close the other window first.",
                         collision.socket.display()
                     ))
@@ -294,8 +295,9 @@ pub fn run() {
 
             // The control bridge waits for the collision check above: only the
             // instance that owns the permission socket may take the one beside
-            // it. Calls go to the main window alone, since it runs the prompt
-            // schedule; a second window answering too would act twice.
+            // it. Calls go to one window, the one that runs the prompt
+            // schedule (`windows::current_control_window`); a second window
+            // answering too would act twice.
             let control: tauri::State<'_, Arc<control::ControlState>> = app.state();
             let control_handle = app.handle().clone();
             let callers = Arc::clone(&manager);
@@ -314,11 +316,10 @@ pub fn run() {
                         request.session_id = status.session_id;
                         request.cwd = Some(status.cwd);
                     }
-                    if control_handle.get_webview_window(MAIN_WINDOW).is_none() {
-                        return Err("mangouste's main window is not open".into());
-                    }
+                    let target = windows::current_control_window(&control_handle)
+                        .ok_or("no mangouste window is open")?;
                     control_handle
-                        .emit_to(MAIN_WINDOW, control::EVENT_REQUEST, &*request)
+                        .emit_to(target.as_str(), control::EVENT_REQUEST, &*request)
                         .map_err(|e| e.to_string())
                 },
             );
@@ -421,6 +422,8 @@ pub fn run() {
             // windows
             windows::open_window,
             windows::focus_window,
+            windows::is_control_window,
+            windows::claim_control,
             // updates
             update::fetch_release,
             // usage
@@ -445,6 +448,18 @@ pub fn run() {
     // window that stayed. Off the main thread, because both sweeps wait out a
     // grace period per child and this runs while the other window is drawing.
     let builder = builder.on_window_event(|window, event| {
+        // Out of the control election from the first sign of closing: nothing
+        // vetoes a close today, and a call sent to a window on its way out
+        // would wait out the reply timeout for a listener that is gone.
+        if matches!(
+            event,
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+        ) {
+            window
+                .app_handle()
+                .state::<windows::ControlReady>()
+                .release(window.label());
+        }
         if !matches!(event, WindowEvent::Destroyed) {
             return;
         }

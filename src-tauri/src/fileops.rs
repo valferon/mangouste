@@ -46,8 +46,33 @@ fn guard_removable(path: &str) -> Result<PathBuf, String> {
     if resolved.parent().is_none() {
         return Err("refusing to touch the filesystem root".to_string());
     }
-    let home = dirs::home_dir().map(|home| resolve_parent(&home));
-    if home.is_some_and(|home| home == resolved) {
+    // Nothing directly under `/` either: `/etc`, `/usr` and `/home` are no
+    // tree a repo shows, and each is a machine's worth of files gone.
+    if resolved
+        .parent()
+        .is_some_and(|parent| parent.parent().is_none())
+    {
+        return Err("refusing to touch a top-level directory".to_string());
+    }
+    // An ancestor of home holds home, so it goes with it: `$HOME/..` is not a
+    // spelling the equality check alone would catch.
+    //
+    // Against both spellings of home. With `/home/u` a link to `/data/u`, the
+    // parent-resolved form is `/home/u`, which the real `/data/u` never matches;
+    // the canonical form is `/data/u`, which the link itself never matches.
+    let homes = dirs::home_dir()
+        .map(|home| {
+            [
+                Some(resolve_parent(&home)),
+                std::fs::canonicalize(&home).ok(),
+            ]
+        })
+        .unwrap_or_default();
+    if homes
+        .iter()
+        .flatten()
+        .any(|home| home.starts_with(&resolved))
+    {
         return Err("refusing to touch the home directory".to_string());
     }
     Ok(path)
@@ -143,7 +168,7 @@ pub fn rename_path(from: String, to: String) -> Result<(), String> {
     if !occupied(&from) {
         return Err("source is gone".to_string());
     }
-    if occupied(&to) {
+    if occupied(&to) && !is_case_only_rename(&from, &to) {
         return Err("already exists".to_string());
     }
     // A move into the tree's own subtree would either fail obscurely (EINVAL)
@@ -180,6 +205,40 @@ pub fn rename_path(from: String, to: String) -> Result<(), String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Whether `to` is `from` with its name's case changed, on a filesystem that
+/// folds case — where `to` "exists" because it is `from`.
+///
+/// macOS's default volume answers `foo` for `Foo`, so without this the rename
+/// that fixes a name's case was refused as "already exists". Same parent, the
+/// names equal ignoring case, and one entry on disk (same device and inode):
+/// anything less is a real collision.
+fn is_case_only_rename(from: &Path, to: &Path) -> bool {
+    let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name()) else {
+        return false;
+    };
+    if from.parent() != to.parent()
+        || from_name == to_name
+        || from_name.to_string_lossy().to_lowercase() != to_name.to_string_lossy().to_lowercase()
+    {
+        return false;
+    }
+    same_entry(from, to)
+}
+
+#[cfg(unix)]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_entry(_: &Path, _: &Path) -> bool {
+    false
 }
 
 /// Whether a failed rename failed for spanning two filesystems.
@@ -492,9 +551,32 @@ mod tests {
             assert!(delete_path(path.clone()).is_err());
             assert!(rename_path(path, "/tmp/mangouste-home".into()).is_err());
         }
+        // Through the guard only: a guard that let these by would hand the
+        // command a real system directory.
+        let top = guard_removable("/mangouste-no-such-dir").unwrap_err();
+        assert!(top.contains("top-level"), "{top}");
+        if let Some(above_home) = dirs::home_dir().and_then(|h| h.parent().map(Path::to_path_buf)) {
+            assert!(guard_removable(&above_home.to_string_lossy()).is_err());
+        }
         // Relative and `..` paths mean a caller built the path wrong.
         assert!(delete_path("relative/path".into()).is_err());
         assert!(delete_path("/tmp/../etc/passwd".into()).is_err());
+    }
+
+    /// A case-folding volume reports `foo` as taken by `Foo`. Simulated with a
+    /// hard link: one entry under both names, which is what that volume shows.
+    #[test]
+    #[cfg(unix)]
+    fn a_case_only_rename_is_not_a_collision_with_itself() {
+        let dir = scratch("case-rename");
+        std::fs::write(dir.join("Foo"), "x\n").unwrap();
+        std::fs::hard_link(dir.join("Foo"), dir.join("foo")).unwrap();
+        assert!(is_case_only_rename(&dir.join("Foo"), &dir.join("foo")));
+
+        std::fs::write(dir.join("Bar"), "x\n").unwrap();
+        std::fs::write(dir.join("bar"), "y\n").unwrap();
+        assert!(!is_case_only_rename(&dir.join("Bar"), &dir.join("bar")));
+        assert!(!is_case_only_rename(&dir.join("Foo"), &dir.join("Bar")));
     }
 
     /// `remove_dir_all` down a link would empty the directory it points at.

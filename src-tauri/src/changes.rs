@@ -249,7 +249,22 @@ fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges,
     // implicit — `diff <base>` with no second revision compares the base against
     // what is on disk right now, which is the whole point: a change made a
     // second ago and not yet committed is the change being watched.
-    let mut args = vec!["diff", "--numstat", "--no-color", &base, "--"];
+    //
+    // `-z` because without it git C-quotes any path that is not plain ASCII
+    // (`café.txt` comes back as `"caf\303\251.txt"`), which then matches no
+    // write and asks for a patch of a file that does not exist.
+    // `--no-renames` because a rename between two written paths prints as
+    // `src/{a => b}.ts`, which is neither.
+    let mut args = vec![
+        "diff",
+        "--numstat",
+        "-z",
+        "--no-renames",
+        "--no-color",
+        "--end-of-options",
+        &base,
+        "--",
+    ];
     args.extend(paths.iter().map(String::as_str));
     let numstat = git(root, &args)?;
 
@@ -270,7 +285,7 @@ fn collect_changes(root: &str, writes: &SessionWrites) -> Result<SessionChanges,
     };
 
     let mut files: Vec<ChangedFile> = numstat
-        .lines()
+        .split('\0')
         .filter_map(parse_numstat)
         .map(|(additions, deletions, path)| {
             let (last_touch_ms, touches) = touch(&path);
@@ -368,7 +383,14 @@ pub fn session_change_patch(
             true,
         );
     }
-    crate::git::git_patch_out(&root, &["diff", "--no-color", &base, "--", &path], false)
+    // `base` comes back from the webview. It left here as a resolved sha, and
+    // anything else in that slot is an option to git: `--output=<file>` writes.
+    crate::git::checked_sha(&base)?;
+    crate::git::git_patch_out(
+        &root,
+        &["diff", "--no-color", "--end-of-options", &base, "--", &path],
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -499,6 +521,23 @@ mod tests {
         assert_eq!(new_file.additions, Some(1));
     }
 
+    /// Without `-z`, git quotes this name, and the quoted form matched no write.
+    #[test]
+    fn a_non_ascii_path_keeps_its_touches() {
+        let dir = repo("non-ascii");
+        write(&dir, "café.txt", "a\n");
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "--quiet", "-m", "base"]);
+        write(&dir, "café.txt", "a\nb\n");
+
+        let root = dir.to_string_lossy().into_owned();
+        let changes = collect_changes(&root, &wrote(&dir, &["café.txt"], None)).expect("scan");
+        let file = changes.files.first().expect("one file");
+        assert_eq!(file.path, "café.txt");
+        assert_eq!(file.additions, Some(1));
+        assert!(file.touches > 0, "the write must be found for its own path");
+    }
+
     #[test]
     fn touches_belong_to_the_exact_path_not_a_suffix() {
         let dir = repo("suffix");
@@ -614,5 +653,21 @@ mod tests {
     fn shortens_a_sha_for_the_baseline_label() {
         assert_eq!(short("15fd105aa9b3c4d5e6f7"), "15fd105");
         assert_eq!(short("abc"), "abc");
+    }
+
+    #[test]
+    fn a_patch_base_that_is_not_a_sha_is_refused() {
+        let dir = repo("patch-base");
+        let cwd = dir.to_string_lossy().into_owned();
+        let target = dir.join("written");
+        let err = session_change_patch(
+            cwd,
+            format!("--output={}", target.display()),
+            "f.txt".into(),
+            None,
+        )
+        .expect_err("refused");
+        assert!(err.contains("not a commit sha"), "{err}");
+        assert!(!target.exists());
     }
 }

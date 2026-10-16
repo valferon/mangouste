@@ -237,10 +237,25 @@ impl ChatManager {
         *self.permission.lock() = Some(permission);
     }
 
-    fn emit(&self, event: &str, payload: Value) {
-        if let Some(app) = self.app.lock().clone() {
-            let _ = app.emit(event, payload);
-        }
+    /// Send one of `chat_id`'s events to the window that owns the chat.
+    ///
+    /// Not a broadcast: every frame of a streaming turn went to every window,
+    /// and every pane in each threw away the ones that were not its own. Only
+    /// a chat that is already gone from the map (its exit, after a kill) falls
+    /// back to all of them, which costs nothing because it happens once.
+    fn emit(&self, chat_id: &str, event: &str, payload: Value) {
+        let Some(app) = self.app.lock().clone() else {
+            return;
+        };
+        let owner = self
+            .chats
+            .lock()
+            .get(chat_id)
+            .map(|chat| chat.owner.clone());
+        let _ = match owner {
+            Some(owner) => app.emit_to(owner.as_str(), event, payload),
+            None => app.emit(event, payload),
+        };
     }
 
     /// Kill every chat. Called on process exit, which is the whole point of
@@ -1434,6 +1449,7 @@ pub fn start(
                             running.store(false, Ordering::SeqCst);
                         }
                         manager.emit(
+                            &chat_id,
                             EVENT_MESSAGE,
                             json!({ "chatId": chat_id, "instance": instance, "payload": value }),
                         );
@@ -1441,6 +1457,7 @@ pub fn start(
                     Err(_) => {
                         // Non-JSON on stdout is a CLI-level message, not a frame.
                         manager.emit(
+                            &chat_id,
                             EVENT_STDERR,
                             json!({ "chatId": chat_id, "instance": instance, "line": line }),
                         );
@@ -1469,6 +1486,7 @@ pub fn start(
             running.store(false, Ordering::SeqCst);
             *exit_code.lock() = Some(code);
             manager.emit(
+                &chat_id,
                 EVENT_EXIT,
                 json!({ "chatId": chat_id, "instance": instance, "code": code }),
             );
@@ -1489,6 +1507,7 @@ pub fn start(
                 let line = String::from_utf8_lossy(&buf).trim_end().to_string();
                 buf.clear();
                 manager.emit(
+                    &chat_id,
                     EVENT_STDERR,
                     json!({ "chatId": chat_id, "instance": instance, "line": line }),
                 );
@@ -1516,6 +1535,7 @@ pub fn start(
                 if !running.load(Ordering::SeqCst) {
                     if last.take().is_some() {
                         manager.emit(
+                            &chat_id,
                             EVENT_TOOL_ACTIVITY,
                             json!({ "chatId": chat_id, "instance": instance, "command": null }),
                         );
@@ -1534,6 +1554,7 @@ pub fn start(
                 let command = fresh.iter().find_map(|p| command_line_of(p.pid));
                 if command != last {
                     manager.emit(
+                        &chat_id,
                         EVENT_TOOL_ACTIVITY,
                         json!({ "chatId": chat_id, "instance": instance, "command": command }),
                     );
@@ -1587,6 +1608,7 @@ pub fn start(
                     carry.drain(..=newline);
                     if !line.is_empty() {
                         manager.emit(
+                            &chat_id,
                             EVENT_DEBUG,
                             json!({ "chatId": chat_id, "instance": instance, "line": line }),
                         );
