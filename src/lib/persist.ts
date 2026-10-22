@@ -55,6 +55,8 @@ export const KEYS = {
     openTabs: own("mangouste.openTabs"),
     activeTab: own("mangouste.activeTab"),
     terminalOpen: own("mangouste.terminalOpen"),
+    /** The explorer's stacked trees and where each is rooted. */
+    explorerPanes: own("mangouste.explorerPanes"),
   },
   prefs: {
     theme: "mangouste.theme",

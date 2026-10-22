@@ -50,8 +50,14 @@ export function draftPath(dir: string, name: string): string {
   return `${dir.replace(/\/+$/, "")}/${name.trim().replace(/\/+$/, "")}`;
 }
 
-/** Whether `path` is `dir` itself or sits anywhere beneath it. */
+/**
+ * Whether `path` is `dir` itself or sits anywhere beneath it.
+ *
+ * `/` is special-cased: appending a slash makes it `//`, which no real path
+ * starts with, so a tree rooted at the filesystem root owned nothing under it.
+ */
 export function isUnder(path: string, dir: string): boolean {
+  if (dir === "/") return path.startsWith("/");
   return path === dir || path.startsWith(`${dir}/`);
 }
 
@@ -101,10 +107,14 @@ export function repointPath(path: string, from: string, to: string): string | nu
  * Says "permanently" because it is: this app has no trash and no undo, so the
  * dialog is the only place the user finds that out.
  */
-export function deleteWarning(path: string, isDir: boolean): string {
+export function deleteWarning(path: string, isDir: boolean, repo?: string): string {
   const what = isDir ? "folder" : "file";
   const extra = isDir ? " and everything in it" : "";
-  return `Permanently delete the ${what} “${baseName(path)}”${extra}? This cannot be undone.`;
+  // Inside the repo the name is enough, since the tree around it says where it
+  // is. Outside it — a tree rooted at `~` — "“.ssh”" is not enough to know
+  // what is about to go.
+  const name = repo && isUnder(path, repo) ? baseName(path) : path;
+  return `Permanently delete the ${what} “${name}”${extra}? This cannot be undone.`;
 }
 
 /**

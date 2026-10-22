@@ -672,6 +672,108 @@ body {
   outline: none;
 }
 
+/* ---------- explorer stack ---------- */
+
+.explorer-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.explorer-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* A pane below the first needs a line to say where one tree ends. */
+.resizer-horizontal + .explorer-pane {
+  border-top: 1px solid var(--border);
+}
+
+.tree-path {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  padding: 0 6px 0 8px;
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+/* End-aligned and clipped: a long path loses its head, which is the part that
+   says least, and keeps the folder the tree is actually showing. */
+.tree-crumbs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: flex-end;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Takes the free space while the path fits, so it sits left; once it does
+   not, auto margins collapse and the end alignment above takes over. */
+.tree-crumbs > :last-child {
+  margin-right: auto;
+}
+
+.tree-crumb-wrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.tree-crumb,
+.tree-path-home {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tree-path-home {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 2px;
+}
+
+.tree-crumb:hover,
+.tree-path-home:hover {
+  color: var(--fg-bright);
+  background: var(--bg-hover);
+}
+
+.tree-crumb[data-current="true"] {
+  color: var(--fg-bright);
+}
+
+.tree-crumb[data-repo="true"] {
+  color: var(--accent);
+}
+
+.tree-crumb-sep {
+  opacity: 0.6;
+}
+
+.tree-path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--fg-bright);
+  font: inherit;
+  outline: none;
+}
+
 /* A cut entry stays in place until the paste lands, so it has to read as
    pending rather than as an ordinary row that did nothing. */
 .tree-row[data-cut="true"] {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Resizer, usePersistentSize } from "./layout/Split";
 import { ChatPane, type ChatAnchor } from "./panes/ChatPane";
 import { Dashboard } from "./panes/Dashboard";
-import { FileTree } from "./panes/FileTree";
+import { ExplorerStack } from "./panes/ExplorerStack";
 import { BranchStatus } from "./panes/BranchStatus";
 import { EditorFacts } from "./panes/EditorFacts";
 import { GitPane } from "./panes/GitPane";
@@ -3071,8 +3071,8 @@ function Workbench() {
           >
             {activeRepo && (
               <PaneBoundary label="explorer">
-                <FileTree
-                  root={activeRepo}
+                <ExplorerStack
+                  repo={activeRepo}
                   onOpenFile={openFileHere}
                   selectedPath={selectedFile}
                   onPathRenamed={handlePathRenamed}

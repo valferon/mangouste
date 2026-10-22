@@ -65,6 +65,11 @@ describe("isUnder", () => {
     expect(isUnder("/repo/src/a/b.ts", "/repo/src")).toBe(true);
     expect(isUnder("/repo/src-tauri/lib.rs", "/repo/src")).toBe(false);
   });
+
+  it("puts everything under the filesystem root", () => {
+    expect(isUnder("/etc/nginx", "/")).toBe(true);
+    expect(isUnder("/", "/")).toBe(true);
+  });
 });
 
 describe("dropTarget", () => {
@@ -140,6 +145,11 @@ describe("deleteWarning", () => {
     const folder = deleteWarning("/repo/src", true);
     expect(folder).toContain("folder");
     expect(folder).toContain("everything in it");
+  });
+
+  it("names the full path outside the repo, and only the name inside it", () => {
+    expect(deleteWarning("/repo/a.ts", false, "/repo")).toContain("“a.ts”");
+    expect(deleteWarning("/home/val/.ssh", true, "/repo")).toContain("“/home/val/.ssh”");
   });
 });
 

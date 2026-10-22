@@ -13,6 +13,7 @@ import {
   repointPath,
   type DraftKind,
 } from "../lib/fileOps";
+import { breadcrumbs, parentOf, resolveTyped } from "../lib/explorerPanes";
 import { fileGlyph } from "../lib/fileIcons";
 import {
   copyPath,
@@ -25,7 +26,6 @@ import {
   openInDefaultApp,
   renamePath,
   revealPath,
-  watchTree,
 } from "../lib/ipc";
 import {
   ChevronRightIcon,
@@ -34,13 +34,32 @@ import {
   NewFileIcon,
   NewFolderIcon,
   RefreshIcon,
+  RepoIcon,
 } from "../lib/icons";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir, relativePath } from "../lib/paths";
 import type { DirEntryInfo } from "../lib/types";
 
 interface FileTreeProps {
+  /** The directory this tree shows. The repo, unless the pane was pointed elsewhere. */
   root: string;
+  /** The active repo, for relative paths and the way back to it. */
+  repoRoot: string;
+  /** Home directory, so the path bar can say `~`. Null until it is known. */
+  home: string | null;
+  /** Point this pane at another directory. */
+  onReroot: (path: string) => void;
+  /** Open another tree below this one, on `path` or on this pane's root. */
+  onSplit: (path?: string) => void;
+  /** Close this pane. Absent when it is the only one. */
+  onClose?: () => void;
+  /**
+   * The directories this tree is holding, newline-joined.
+   *
+   * The watch set is one per window, so the stack unions every pane's and sends
+   * that; a tree sending its own would drop its siblings' watches.
+   */
+  onWatch: (dirs: string) => void;
   onOpenFile: (path: string) => void;
   selectedPath: string | null;
   /**
@@ -116,6 +135,12 @@ interface Clipboard {
  */
 export const FileTree = memo(function FileTree({
   root,
+  repoRoot,
+  home,
+  onReroot,
+  onSplit,
+  onClose,
+  onWatch,
   onOpenFile,
   selectedPath,
   onPathRenamed,
@@ -132,6 +157,8 @@ export const FileTree = memo(function FileTree({
   const [clipboard, setClipboard] = useState<Clipboard | null>(null);
   const [dragPath, setDragPath] = useState<string | null>(null);
   const [dropDir, setDropDir] = useState<string | null>(null);
+  /** What is typed into the path bar while it is being edited, else null. */
+  const [typedRoot, setTypedRoot] = useState<string | null>(null);
 
   /**
    * Newest listing issued per directory.
@@ -162,6 +189,10 @@ export const FileTree = memo(function FileTree({
     });
   }, []);
 
+  /** The root now, for a listing that lands after the tree has moved on. */
+  const rootRef = useRef(root);
+  rootRef.current = root;
+
   const load = useCallback(
     /**
      * `orphaned` is for the directories nobody asked about by name — a bulk
@@ -181,7 +212,10 @@ export const FileTree = memo(function FileTree({
       } catch (e) {
         if (!current()) return;
         if (orphaned) forget(path);
-        else setError(String(e));
+        // A failure for a root the pane has since left is about nothing on
+        // screen: typing a bad path and clicking away before it failed used to
+        // pin "not a directory" over the tree that replaced it.
+        else if (isUnder(path, rootRef.current)) setError(String(e));
       }
     },
     [showHidden, forget],
@@ -204,10 +238,6 @@ export const FileTree = memo(function FileTree({
     for (const dir of nested) void load(dir, true);
   }, [load, root]);
 
-  /** What is expanded, for the reload below, which must not re-run per toggle. */
-  const expandedRef = useRef(expanded);
-  expandedRef.current = expanded;
-
   // The hidden-file filter changes what every directory contains, so its cache
   // cannot survive the toggle.
   useEffect(() => {
@@ -220,16 +250,17 @@ export const FileTree = memo(function FileTree({
    *
    * Every key here is an absolute path, so one repo's rows cannot be mistaken
    * for another's, and coming back to a repo shows the tree — expansions and all
-   * — that it had rather than a "Loading…" the switch has to wait out. What was
-   * open is re-read too: a directory that changed while you were away would
-   * otherwise sit stale until someone collapsed it.
+   * — that it had rather than a "Loading…" the switch has to wait out. Every
+   * cached directory under the root is re-read, collapsed ones too: none of
+   * them was watched while the tree was elsewhere, and re-expanding one would
+   * otherwise show the listing from before you left.
    */
   useEffect(() => {
     if (!root) return;
+    setError(null);
+    const [, ...nested] = refreshTargets(root, Object.keys(childrenRef.current));
     void load(root);
-    for (const path of expandedRef.current) {
-      if (path !== root && path.startsWith(`${root}/`)) void load(path);
-    }
+    for (const dir of nested) void load(dir, true);
   }, [root, load]);
 
   /*
@@ -249,19 +280,16 @@ export const FileTree = memo(function FileTree({
   /*
    * Watch what the tree is holding, so writes from anywhere else show up.
    *
-   * Every directory listed for this repo, collapsed ones included: the cache
+   * Every directory listed under this root, collapsed ones included: the cache
    * keeps them, and a re-expand should not show a listing from before a
    * session wrote into it. Keyed on a joined string so the watch set is only
    * resent when the set changes, not on every listing that comes back.
    */
   const watchedKey = Object.keys(children)
-    .filter((dir) => dir === root || dir.startsWith(`${root}/`))
+    .filter((dir) => isUnder(dir, root))
     .sort()
     .join("\n");
-  useEffect(() => {
-    void watchTree(watchedKey === "" ? [] : watchedKey.split("\n")).catch(() => {});
-  }, [watchedKey]);
-  useEffect(() => () => void watchTree([]).catch(() => {}), []);
+  useEffect(() => onWatch(watchedKey), [watchedKey, onWatch]);
 
   useEffect(() => {
     let disposed = false;
@@ -277,9 +305,17 @@ export const FileTree = memo(function FileTree({
     };
   }, [load]);
 
-  // A draft belongs to the repo it was opened in; leaving would commit it
+  // A draft belongs to the root it was opened in; leaving would commit it
   // somewhere the user is no longer looking.
   useEffect(() => setDraft(null), [root]);
+
+  /** Commit what was typed into the path bar. A non-directory reports itself on load. */
+  const commitTypedRoot = useCallback(() => {
+    if (typedRoot === null) return;
+    const path = resolveTyped(typedRoot, root, home);
+    setTypedRoot(null);
+    if (path && path !== root) onReroot(path);
+  }, [typedRoot, root, home, onReroot]);
 
   const toggle = useCallback(
     (path: string) => {
@@ -396,7 +432,9 @@ export const FileTree = memo(function FileTree({
    * never where the next file goes.
    */
   const creationDir = useCallback(() => {
-    if (selectedPath && selectedPath.startsWith(`${root}/`)) return parentDir(selectedPath);
+    if (selectedPath && selectedPath !== root && isUnder(selectedPath, root)) {
+      return parentDir(selectedPath) || "/";
+    }
     return root;
   }, [selectedPath, root]);
 
@@ -458,7 +496,7 @@ export const FileTree = memo(function FileTree({
       if (blockedByEdits(entry.path)) return;
       // The confirm is the only warning: this deletes for real, with no trash
       // behind it and no undo in front of it.
-      if (!window.confirm(deleteWarning(entry.path, entry.isDir))) return;
+      if (!window.confirm(deleteWarning(entry.path, entry.isDir, repoRoot))) return;
       void run("delete", async () => {
         await deletePath(entry.path);
         forget(entry.path);
@@ -467,7 +505,7 @@ export const FileTree = memo(function FileTree({
         onPathDeleted(entry.path);
       });
     },
-    [blockedByEdits, run, forget, reload, clipboard, onPathDeleted],
+    [blockedByEdits, run, forget, reload, clipboard, onPathDeleted, repoRoot],
   );
 
   const duplicate = useCallback(
@@ -553,6 +591,18 @@ export const FileTree = memo(function FileTree({
       },
       "separator",
       { label: "Refresh", run: refreshAll },
+      {
+        label: "Go to Parent Folder",
+        disabled: parentOf(root) === null,
+        run: () => {
+          const up = parentOf(root);
+          if (up) onReroot(up);
+        },
+      },
+      { label: "Back to Repository", disabled: root === repoRoot, run: () => onReroot(repoRoot) },
+      { label: "Go to Folder…", run: () => setTypedRoot(root) },
+      { label: "Split Explorer", run: () => onSplit() },
+      onClose && { label: "Close Explorer Pane", run: onClose },
       { label: "Show Dotfiles", checked: showHidden, run: () => setShowHidden((v) => !v) },
       {
         label: "Collapse All",
@@ -560,10 +610,23 @@ export const FileTree = memo(function FileTree({
         run: () => setExpanded(new Set()),
       },
       "separator",
-      { label: "Copy Repository Path", run: () => void copyText(root) },
-      { label: "Reveal Repository", run: () => void revealPath(root) },
+      { label: "Copy Root Path", run: () => void copyText(root) },
+      { label: "Reveal Root", run: () => void revealPath(root) },
     ],
-    [beginDraft, creationDir, clipboard, paste, refreshAll, root, showHidden, expanded.size],
+    [
+      beginDraft,
+      creationDir,
+      clipboard,
+      paste,
+      refreshAll,
+      root,
+      repoRoot,
+      showHidden,
+      expanded.size,
+      onReroot,
+      onSplit,
+      onClose,
+    ],
   );
 
   /** Right-click on a row. */
@@ -584,6 +647,8 @@ export const FileTree = memo(function FileTree({
         run: () => void openInDefaultApp(entry.path),
       },
       entry.isDir && { label: "Refresh", run: () => void load(entry.path) },
+      entry.isDir && { label: "Open as Root", run: () => onReroot(entry.path) },
+      entry.isDir && { label: "Open in New Pane", run: () => onSplit(entry.path) },
       "separator",
       // A create aimed at a file row means "beside this one", which is what its
       // own directory is. Nobody right-clicks a file to mean "inside it".
@@ -610,7 +675,7 @@ export const FileTree = memo(function FileTree({
       { label: "Copy Path", run: () => void copyText(entry.path) },
       {
         label: "Copy Relative Path",
-        run: () => void copyText(relativePath(root, entry.path)),
+        run: () => void copyText(relativePath(repoRoot, entry.path)),
       },
       { label: "Copy Name", run: () => void copyText(baseName(entry.path)) },
       { label: "Reveal in File Manager", run: () => void revealPath(entry.path) },
@@ -622,7 +687,9 @@ export const FileTree = memo(function FileTree({
       toggle,
       onOpenFile,
       load,
-      root,
+      repoRoot,
+      onReroot,
+      onSplit,
       paneEntries,
       beginDraft,
       duplicate,
@@ -753,6 +820,79 @@ export const FileTree = memo(function FileTree({
     );
   };
 
+  /**
+   * Where this tree is rooted, one clickable segment per folder.
+   *
+   * Clicking a segment re-roots the tree there; a double-click on the bar opens
+   * it for typing, for a path that is not above this one. The repo button only
+   * shows once the tree has left the repo, since that is when it is a way back.
+   */
+  const renderPathBar = () => {
+    if (typedRoot !== null) {
+      return (
+        <div className="tree-path">
+          <input
+            className="tree-path-input"
+            autoFocus
+            spellCheck={false}
+            value={typedRoot}
+            placeholder="~/path/to/folder"
+            onChange={(event) => setTypedRoot(event.target.value)}
+            onFocus={(event) => event.currentTarget.select()}
+            onBlur={() => setTypedRoot(null)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitTypedRoot();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                setTypedRoot(null);
+              }
+            }}
+          />
+        </div>
+      );
+    }
+    const crumbs = breadcrumbs(root, home);
+    return (
+      <div
+        className="tree-path"
+        title={`${root}\nClick a folder to root the tree there; double-click to type a path`}
+        onDoubleClick={() => setTypedRoot(root)}
+      >
+        {root !== repoRoot && (
+          <button
+            className="tree-path-home"
+            onClick={() => onReroot(repoRoot)}
+            title={`Back to ${baseName(repoRoot)}`}
+          >
+            <RepoIcon />
+          </button>
+        )}
+        {/* End-aligned so overflow clips the head of a long path, not the
+            tail that says where the tree actually is. */}
+        <div className="tree-crumbs">
+          {crumbs.map((crumb, index) => (
+            <span key={crumb.path} className="tree-crumb-wrap">
+              {index > 0 && crumbs[index - 1].label !== "/" && (
+                <span className="tree-crumb-sep">/</span>
+              )}
+              <button
+                className="tree-crumb"
+                data-current={index === crumbs.length - 1}
+                data-repo={crumb.path === repoRoot}
+                onClick={() => crumb.path !== root && onReroot(crumb.path)}
+                onDoubleClick={(event) => event.stopPropagation()}
+              >
+                {crumb.label}
+              </button>
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="sidebar-section" style={{ flex: 1 }}>
       <div
@@ -799,8 +939,17 @@ export const FileTree = memo(function FileTree({
           >
             <RefreshIcon />
           </button>
+          <button className="toggle-button" onClick={() => onSplit()} title="Split explorer">
+            ⇕
+          </button>
+          {onClose && (
+            <button className="toggle-button" onClick={onClose} title="Close explorer pane">
+              ×
+            </button>
+          )}
         </div>
       </div>
+      {renderPathBar()}
       <div
         className="pane-body"
         data-drop={Boolean(dragPath) && dropDir === root}
