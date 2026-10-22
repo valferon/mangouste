@@ -986,6 +986,217 @@ body {
   color: var(--red);
 }
 
+/* The prompt editor: a card with the label as its title, the text as its
+   body, and one labelled row per choice under it. */
+.prompt-form {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 8px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.prompt-list .prompt-form {
+  margin: 2px 0 6px;
+}
+
+.prompt-form-title {
+  padding: 8px 10px 6px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.prompt-form-title:focus,
+.prompt-form-text:focus {
+  outline: none;
+}
+
+.prompt-form-text {
+  min-height: 92px;
+  padding: 8px 10px;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.prompt-form-fields {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px 10px;
+  padding: 10px;
+}
+
+.prompt-form-label {
+  padding-top: 5px;
+  color: var(--fg-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.prompt-form-value {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.prompt-form-segmented button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.prompt-form-segmented button:not([data-active="true"]):hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.prompt-form-segmented button[data-active="true"][data-danger="true"] {
+  background: var(--red);
+  color: var(--bg);
+}
+
+.prompt-form-input {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.prompt-form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.prompt-form-input[data-error="true"] {
+  border-color: var(--red);
+}
+
+.prompt-form-mono {
+  font-family: var(--font-mono);
+}
+
+.prompt-form-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.prompt-form-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prompt-form-chip:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.prompt-form-chip[data-active="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.prompt-form-hint {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.prompt-form-hint[data-error="true"] {
+  color: var(--red);
+}
+
+.prompt-form-note {
+  padding-top: 4px;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.prompt-form-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prompt-form-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.prompt-form-footer .prompt-form-hint {
+  flex: 1 1 auto;
+}
+
+.prompt-form-save:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.prompt-notice {
+  margin: 4px 8px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prompt-import-list {
+  margin: 0;
+  padding-left: 16px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+/* Two lines of the prompt itself, so an import shows what it will send. */
+.prompt-import-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 1px 0 4px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .prompt-editor-submit {
   display: flex;
   align-items: center;

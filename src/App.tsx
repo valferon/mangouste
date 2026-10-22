@@ -101,6 +101,7 @@ import {
   planNewSession,
   planSchedule,
   controlSpawnMode,
+  promptSpawnMode,
   type ControlRequest,
 } from "./lib/sessionControl";
 import { repoLabel } from "./lib/visitedRepos";
@@ -180,6 +181,10 @@ const OWNER_POLL_MS = 2_000;
 
 const WORKSPACE_KEY = KEYS.state.workspaceRoot;
 const PERMISSION_MODE_KEY = KEYS.prefs.permissionMode;
+
+/** A tab's own permission mode, when it has one; absent is the app-wide mode. */
+const spawnModeOf = (mode: string | undefined): Pick<ChatTab, "permissionMode"> =>
+  mode ? { permissionMode: mode } : {};
 const MODEL_KEY = KEYS.prefs.model;
 const ACTIVE_REPO_KEY = KEYS.state.activeRepo;
 const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
@@ -2149,7 +2154,12 @@ function Workbench() {
       if (root !== activeRepo) setActiveRepo(root);
       // Always a chat pane, whatever the default surface: a pty would take the
       // paste at the shell prompt, before `claude` is up to read it.
-      const tab: ChatTab = { ...newSessionTab(root), sessionId: null, surface: "chat" };
+      const tab: ChatTab = {
+        ...newSessionTab(root),
+        sessionId: null,
+        surface: "chat",
+        ...spawnModeOf(prompt.newSession ? promptSpawnMode(prompt, permissionMode, false) : undefined),
+      };
       setTabs((current) => [...current, tab]);
       setActiveTab(tab.id);
       // A prompt that asked for a new session gets its "send" honoured once the
@@ -2157,7 +2167,7 @@ function Workbench() {
       // left as a draft: nobody chose to start a session with it.
       deliver(tab.id, prompt.newSession && prompt.submit);
     },
-    [activeChat, activeRepo, newSessionTab, deliverPrompt, runInSession],
+    [activeChat, activeRepo, newSessionTab, deliverPrompt, runInSession, permissionMode],
   );
   const handleRunPrompt = useCallback(
     (prompt: QuickPrompt) => void runPrompt(prompt),
@@ -2198,8 +2208,7 @@ function Workbench() {
         ...newSessionTab(root),
         sessionId: null,
         surface: "chat",
-        // A prompt a session scheduled starts a session a session asked for.
-        ...(prompt.origin !== null ? { permissionMode: controlSpawnMode(permissionMode) } : {}),
+        ...spawnModeOf(promptSpawnMode(prompt, permissionMode, true)),
       };
       setTabs((current) => [...current, tab]);
       deliverPrompt(tab.id, prompt.text, true);

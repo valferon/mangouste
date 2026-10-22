@@ -58,9 +58,14 @@ const TOOL_RUNNING_GRACE_MS: u64 = 30 * 60_000;
 /// nothing is ever written to the transcript for that.
 const BACKGROUND_TASK_GRACE_MS: u64 = 30 * 60_000;
 
-/// Head of the `tool_result` Claude Code writes for a backgrounded Bash call,
-/// followed by the task id, and later in the same text by `BACKGROUND_OUTPUT`.
-const BACKGROUND_START: &str = "Command running in background with ID: ";
+/// Heads of the `tool_result` Claude Code writes for a backgrounded Bash call,
+/// each followed by the task id, and later in the same text by
+/// `BACKGROUND_OUTPUT`. The first is a call made with `run_in_background`; the
+/// second a foreground call that outran its timeout and was moved there.
+const BACKGROUND_STARTS: [&str; 2] = [
+    "Command running in background with ID: ",
+    "was moved to the background (ID: ",
+];
 const BACKGROUND_OUTPUT: &str = "Output is being written to: ";
 
 /// `stop_reason` values that mean the turn closed cleanly. Notably excludes
@@ -832,10 +837,11 @@ fn tool_result_text(block: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// An assistant block that asked for a Bash call to be backgrounded, as
-/// (tool_use id, label). A foreground call never becomes a task: it holds the
-/// turn open, so `tool_use` liveness already covers it.
-fn background_launch_call(block: &serde_json::Value) -> Option<(String, Option<String>)> {
+/// An assistant block that made a Bash call, as (tool_use id, label). Any call
+/// can become a task: one asked for `run_in_background`, and a foreground one
+/// is moved there when it outruns its timeout. Only the `tool_result` says
+/// which, so every call is remembered for its label.
+fn bash_call(block: &serde_json::Value) -> Option<(String, Option<String>)> {
     if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
         return None;
     }
@@ -843,9 +849,6 @@ fn background_launch_call(block: &serde_json::Value) -> Option<(String, Option<S
         return None;
     }
     let input = block.get("input")?;
-    if input.get("run_in_background").and_then(|b| b.as_bool()) != Some(true) {
-        return None;
-    }
     let label = str_field(input, "description")
         .or_else(|| str_field(input, "command"))
         .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -863,7 +866,15 @@ fn background_launch(
     launches: &HashMap<String, Option<String>>,
 ) -> Option<PendingTask> {
     let text = tool_result_text(block)?;
-    let rest = text.split_once(BACKGROUND_START)?.1;
+    let rest = BACKGROUND_STARTS.iter().find_map(|start| {
+        let (head, rest) = text.split_once(start)?;
+        // Only the result's own opening sentence counts. A grep or cat that
+        // prints these words out of a file (this one has both) is output, not
+        // a launch, and a phantom task holds the session busy for the grace.
+        let head = head.trim_start();
+        let opens = head.is_empty() || (head.starts_with("Command ") && !head.contains('\n'));
+        opens.then_some(rest)
+    })?;
     let id: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -966,7 +977,7 @@ fn status_inputs(tail: &[serde_json::Value]) -> StatusInputs {
                     .map(|blocks| blocks.as_slice())
                     .unwrap_or_default()
                 {
-                    if let Some((call, label)) = background_launch_call(block) {
+                    if let Some((call, label)) = bash_call(block) {
                         launches.insert(call, label);
                     }
                 }
@@ -2590,6 +2601,65 @@ mod status_tests {
                 "timestamp": "2026-09-09T08:58:49.000Z",
                 "message": {"content": [{
                     "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok",
+                }]},
+            }),
+        ];
+        assert!(status_inputs(&tail).background_tasks.is_empty());
+    }
+
+    #[test]
+    fn a_foreground_call_moved_to_the_background_on_timeout_is_a_task() {
+        let tail = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-10-19T06:15:17.000Z",
+                "message": {"stop_reason": "tool_use", "content": [{
+                    "type": "tool_use", "id": "toolu_1", "name": "Bash",
+                    "input": {"command": "for u in $users; do aws iam get-user; done",
+                              "description": "Scan IAM users", "timeout": 300000},
+                }]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-10-19T06:20:17.502Z",
+                "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "toolu_1",
+                    "content": "Command did not complete within its 300s timeout and was \
+                        moved to the background (ID: b0do0xf99). Output is being written \
+                        to: /tmp/claude-1000/-repo/sess/tasks/b0do0xf99.output. You will \
+                        be notified when it completes.",
+                }]},
+            }),
+        ];
+        let tasks = status_inputs(&tail).background_tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "b0do0xf99");
+        assert_eq!(
+            tasks[0].output_path,
+            "/tmp/claude-1000/-repo/sess/tasks/b0do0xf99.output"
+        );
+        assert_eq!(tasks[0].label.as_deref(), Some("Scan IAM users"));
+    }
+
+    #[test]
+    fn marker_text_printed_by_a_command_is_not_a_task() {
+        let tail = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-10-19T06:15:17.000Z",
+                "message": {"stop_reason": "tool_use", "content": [{
+                    "type": "tool_use", "id": "toolu_1", "name": "Bash",
+                    "input": {"command": "tail -1 transcript.jsonl"},
+                }]},
+            }),
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-10-19T06:15:18.000Z",
+                "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "toolu_1",
+                    "content": "{\"content\":\"Command did not complete within its 300s \
+                        timeout and was moved to the background (ID: b0do0xf99). Output is \
+                        being written to: /tmp/t/b0do0xf99.output. You will be notified.\"}",
                 }]},
             }),
         ];

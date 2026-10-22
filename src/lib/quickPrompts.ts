@@ -51,7 +51,21 @@ export interface QuickPrompt {
    * can list and cancel only the prompts they made (see `sessionControl.ts`).
    */
   origin: string | null;
+  /**
+   * The permission mode its fresh session starts in, picked in the Prompts
+   * view. Absent is the app-wide mode, or `default` for a prompt a session
+   * scheduled (see `controlSpawnMode`). Only the editor sets it: a session
+   * scheduling a prompt cannot, so it cannot hand its run a looser mode.
+   */
+  permissionMode?: PromptMode;
 }
+
+/** The modes a prompt's session can be started in. */
+export const PROMPT_MODES = ["default", "acceptEdits", "plan", "bypassPermissions"] as const;
+export type PromptMode = (typeof PROMPT_MODES)[number];
+
+const isMode = (value: unknown): value is PromptMode =>
+  typeof value === "string" && (PROMPT_MODES as readonly string[]).includes(value);
 
 /** Which of the pane's lists a prompt sits in. Also what reordering respects. */
 export type PromptGroup = "here" | "new" | "scheduled";
@@ -143,6 +157,10 @@ export function cleanPrompts(value: unknown): QuickPrompt[] {
     // syntax) is dropped rather than left to never fire without saying so.
     const schedule = entry.schedule && parseCron(entry.schedule).ok ? entry.schedule.trim() : null;
     const at = !schedule && entry.at && isInstant(entry.at) ? entry.at : null;
+    const session = (schedule || at) && entry.session ? entry.session : null;
+    // Same rule as `normaliseDraft`: a mode only on a run that opens a fresh
+    // session, judged on the cleaned entry rather than the raw one.
+    const fresh = (entry.newSession ?? false) || schedule !== null || at !== null;
     prompts.push({
       id: entry.id,
       label: entry.label.trim() || deriveLabel(entry.text),
@@ -152,8 +170,13 @@ export function cleanPrompts(value: unknown): QuickPrompt[] {
       project: entry.project || null,
       schedule,
       at,
-      session: (schedule || at) && entry.session ? entry.session : null,
+      session,
       origin: entry.origin || null,
+      // An unknown mode (hand-edited, or a newer build's) falls back to the
+      // default rather than costing the prompt.
+      ...(fresh && newSessionMode({ permissionMode: entry.permissionMode, session })
+        ? { permissionMode: entry.permissionMode }
+        : {}),
     });
   }
   return prompts;
@@ -231,7 +254,20 @@ export function normaliseDraft(draft: QuickPromptDraft): QuickPromptDraft | null
     session: timed ? draft.session || null : null,
     // Kept through an edit, so the session that made it can still cancel it.
     origin: draft.origin ?? null,
+    ...(newSession && newSessionMode(draft) ? { permissionMode: draft.permissionMode } : {}),
   };
+}
+
+/**
+ * Whether a prompt's `permissionMode` means anything: a known mode, on a
+ * prompt that opens a fresh session. A follow-up goes to a session already
+ * running in its own mode.
+ */
+function newSessionMode(entry: {
+  permissionMode?: unknown;
+  session?: unknown;
+}): entry is { permissionMode: PromptMode } {
+  return isMode(entry.permissionMode) && !entry.session;
 }
 
 export function addPrompt(
@@ -321,3 +357,130 @@ export interface DirectRequest {
 
 /** How many direct requests a pane's list keeps. Served ones are history. */
 export const DIRECT_KEEP = 20;
+
+/**
+ * A copy of a prompt to open in the editor as a new one. Never a follow-up and
+ * never a session's: the copy is the user's own, run in a fresh session.
+ *
+ * Dropping the origin also drops the clamp `controlSpawnMode` holds a session's
+ * prompt to, so text a model wrote would run on the app-wide mode — bypass,
+ * possibly — after one click. A copy of such a prompt starts on `default`
+ * instead, picked in the editor where the user can see it and loosen it.
+ */
+export function duplicateDraft(prompt: QuickPrompt): QuickPromptDraft {
+  const { id: _, ...rest } = prompt;
+  const clamped = prompt.origin !== null && !prompt.permissionMode;
+  return {
+    ...rest,
+    label: `${prompt.label} (copy)`,
+    newSession: prompt.newSession || prompt.session !== null,
+    session: null,
+    origin: null,
+    ...(clamped ? { permissionMode: "default" as const } : {}),
+  };
+}
+
+/** What an export file says it is, so an import can tell one from any JSON. */
+const EXPORT_KIND = "mangouste.prompts";
+
+/**
+ * The prompts as a file to keep or hand on. Ids, follow-up sessions and
+ * origins are left out: they only mean anything in this app on this machine.
+ */
+export function exportPrompts(prompts: readonly QuickPrompt[]): string {
+  const portable = prompts.map(({ id: _, session: __, origin: ___, ...rest }) => rest);
+  return `${JSON.stringify({ kind: EXPORT_KIND, version: 1, prompts: portable }, null, 2)}\n`;
+}
+
+export type ImportResult =
+  | { ok: true; prompts: QuickPromptDraft[]; expired: number }
+  | { ok: false; error: string };
+
+/**
+ * Read an export back as drafts, through the same checks as the stored list:
+ * an entry that is not a prompt costs that entry. A bare array is taken too.
+ * One-offs whose time has passed are left out and counted: a late one-off
+ * fires as soon as it is seen, and an old file is not a request to run them.
+ */
+export function parseImport(text: string, now: Date): ImportResult {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "not JSON" };
+  }
+  const list =
+    Array.isArray(value)
+      ? value
+      : typeof value === "object" && value !== null && (value as Record<string, unknown>).kind === EXPORT_KIND
+        ? (value as Record<string, unknown>).prompts
+        : null;
+  if (!Array.isArray(list)) return { ok: false, error: "not a mangouste prompts file" };
+  // Stand-in ids so `cleanPrompts` can check the entries; the real ones are
+  // given when they join the list.
+  const withIds = list.map((entry, at) =>
+    typeof entry === "object" && entry !== null ? { ...entry, id: `import-${at}` } : entry,
+  );
+  const valid = cleanPrompts(withIds);
+  const live = valid.filter((prompt) => prompt.at === null || Date.parse(prompt.at) > now.getTime());
+  const prompts = live.map(({ id: _, ...rest }) => ({ ...rest, session: null, origin: null }));
+  if (prompts.length === 0) return { ok: false, error: "no prompts to import in it" };
+  return { ok: true, prompts, expired: valid.length - live.length };
+}
+
+/**
+ * The mode an imported draft lands with.
+ *
+ * The file's own mode only when asked: a shared file must not bring a cron run
+ * in `bypassPermissions` that nobody chose. Dropping it is not enough for a
+ * timed one, though, since absent means the app-wide mode, which may be bypass
+ * itself — so a timed import starts on `default`, visible in its editor, and an
+ * untimed one (which only runs when clicked) keeps following the app.
+ */
+export function importedMode(draft: QuickPromptDraft, keepModes: boolean): PromptMode | undefined {
+  if (keepModes && draft.permissionMode) return draft.permissionMode;
+  return isTimed(draft) ? "default" : undefined;
+}
+
+/**
+ * Add imported drafts to the list, each under a new id.
+ *
+ * Timed ones stop at `maxTimed` across the whole list, the cap a session
+ * scheduling through `sessionControl` is held to: a file is no more trusted
+ * than a session, and fifty crons a minute is not a thing anyone imports on
+ * purpose. The caller counts what was left out from the length.
+ */
+export function importPrompts(
+  prompts: readonly QuickPrompt[],
+  drafts: readonly QuickPromptDraft[],
+  keepModes: boolean,
+  newId: () => string,
+  maxTimed = Number.POSITIVE_INFINITY,
+): QuickPrompt[] {
+  let timed = prompts.filter(isTimed).length;
+  return drafts.reduce<QuickPrompt[]>((list, draft) => {
+    if (isTimed(draft)) {
+      if (timed >= maxTimed) return list;
+      timed += 1;
+    }
+    const { permissionMode: _, ...rest } = draft;
+    const mode = importedMode(draft, keepModes);
+    return addPrompt(list, mode ? { ...rest, permissionMode: mode } : rest, newId());
+  }, [...prompts]);
+}
+
+/** An ISO instant as a `datetime-local` value, in local time to the minute. */
+export function toLocalInput(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours(),
+  )}:${pad(date.getMinutes())}`;
+}
+
+/** A `datetime-local` value back to an ISO instant, or null when it is incomplete. */
+export function fromLocalInput(value: string): string | null {
+  const date = new Date(value);
+  return value && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
+}

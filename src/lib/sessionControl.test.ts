@@ -3,6 +3,7 @@ import { cleanPrompts, dueOneOffs, normaliseDraft, type QuickPrompt } from "./qu
 import {
   MAX_TIMED,
   controlSpawnMode,
+  promptSpawnMode,
   describeScheduled,
   findSession,
   planCancel,
@@ -265,5 +266,21 @@ describe("controlSpawnMode", () => {
 
   it("keeps plan, which is stricter still", () => {
     expect(controlSpawnMode("plan")).toBe("plan");
+  });
+});
+
+describe("promptSpawnMode", () => {
+  it("takes the mode picked in the editor, whoever made the prompt", () => {
+    expect(promptSpawnMode(prompt("a", { origin: "s-1", permissionMode: "bypassPermissions" }), "default", true)).toBe(
+      "bypassPermissions",
+    );
+  });
+
+  it("holds a timed run a session scheduled to controlSpawnMode", () => {
+    expect(promptSpawnMode(prompt("a", { origin: "s-1" }), "bypassPermissions", true)).toBe("default");
+  });
+
+  it("leaves a prompt made in the Prompts view on the app-wide mode", () => {
+    expect(promptSpawnMode(prompt("a"), "bypassPermissions", true)).toBeUndefined();
   });
 });

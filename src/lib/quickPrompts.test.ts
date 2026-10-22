@@ -5,7 +5,13 @@ import {
   claimMinute,
   cleanPrompts,
   deriveLabel,
+  duplicateDraft,
+  exportPrompts,
+  fromLocalInput,
   groupOf,
+  importPrompts,
+  parseImport,
+  toLocalInput,
   movePrompt,
   normaliseDraft,
   removePrompt,
@@ -196,5 +202,140 @@ describe("claimMinute", () => {
 
   it("drops the entries of prompts that are gone", () => {
     expect(claimMinute({ gone: 5, b: 7 }, "a", 100, live)).toEqual({ a: 100, b: 7 });
+  });
+});
+
+describe("permissionMode", () => {
+  it("is kept on a prompt that opens a fresh session", () => {
+    const [kept] = cleanPrompts([prompt("a", { newSession: true, permissionMode: "bypassPermissions" })]);
+    expect(kept.permissionMode).toBe("bypassPermissions");
+  });
+
+  it("drops an unknown mode but keeps the prompt", () => {
+    const [kept] = cleanPrompts([{ ...prompt("a"), permissionMode: "yolo" }]);
+    expect(kept).toBeDefined();
+    expect(kept.permissionMode).toBeUndefined();
+  });
+
+  it("means nothing for a follow-up into a running session", () => {
+    const draft = { ...prompt("a", { at: "2026-10-19T09:00:00.000Z", session: "s-1", permissionMode: "acceptEdits" }) };
+    expect(normaliseDraft(draft)!.permissionMode).toBeUndefined();
+  });
+
+  it("means nothing for a prompt that pastes into the session in front", () => {
+    expect(normaliseDraft(prompt("a", { permissionMode: "plan" }))!.permissionMode).toBeUndefined();
+  });
+});
+
+describe("cleanPrompts permission modes", () => {
+  it("keeps a mode only where a fresh session opens", () => {
+    const [plain, fresh] = cleanPrompts([
+      prompt("a", { permissionMode: "plan" }),
+      prompt("b", { newSession: true, permissionMode: "plan" }),
+    ]);
+    expect(plain.permissionMode).toBeUndefined();
+    expect(fresh.permissionMode).toBe("plan");
+  });
+});
+
+describe("duplicateDraft", () => {
+  it("is the user's own copy, never a follow-up or a session's", () => {
+    const copy = duplicateDraft(
+      prompt("a", { label: "check", at: "2026-10-20T09:00:00.000Z", session: "s-1", origin: "s-1" }),
+    );
+    expect(copy).toMatchObject({ label: "check (copy)", session: null, origin: null, newSession: true });
+    expect(copy).not.toHaveProperty("id");
+  });
+
+  it("keeps a session's prompt off the app-wide mode", () => {
+    expect(duplicateDraft(prompt("a", { origin: "s-1" })).permissionMode).toBe("default");
+    expect(duplicateDraft(prompt("a", { origin: "s-1", permissionMode: "plan" })).permissionMode).toBe(
+      "plan",
+    );
+    expect(duplicateDraft(prompt("a")).permissionMode).toBeUndefined();
+  });
+});
+
+describe("export and import", () => {
+  const NOW = new Date("2026-10-19T12:00:00.000Z");
+  let ids = 0;
+  const newId = () => `n${++ids}`;
+
+  it("round-trips, under new ids, without sessions or origins", () => {
+    const list = [
+      prompt("a", { submit: true }),
+      prompt("b", { schedule: "0 9 * * *", newSession: true, submit: true, origin: "s-1", project: "/r" }),
+    ];
+    const parsed = parseImport(exportPrompts(list), NOW);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const imported = importPrompts([], parsed.prompts, false, newId);
+    expect(imported.map((p) => p.label)).toEqual(["a", "b"]);
+    expect(imported.every((p) => p.origin === null && p.session === null)).toBe(true);
+    expect(imported.map((p) => p.id)).not.toContain("a");
+    expect(imported[1].schedule).toBe("0 9 * * *");
+  });
+
+  it("drops permission modes unless asked to keep them", () => {
+    const text = exportPrompts([prompt("a", { newSession: true, permissionMode: "bypassPermissions" })]);
+    const parsed = parseImport(text, NOW);
+    if (!parsed.ok) throw new Error(parsed.error);
+    expect(importPrompts([], parsed.prompts, false, newId)[0].permissionMode).toBeUndefined();
+    expect(importPrompts([], parsed.prompts, true, newId)[0].permissionMode).toBe("bypassPermissions");
+  });
+
+  it("starts a timed import on default rather than the app-wide mode", () => {
+    const text = exportPrompts([
+      prompt("cron", { newSession: true, submit: true, schedule: "* * * * *", permissionMode: "bypassPermissions" }),
+    ]);
+    const parsed = parseImport(text, NOW);
+    if (!parsed.ok) throw new Error(parsed.error);
+    expect(importPrompts([], parsed.prompts, false, newId)[0].permissionMode).toBe("default");
+  });
+
+  it("stops timed imports at the cap, counting the ones already held", () => {
+    const text = exportPrompts([
+      prompt("t1", { newSession: true, schedule: "@daily" }),
+      prompt("t2", { newSession: true, schedule: "@daily" }),
+      prompt("plain"),
+    ]);
+    const parsed = parseImport(text, NOW);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const held = [prompt("x", { schedule: "@hourly" })];
+    const imported = importPrompts(held, parsed.prompts, false, newId, 2);
+    expect(imported.map((p) => p.label)).toEqual(["x", "t1", "plain"]);
+  });
+
+  it("leaves out one-offs already past, and counts them", () => {
+    const text = exportPrompts([
+      prompt("old", { at: "2026-10-18T09:00:00.000Z", newSession: true, submit: true }),
+      prompt("soon", { at: "2026-10-20T09:00:00.000Z", newSession: true, submit: true }),
+    ]);
+    const parsed = parseImport(text, NOW);
+    expect(parsed.ok && parsed.prompts.map((p) => p.label)).toEqual(["soon"]);
+    expect(parsed.ok && parsed.expired).toBe(1);
+  });
+
+  it("refuses what is not a prompts file", () => {
+    expect(parseImport("nope", NOW).ok).toBe(false);
+    expect(parseImport('{"prompts": []}', NOW).ok).toBe(false);
+    expect(parseImport("[]", NOW).ok).toBe(false);
+  });
+
+  it("takes a bare array, dropping entries that are not prompts", () => {
+    const parsed = parseImport(JSON.stringify([{ label: "x", text: "hi", submit: false }, { text: 3 }]), NOW);
+    expect(parsed.ok && parsed.prompts.map((p) => p.text)).toEqual(["hi"]);
+  });
+});
+
+describe("datetime-local values", () => {
+  it("round-trip to the minute", () => {
+    const iso = "2026-10-20T09:30:00.000Z";
+    expect(fromLocalInput(toLocalInput(iso))).toBe(iso);
+  });
+
+  it("an empty value is no time", () => {
+    expect(fromLocalInput("")).toBeNull();
+    expect(toLocalInput("garbage")).toBe("");
   });
 });

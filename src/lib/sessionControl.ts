@@ -77,6 +77,20 @@ export function controlSpawnMode(appMode: string): string {
   return appMode === "plan" ? "plan" : "default";
 }
 
+/**
+ * The permission mode a prompt's fresh session starts in, or undefined for the
+ * app-wide mode. The one picked in its editor wins; failing that, a timed run
+ * of a prompt a session scheduled is held to `controlSpawnMode`.
+ */
+export function promptSpawnMode(
+  prompt: Pick<QuickPrompt, "permissionMode" | "origin">,
+  appMode: string,
+  timed: boolean,
+): string | undefined {
+  if (prompt.permissionMode) return prompt.permissionMode;
+  return timed && prompt.origin !== null ? controlSpawnMode(appMode) : undefined;
+}
+
 /** Furthest ahead a one-off may be set. Past this it is a typo, not a plan. */
 const MAX_LEAD_MS = 366 * 24 * 60 * 60 * 1000;
 
