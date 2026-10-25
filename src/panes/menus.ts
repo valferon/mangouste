@@ -54,6 +54,9 @@ export const ID = {
   zoomReset: "view.zoomReset",
   fullScreen: "view.fullScreen",
 
+  splitSession: "view.splitSession",
+  unsplitSessions: "view.unsplitSessions",
+
   splitTerminal: "terminal.split",
   splitTerminalDown: "terminal.splitDown",
   closeTerminalPane: "terminal.closePane",
@@ -94,6 +97,9 @@ export function viewEntries(commands: Rows): MenuEntry[] {
     entry(commands, ID.toggleSidebar),
     entry(commands, ID.toggleTerminal),
     entry(commands, ID.debugLog),
+    "separator",
+    entry(commands, ID.splitSession),
+    entry(commands, ID.unsplitSessions),
     "separator",
     {
       label: "Color Theme",
@@ -221,6 +227,11 @@ export interface TabMenuContext {
   onRename: (tabId: string, sessionId: string, label: string) => void;
   onSave: (path: string) => void;
   onNewSession: (cwd: string) => void;
+  /** Put this session beside the one that was in front before the right-click. */
+  onOpenToSide: (tabId: string) => void;
+  /** Whether the tab is one half of the side-by-side pair. */
+  inSplit: (tabId: string) => boolean;
+  onUnsplit: () => void;
 }
 
 /**
@@ -251,6 +262,14 @@ export function tabMenu(tab: Tab, ctx: TabMenuContext): MenuEntry[] {
       label: "Rename Session…",
       run: () => ctx.onRename(tab.id, sessionId, label),
     },
+    chat &&
+      !ctx.inSplit(tab.id) && {
+        label: "Open to the Side",
+        accelerator: CHORD.splitSession,
+        run: () => ctx.onOpenToSide(tab.id),
+      },
+    chat && ctx.inSplit(tab.id) && { label: "Unsplit Sessions", run: ctx.onUnsplit },
+    "separator",
     sessionId && { label: "Copy Session Id", run: () => void copyText(sessionId) },
     chat && { label: "Copy Working Directory", run: () => void copyText(chat.cwd) },
     transcript && { label: "Reveal Transcript", run: () => void revealPath(transcript) },

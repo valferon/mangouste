@@ -155,6 +155,15 @@ import {
 } from "./lib/viewport";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  followActive,
+  inSplit,
+  makeSplit,
+  pruneSplit,
+  resizeSplitShare,
+  splitShown,
+  type SessionSplit,
+} from "./lib/sessionSplit";
+import {
   claudeLaunch,
   mintSessionId,
   SESSION_SURFACES,
@@ -1369,13 +1378,96 @@ function Workbench() {
   }, []);
 
   const openNewChatTab = useCallback(
-    (cwd: string) => {
+    (cwd: string): string => {
       const tab = newSessionTab(cwd);
       setTabs((current) => [...current, tab]);
       setActiveTab(tab.id);
+      return tab.id;
     },
     [newSessionTab],
   );
+
+  /* ---------- side-by-side sessions ---------- */
+
+  /** Two session tabs sharing the centre pane. See `lib/sessionSplit`. */
+  const [sessionSplit, setSessionSplit] = useState<SessionSplit | null>(null);
+  /** A session tab the strip is showing: the only kind the pair may hold. */
+  const splittable = useCallback(
+    (id: string) =>
+      tabs.some((tab) => tab.id === id && tab.kind === "chat" && tabInRepo(tab, activeRepo)),
+    [tabs, activeRepo],
+  );
+  const splitOnScreen = splitShown(sessionSplit, activeTab, splittable);
+
+  // A tab closed out from under the pair takes the pair with it.
+  useEffect(() => {
+    setSessionSplit((current) =>
+      pruneSplit(current, (id) => tabs.some((tab) => tab.id === id)),
+    );
+  }, [tabs]);
+
+  // Every way of putting a session in front (the strip, the rail, quick-open,
+  // a close landing on its successor) goes through `activeTab`, so the swap
+  // into the pair is done here rather than at each of them.
+  const previousActiveRef = useRef(activeTab);
+  useEffect(() => {
+    const from = previousActiveRef.current;
+    previousActiveRef.current = activeTab;
+    if (from === activeTab) return;
+    setSessionSplit((current) => followActive(current, from, activeTab, splittable));
+  }, [activeTab, splittable]);
+
+  /**
+   * Put a session beside the one in front: `other` when named, else the one
+   * most recently in front before it, else a new session.
+   */
+  const splitSessionRight = useCallback(
+    (other?: string) => {
+      const front = activeTab;
+      if (!activeRepo || !splittable(front)) return;
+      const partner =
+        other ??
+        tabHistoryRef.current.find((id) => id !== front && splittable(id) && !inSplit(sessionSplit, id));
+      // `openNewChatTab` moves focus to the new tab, and the pair has to be in
+      // place before that move is followed, or it would be read as a swap.
+      const right = partner && partner !== front ? partner : null;
+      if (right) {
+        setSessionSplit(makeSplit(front, right));
+        setActiveTab(right);
+        return;
+      }
+      const fresh = newSessionTab(activeRepo);
+      setTabs((current) => [...current, fresh]);
+      setSessionSplit(makeSplit(front, fresh.id));
+      setActiveTab(fresh.id);
+    },
+    [activeTab, activeRepo, splittable, sessionSplit, newSessionTab],
+  );
+
+  const unsplitSessions = useCallback(() => setSessionSplit(null), []);
+
+  /**
+   * A tab's "Open to the Side": beside whichever session was in front before.
+   *
+   * Read from the history rather than `activeTab`, because the right-click that
+   * opened the menu has already put this tab in front.
+   */
+  const openToSide = useCallback(
+    (tabId: string) => {
+      const front = tabHistoryRef.current.find((id) => id !== tabId && splittable(id));
+      if (!front || !splittable(tabId)) return;
+      setSessionSplit(makeSplit(front, tabId));
+      setActiveTab(tabId);
+    },
+    [splittable],
+  );
+
+  const centerContentRef = useRef<HTMLDivElement>(null);
+  const dragSessionSplit = useCallback((delta: number) => {
+    const width = centerContentRef.current?.clientWidth ?? 0;
+    if (width <= 0) return;
+    setSessionSplit((current) => current && resizeSplitShare(current, delta / width));
+  }, []);
 
   // Every repo needs at least one chat tab, or switching to it shows nothing.
   useEffect(() => {
@@ -2561,6 +2653,9 @@ function Workbench() {
       onRename: startRename,
       onSave: (path) => void fileSaversRef.current.get(path)?.(),
       onNewSession: openNewChatTab,
+      onOpenToSide: openToSide,
+      inSplit: (id) => splitOnScreen && inSplit(sessionSplit, id),
+      onUnsplit: unsplitSessions,
     }),
     [
       chatLabel,
@@ -2571,6 +2666,10 @@ function Workbench() {
       closeTabsExcept,
       startRename,
       openNewChatTab,
+      openToSide,
+      splitOnScreen,
+      sessionSplit,
+      unsplitSessions,
     ],
   );
 
@@ -2749,6 +2848,21 @@ function Workbench() {
       },
 
       {
+        id: ID.splitSession,
+        label: "Split Session Right",
+        chord: CHORD.splitSession,
+        // Ctrl+\ is SIGQUIT to a shell.
+        shellFirst: true,
+        disabled: !activeChat || splitOnScreen,
+        run: () => splitSessionRight(),
+      },
+      {
+        id: ID.unsplitSessions,
+        label: "Unsplit Sessions",
+        disabled: !splitOnScreen,
+        run: unsplitSessions,
+      },
+      {
         id: ID.splitTerminal,
         label: "Split Terminal Right",
         chord: CHORD.splitTerminal,
@@ -2818,6 +2932,9 @@ function Workbench() {
       theme,
       zoom,
       terminalDock,
+      splitOnScreen,
+      splitSessionRight,
+      unsplitSessions,
     ],
   );
 
@@ -3244,15 +3361,41 @@ function Workbench() {
             // its cleanup closes every pty behind it.
             style={{ flexDirection: terminalDock === "right" ? "row" : "column" }}
           >
-            <div className="center-content">
+            <div
+              className="center-content"
+              ref={centerContentRef}
+              // Side by side only while the pair is up. The two panes and the
+              // divider are put in order with `order` rather than by moving
+              // them, because moving a pane remounts it.
+              style={splitOnScreen ? { flexDirection: "row" } : undefined}
+            >
               {/* Every chat tab stays mounted: hiding is not unmounting, so a turn
                   keeps streaming while you read another session. */}
-              {chatTabs.map((tab) => (
+              {chatTabs.map((tab) => {
+                const side = splitOnScreen
+                  ? tab.id === sessionSplit.left
+                    ? "left"
+                    : tab.id === sessionSplit.right
+                      ? "right"
+                      : null
+                  : null;
+                const shown = tab.id === activeTab || side !== null;
+                return (
                 <div
                   key={tab.id}
+                  className="session-slot"
+                  data-split={side ?? undefined}
+                  data-active={side !== null && tab.id === activeTab}
+                  // Capture, so the click that lands in the composer or the
+                  // pty also moves focus to this side before it does anything.
+                  onMouseDownCapture={side && tab.id !== activeTab ? () => setActiveTab(tab.id) : undefined}
                   style={{
-                    display: tab.id === activeTab ? "flex" : "none",
-                    flex: 1,
+                    display: shown ? "flex" : "none",
+                    flex: side
+                      ? `${side === "left" ? sessionSplit!.share : 1 - sessionSplit!.share} 1 0`
+                      : 1,
+                    order: side === "right" ? 2 : 0,
+                    minWidth: 0,
                     minHeight: 0,
                     // Nothing may paint past a terminal's box: an xterm grid
                     // measured against a stale size would otherwise spill over
@@ -3293,7 +3436,8 @@ function Workbench() {
                     <ChatPane
                       chatId={tab.id}
                       cwd={tab.cwd}
-                      visible={tab.id === activeTab}
+                      visible={shown}
+                      front={tab.id === activeTab}
                       cold={coldTabs.has(tab.id)}
                       resume={tab.sessionId ?? tab.forkFrom ?? null}
                       fork={tab.sessionId === null && tab.forkFrom !== undefined}
@@ -3321,7 +3465,13 @@ function Workbench() {
                   )}
                   </PaneBoundary>
                 </div>
-              ))}
+                );
+              })}
+              {splitOnScreen && (
+                <div className="session-divider">
+                  <Resizer orientation="vertical" onDelta={dragSessionSplit} />
+                </div>
+              )}
 
               {/* File tabs stay mounted for the same reason chat tabs do: unmounting
                   one would throw away an unsaved draft on a tab switch, silently.

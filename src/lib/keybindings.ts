@@ -28,6 +28,7 @@ const BASE_CHORD = {
   // Ctrl on purpose: it needs no macOS spelling of its own.
   format: "Shift+Alt+F",
   closeTab: "Ctrl+W",
+  splitSession: "Ctrl+\\",
   settings: "Ctrl+,",
 
   undo: "Ctrl+Z",
@@ -85,6 +86,8 @@ const MAC_CHORD: Partial<Record<ChordName, string>> = {
   // Cmd+Shift+5 is the system's screenshot recorder, which takes the keystroke
   // first; Cmd+\\ is what the editors split with on macOS anyway.
   splitTerminal: "Cmd+\\",
+  // ...which leaves the session split the editors' other spelling of it.
+  splitSession: "Cmd+Alt+\\",
   // Ctrl+Shift+C/V only exist on Linux because Ctrl+C has to reach the shell.
   // Cmd is free of that constraint, so the terminal copies like everything else.
   terminalCopy: "Cmd+C",
@@ -172,6 +175,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: CHORD.newWindow, what: "Second window on the same sessions" },
       { keys: CHORD.closeTab, what: "Close the tab in front" },
       { keys: CHORD.closeTabAlt, what: "Close a tab, on the tab itself" },
+      { keys: CHORD.splitSession, what: "Put another session beside the one in front" },
       { keys: CHORD.settings, what: "Settings" },
       { keys: CHORD.toggleSidebar, what: "Show or hide the left sidebar" },
       { keys: CHORD.explorer, what: "Explorer" },

@@ -349,6 +349,33 @@ body {
   min-height: 0;
 }
 
+/* Two sessions side by side. The divider sits between them by `order`, and
+   the side holding focus gets the accent along its top edge. */
+.session-divider {
+  order: 1;
+  display: flex;
+}
+
+.session-slot[data-split="right"] {
+  border-left: 1px solid var(--border);
+}
+
+.session-slot[data-split] {
+  position: relative;
+}
+
+/* Over the pane rather than an inset shadow, which the pane's own background
+   would paint over. */
+.session-slot[data-split][data-active="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 4;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;

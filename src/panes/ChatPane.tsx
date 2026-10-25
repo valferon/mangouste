@@ -133,6 +133,11 @@ interface ChatPaneProps {
    */
   visible: boolean;
   /**
+   * The tab in front, when two sessions share the centre pane and both are
+   * `visible`. Only this one answers Escape. Defaults to `visible`.
+   */
+  front?: boolean;
+  /**
    * Restored but never shown: hold off the spawn and the transcript read.
    *
    * Distinct from `visible` — that means "on screen now", this means "has never
@@ -1832,6 +1837,7 @@ export const ChatPane = memo(function ChatPane({
   chatId,
   cwd,
   visible,
+  front = visible,
   cold,
   resume,
   resumeFile,
@@ -3312,7 +3318,8 @@ export const ChatPane = memo(function ChatPane({
 
   // The activity line advertises "esc to interrupt"; make that true.
   useEffect(() => {
-    if (!running) return;
+    // Beside another session, only the side holding focus may be cut off.
+    if (!running || !front) return;
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       // Panes for background tabs stay mounted (hidden); only the visible one
@@ -3323,7 +3330,7 @@ export const ChatPane = memo(function ChatPane({
     };
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [running, interrupt]);
+  }, [running, front, interrupt]);
 
   // Push stats up whenever any of them move.
   useEffect(() => {
