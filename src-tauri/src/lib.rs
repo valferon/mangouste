@@ -15,6 +15,7 @@ mod retitle;
 mod search;
 mod sessions;
 mod stats;
+mod tail;
 mod threads;
 mod treewatch;
 mod update;
@@ -354,6 +355,7 @@ pub fn run() {
             changes::session_changes,
             changes::session_change_patch,
             chats::rename_session,
+            tail::tool_output_tail,
             chats::expand_search_terms,
             retitle::retitle_session,
             // chat transport

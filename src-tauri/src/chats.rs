@@ -9,7 +9,9 @@
 //!
 //! What the daemon got right is kept: each child gets its own process group, so
 //! teardown signals the CLI's whole subtree rather than just the node process at
-//! its root.
+//! its root. That group no longer holds the Bash tool's shells, which the CLI
+//! starts in sessions of their own, so teardown also signals every group under
+//! the child (`terminate_tree`).
 //!
 //! A session uuid used to double as an alias for its chat, so a sidebar resume
 //! could attach to the process already running that transcript. It never fired:
@@ -342,15 +344,15 @@ impl ChatManager {
         let _ = std::fs::remove_file(mcp_config_path(chat_id));
         let _ = std::fs::remove_file(debug_log_path(chat_id));
         chat.alive.store(false, Ordering::SeqCst);
-        // Signal the group so the CLI's own children go too, then make sure the
-        // direct child is gone even if it had already left its group. Skipped
-        // once the reader thread has reaped the child: its pid may already be
-        // recycled, and killpg would then hit an unrelated process group. The
-        // `reaped` flag flips under this same mutex, so the check cannot race
-        // the reap.
+        // Signal the whole tree so the CLI's own children go too, then make
+        // sure the direct child is gone even if it had already left its group.
+        // Skipped once the reader thread has reaped the child: its pid may
+        // already be recycled, and killpg would then hit an unrelated process
+        // group. The `reaped` flag flips under this same mutex, so the check
+        // cannot race the reap.
         let mut child = chat.child.lock();
         if !chat.reaped.load(Ordering::SeqCst) {
-            unsafe { libc::killpg(chat.pid as i32, libc::SIGTERM) };
+            terminate_tree(chat.pid);
             let _ = child.kill();
         }
         drop(child);
@@ -889,13 +891,19 @@ mod expand_tests {
 /* ---------- tool liveness probe ---------- */
 //
 // stream-json emits nothing between `tool_use` and `tool_result`, so a long
-// Bash call is indistinguishable from a hang. But each child gets its own
-// process group at spawn, so /proc can say what is actually executing under
-// it. While a turn is running, any group member that was not there before the
-// turn started is tool work; the newest such process is the one worth naming.
+// Bash call is indistinguishable from a hang. But /proc can say what is
+// actually executing under the CLI. While a turn is running, any process under
+// it that was not there before the turn started is tool work; the newest such
+// process is the one worth naming.
+//
+// "Under it" is the process group the child gets at spawn *or* the CLI's
+// descendants by parent pid. The group alone used to be enough, but current
+// CLIs start each Bash shell in a session of its own (`setsid`), so a shell and
+// everything it runs sit outside the group while still being its children.
 
 struct GroupProc {
     pid: u32,
+    pgrp: u32,
     /// Ordering key only: higher means more recently started. On Linux this is
     /// the kernel start time in ticks since boot; elsewhere it is derived from
     /// elapsed time, so the values are comparable within a scan but not across
@@ -904,12 +912,95 @@ struct GroupProc {
     zombie: bool,
 }
 
-/// Every process in `pgid`'s group except the CLI itself.
+/// One row of the process table, as much of it as the probe needs.
+struct ProcRow {
+    pid: u32,
+    ppid: u32,
+    pgrp: u32,
+    rank: u64,
+    zombie: bool,
+}
+
+/// Every process in `root`'s group or below it, except `root` itself.
+fn group_processes(root: u32) -> Vec<GroupProc> {
+    under_root(root, process_table())
+}
+
+/// SIGTERM `root`'s group and every process group started under it.
+///
+/// Its own group is no longer the whole tree: the CLI `setsid`s each Bash
+/// shell, so a `kubectl` or `ansible-playbook` mid-run sits in a group of its
+/// own and would outlive the chat, reparented to init. The tree is read before
+/// anything is signalled, because once the CLI dies its children lose the
+/// parent link that finds them. A foreign group is never signalled: only
+/// groups whose leader is itself under `root`, plus stray members one by one.
+fn terminate_tree(root: u32) {
+    let procs = group_processes(root);
+    unsafe { libc::killpg(root as i32, libc::SIGTERM) };
+    for target in tree_signals(root, &procs) {
+        match target {
+            Signal::Group(pgid) => unsafe { libc::killpg(pgid as i32, libc::SIGTERM) },
+            Signal::Process(pid) => unsafe { libc::kill(pid as i32, libc::SIGTERM) },
+        };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Signal {
+    Group(u32),
+    Process(u32),
+}
+
+/// What `terminate_tree` signals beyond `root`'s own group.
+fn tree_signals(root: u32, procs: &[GroupProc]) -> Vec<Signal> {
+    let pids: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
+    let mut signals: Vec<Signal> = procs
+        .iter()
+        .filter(|p| p.pgrp != root)
+        .map(|p| {
+            if pids.contains(&p.pgrp) {
+                Signal::Group(p.pgrp)
+            } else {
+                Signal::Process(p.pid)
+            }
+        })
+        .collect();
+    signals.sort_unstable();
+    signals.dedup();
+    signals
+}
+
+/// The rows in `root`'s process group or descended from it by parent pid.
+fn under_root(root: u32, rows: Vec<ProcRow>) -> Vec<GroupProc> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row in &rows {
+        children.entry(row.ppid).or_default().push(row.pid);
+    }
+    let mut below = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            if below.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    rows.into_iter()
+        .filter(|row| row.pid != root && (row.pgrp == root || below.contains(&row.pid)))
+        .map(|row| GroupProc {
+            pid: row.pid,
+            pgrp: row.pgrp,
+            rank: row.rank,
+            zombie: row.zombie,
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
-fn group_processes(pgid: u32) -> Vec<GroupProc> {
-    let mut procs = Vec::new();
+fn process_table() -> Vec<ProcRow> {
+    let mut rows = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return procs;
+        return rows;
     };
     for entry in entries.flatten() {
         let Some(pid) = entry
@@ -919,9 +1010,6 @@ fn group_processes(pgid: u32) -> Vec<GroupProc> {
         else {
             continue;
         };
-        if pid == pgid {
-            continue;
-        }
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             continue;
         };
@@ -931,52 +1019,51 @@ fn group_processes(pgid: u32) -> Vec<GroupProc> {
         };
         let fields: Vec<&str> = rest.split_whitespace().collect();
         // After comm: [0] state, [1] ppid, [2] pgrp, ..., [19] starttime.
-        if fields.len() < 20 || fields[2].parse() != Ok(pgid) {
+        if fields.len() < 20 {
             continue;
         }
-        procs.push(GroupProc {
+        rows.push(ProcRow {
             pid,
+            ppid: fields[1].parse().unwrap_or(0),
+            pgrp: fields[2].parse().unwrap_or(0),
             rank: fields[19].parse().unwrap_or(0),
             zombie: fields[0] == "Z",
         });
     }
-    procs
+    rows
 }
 
-/// `ps` stands in for `/proc`, which only Linux has.
-///
-/// One sweep of the whole table per call rather than a query per pid: the group
-/// is small but unknown, and `ps` cannot filter on pgid directly.
+/// `ps` stands in for `/proc`, which only Linux has. One sweep of the whole
+/// table: the tree is small but unknown, and `ps` cannot select a subtree.
 #[cfg(not(target_os = "linux"))]
-fn group_processes(pgid: u32) -> Vec<GroupProc> {
-    let mut procs = Vec::new();
+fn process_table() -> Vec<ProcRow> {
+    let mut rows = Vec::new();
     let Ok(output) = Command::new("ps")
-        .args(["-Ao", "pid=,pgid=,state=,etime="])
+        .args(["-Ao", "pid=,ppid=,pgid=,state=,etime="])
         .output()
     else {
-        return procs;
+        return rows;
     };
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 4 {
+        if fields.len() < 5 {
             continue;
         }
         let Ok(pid) = fields[0].parse::<u32>() else {
             continue;
         };
-        if pid == pgid || fields[1].parse() != Ok(pgid) {
-            continue;
-        }
-        procs.push(GroupProc {
+        rows.push(ProcRow {
             pid,
+            ppid: fields[1].parse().unwrap_or(0),
+            pgrp: fields[2].parse().unwrap_or(0),
             // `ps` offers elapsed time, not a boot-relative start, so invert it
             // to keep the Linux ordering: larger rank means started later.
-            rank: u64::MAX - parse_etime(fields[3]),
+            rank: u64::MAX - parse_etime(fields[4]),
             // macOS decorates state with flags like `Z+`, so match the prefix.
-            zombie: fields[2].starts_with('Z'),
+            zombie: fields[3].starts_with('Z'),
         });
     }
-    procs
+    rows
 }
 
 /// Parse a `ps -o etime` value (`[[dd-]hh:]mm:ss`) into seconds.
@@ -994,6 +1081,9 @@ fn parse_etime(raw: &str) -> u64 {
     });
     days * 86_400 + seconds
 }
+
+/// Process lines the probe sends per tick. An `xargs -P 16` fan-out fits.
+const MAX_ACTIVITY_PROCESSES: usize = 24;
 
 /// One display line for a pid, from its argv. None for anything already gone,
 /// for empty cmdlines, and for our own permission-prompt server — which is a
@@ -1392,7 +1482,7 @@ pub fn start(
                         // into a reap poll that a blocked write would never
                         // let finish. `reaped` is only set after this loop, so
                         // the pid is still ours to signal.
-                        unsafe { libc::killpg(pid as i32, libc::SIGTERM) };
+                        terminate_tree(pid);
                         let mut guard = child.lock();
                         let _ = guard.kill();
                         break;
@@ -1529,15 +1619,22 @@ pub fn start(
         let running = Arc::clone(&running);
         let baseline = Arc::clone(&baseline);
         std::thread::spawn(move || {
-            let mut last: Option<String> = None;
+            let mut last: (Option<String>, Option<String>, Vec<String>) = (None, None, Vec::new());
             while alive.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 if !running.load(Ordering::SeqCst) {
-                    if last.take().is_some() {
+                    if last.0.is_some() {
+                        last = (None, None, Vec::new());
                         manager.emit(
                             &chat_id,
                             EVENT_TOOL_ACTIVITY,
-                            json!({ "chatId": chat_id, "instance": instance, "command": null }),
+                            json!({
+                                "chatId": chat_id,
+                                "instance": instance,
+                                "command": null,
+                                "output": null,
+                                "processes": [],
+                            }),
                         );
                     }
                     continue;
@@ -1551,14 +1648,36 @@ pub fn start(
                         .collect()
                 };
                 fresh.sort_by_key(|x| std::cmp::Reverse(x.rank));
-                let command = fresh.iter().find_map(|p| command_line_of(p.pid));
-                if command != last {
+                // Everything running, newest first, for the pane that shows it
+                // all: a `$(...)` or `| grep` keeps the output file empty until
+                // the pipeline ends, and then the processes are the only news.
+                let processes: Vec<String> = fresh
+                    .iter()
+                    .filter_map(|p| command_line_of(p.pid))
+                    .take(MAX_ACTIVITY_PROCESSES)
+                    .collect();
+                let command = processes.first().cloned();
+                // Newest first, like the command: in `cmd > log | ...` the
+                // innermost writer is the one whose output is worth following.
+                let output = command.as_ref().and_then(|_| {
+                    fresh
+                        .iter()
+                        .find_map(|p| crate::tail::output_file_of(p.pid))
+                });
+                let current = (command, output, processes);
+                if current != last {
                     manager.emit(
                         &chat_id,
                         EVENT_TOOL_ACTIVITY,
-                        json!({ "chatId": chat_id, "instance": instance, "command": command }),
+                        json!({
+                            "chatId": chat_id,
+                            "instance": instance,
+                            "command": current.0,
+                            "output": current.1,
+                            "processes": current.2,
+                        }),
                     );
-                    last = command;
+                    last = current;
                 }
             }
         });
@@ -1704,6 +1823,86 @@ mod tests {
         // surface an unparsed process than to hide it behind older ones.
         assert_eq!(parse_etime(""), 0);
         assert_eq!(parse_etime("what"), 0);
+    }
+
+    #[test]
+    fn tree_signals_reach_setsid_shells_but_no_foreign_group() {
+        let proc = |pid, pgrp| GroupProc {
+            pid,
+            pgrp,
+            rank: 0,
+            zombie: false,
+        };
+        let procs = vec![
+            proc(101, 100), // in the CLI's group: the killpg on root covers it
+            proc(200, 200), // setsid'd shell, leads its group
+            proc(201, 200), // its command
+            proc(301, 999), // joined a group led outside the tree
+        ];
+        assert_eq!(
+            tree_signals(100, &procs),
+            vec![Signal::Group(200), Signal::Process(301)]
+        );
+    }
+
+    /// Real processes: a shell that `setsid`s a child, as the CLI does for
+    /// each Bash call. The child must not survive the shell's teardown.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_tree_reaches_a_setsid_child() {
+        use std::os::unix::process::CommandExt;
+        let mut shell = Command::new("sh")
+            .args(["-c", "setsid sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .expect("sh");
+        let root = shell.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let sleeper = loop {
+            if let Some(p) = group_processes(root).into_iter().find(|p| p.pgrp != root) {
+                break p.pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setsid child never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        terminate_tree(root);
+        let _ = shell.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Gone, or a zombie waiting on init to reap it.
+        while std::fs::read_to_string(format!("/proc/{sleeper}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setsid child survived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn under_root_follows_setsid_shells_by_parent() {
+        let row = |pid, ppid, pgrp| ProcRow {
+            pid,
+            ppid,
+            pgrp,
+            rank: pid as u64,
+            zombie: false,
+        };
+        let rows = vec![
+            row(100, 1, 100),   // the CLI
+            row(101, 100, 100), // an MCP server in its group
+            row(200, 100, 200), // a Bash shell in a session of its own
+            row(201, 200, 200), // what that shell runs
+            row(300, 1, 300),   // unrelated
+            row(400, 1, 100),   // reparented, still in the group
+        ];
+        let mut pids: Vec<u32> = under_root(100, rows).iter().map(|p| p.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![101, 200, 201, 400]);
     }
 
     #[test]

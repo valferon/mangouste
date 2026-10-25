@@ -2,68 +2,43 @@
  * How much of a turn the transcript shows while it is happening.
  *
  * The problem this solves is not screen real estate — it is that a session you
- * cannot read is a session you cannot stop. A rail of collapsed `Bash` rows says
- * *that* work is happening and nothing about what it is for, so the moment to
- * interrupt a wrong approach has already passed by the time the wrong edit lands.
+ * cannot read is a session you cannot stop. So every call is headlined with the
+ * model's own description of it, edits show their diff in the flow, and
+ * reasoning is inline prose, at both levels:
  *
- * So the dial is about intent, not volume. Three levels, each a different answer
- * to "how much of the model's own account of itself do you want in the flow":
+ * normal  — the above.
+ * verbose — plus each call's arguments and output already open (a running
+ *           Bash call's output followed live), plus the internals of
+ *           subagents, which are otherwise invisible entirely.
  *
- * quiet   — the rail as a list of actions. Thinking folds to a chip you open.
- * normal  — every action labelled with the model's own words for it, thinking
- *           inline as prose.
- * verbose — the above, plus each call's arguments and output already open, plus
- *           the internals of subagents, which are otherwise invisible entirely.
+ * There used to be a `quiet` below `normal` that folded all of that away. It
+ * saved no space worth having and made the rail harder to read, so it went; a
+ * stored `quiet` reads back as the default.
  *
- * Only `verbose` changes how `claude` is spawned; the other two are decisions
- * about frames already on the wire and apply the instant you pick them.
+ * Only `verbose` changes how `claude` is spawned; `normal` is a decision about
+ * frames already on the wire and applies the instant you pick it.
  */
-export type FeedbackLevel = "quiet" | "normal" | "verbose";
+export type FeedbackLevel = "normal" | "verbose";
 
 /** Every level, in order, for the switch and the stored-value guard. */
-export const FEEDBACK_LEVELS: FeedbackLevel[] = ["quiet", "normal", "verbose"];
+export const FEEDBACK_LEVELS: FeedbackLevel[] = ["normal", "verbose"];
 
 /**
  * What the rail does today, and the level nothing has to be explained to reach.
  */
 export const FEEDBACK_DEFAULT: FeedbackLevel = "normal";
 
-/**
- * Thinking is a chip to open rather than prose in the flow.
- *
- * Folded rather than dropped: a turn with its reasoning deleted reads as a turn
- * that did not reason, and the whole point of `quiet` is a shorter rail, not a
- * dishonest one.
- */
-export const foldsThinking = (level: FeedbackLevel): boolean => level === "quiet";
-
-/**
- * Label a call with the model's own `description` instead of its payload.
- *
- * Every Bash call carries a human-written description and until now it reached
- * only the spinner, where it survives for as long as the call does. `grep -n
- * "MAX_THINKING_TOKENS" -r src-tauri/src src` and "Check thinking env plumbing"
- * are the same call; only one of them is an answer to "why".
- */
-export const namesIntent = (level: FeedbackLevel): boolean => level !== "quiet";
-
-/**
- * Show an edit's diff in the flow, without a click and without opening the card.
- *
- * The other half of the same argument `namesIntent` makes. A row that says
- * `Edit src/lib/rail.ts` names the file and says nothing about the change, so
- * the moment to stop a wrong edit is after it has landed — and an edit is the
- * one tool whose arguments *are* the answer, already rendered as a diff for the
- * permission prompt. Off at `quiet`, which is the level that asked for a rail of
- * actions rather than their contents.
- *
- * Capped where it renders: this says whether to show a change, not how much of
- * a four-hundred-line `Write` belongs in the middle of a conversation.
- */
-export const inlinesEdits = (level: FeedbackLevel): boolean => level !== "quiet";
-
 /** Open every call's arguments and output without a click. */
 export const opensTools = (level: FeedbackLevel): boolean => level === "verbose";
+
+/**
+ * Tail what is running under the spinner: every process the turn started, and
+ * the end of the output file the call is writing.
+ *
+ * Under the spinner rather than in the call's card, because that is where the
+ * eye is while a turn runs; the card can be screens up behind a notice.
+ */
+export const tailsActivity = (level: FeedbackLevel): boolean => level === "verbose";
 
 /**
  * Ask the CLI to forward what subagents say, and render it.

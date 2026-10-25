@@ -76,11 +76,9 @@ import {
   FEEDBACK_LEVELS,
   feedbackArgs,
   feedbackNeedsRestart,
-  foldsThinking,
-  inlinesEdits,
-  namesIntent,
   opensTools,
   showsSubagents,
+  tailsActivity,
   type FeedbackLevel,
 } from "../lib/feedback";
 import { EFFORT_LEVELS, effortArgs, liveEffortSetting, type EffortLevel } from "../lib/effort";
@@ -95,6 +93,8 @@ import {
   subscribeChatTimes,
   type ChatStamp,
 } from "../lib/chatTimes";
+import { parseBackgroundLaunch } from "../lib/outputFollow";
+import { OutputFollow } from "./OutputFollow";
 import {
   COMPOSER_DEFAULT,
   composerHeight,
@@ -738,8 +738,8 @@ function toolSummary(name: string, input: Record<string, unknown>): string {
  * `description` is on every Bash call and every subagent spawn, and until the
  * feedback dial existed it reached only the spinner — where it lives exactly as
  * long as the call does and then is gone. It is the difference between a rail
- * that lists commands and a rail that explains itself, so above `quiet` it
- * becomes the row's headline and the payload moves to its right.
+ * that lists commands and a rail that explains itself, so it becomes the
+ * row's headline and the payload moves to its right.
  */
 function toolIntent(input: Record<string, unknown>): string | null {
   const description = input.description;
@@ -826,42 +826,15 @@ interface PendingTool {
   startedAt: number | null;
 }
 
-/**
- * Reasoning, as prose or as a chip that opens into it.
- *
- * Its own component because the fold is state, and because `quiet` folding every
- * block in a 400-row transcript must not mean 400 pieces of state in the
- * timeline's render body.
- *
- * The chip counts words rather than reporting how long the model thought: the
- * elapsed time of an individual block is not in any frame this app receives, and
- * a plausible-looking number nobody measured is worse than none.
- */
+/** Reasoning, as inline prose. */
 const ThinkingRow = memo(function ThinkingRow({
   text,
-  folded,
   labelled,
 }: {
   text: string;
-  /** Start closed, as `quiet` does. */
-  folded: boolean;
   /** Say what the block is, as `verbose` does. */
   labelled: boolean;
 }) {
-  const [open, setOpen] = useState(!folded);
-  // The dial is allowed to overrule a click: flipping to `verbose` mid-session
-  // is a request to see the reasoning, including the rows already on screen.
-  useEffect(() => setOpen(!folded), [folded]);
-  const words = useMemo(() => text.trim().split(/\s+/).length, [text]);
-
-  if (!open) {
-    return (
-      <button className="thinking-chip" onClick={() => setOpen(true)}>
-        <span className="twisty">▸</span>
-        thought · {words} {words === 1 ? "word" : "words"}
-      </button>
-    );
-  }
   return (
     <div className="thinking-block">
       {labelled && <div className="thinking-label">thinking</div>}
@@ -1014,11 +987,17 @@ const ToolBlock = memo(function ToolBlock({
   result,
   onOpenFile,
   level,
+  liveOutput = null,
 }: {
   block: ToolUseBlock;
   result: { text: string; isError: boolean } | undefined;
   onOpenFile: (path: string) => void;
   level: FeedbackLevel;
+  /**
+   * The file this call is writing its output to, while it runs. Shown where
+   * the result will land, so an open card is a followed one.
+   */
+  liveOutput?: string | null;
 }) {
   // Closed until the reveal queue gets to it, even at `verbose`. Same as the
   // thinking fold in that the dial wins over an earlier click, so raising the
@@ -1038,22 +1017,15 @@ const ToolBlock = memo(function ToolBlock({
   // Blocks are appended once and never mutated, so this survives re-renders
   // caused by a result arriving — the stringify/regex work runs once per block.
   const summary = useMemo(() => toolSummary(block.name, block.input), [block]);
-  const intent = useMemo(
-    () => (namesIntent(level) ? toolIntent(block.input) : null),
-    [block, level],
-  );
+  const intent = useMemo(() => toolIntent(block.input), [block]);
   // An edit is a diff, not a pair of opaque strings: `old_string`/`new_string`
   // side by side made a two-line change unreadable. Null for every other tool,
   // which keeps the raw dump for anything this cannot render faithfully.
   const diffLines = useMemo(() => toolDiffLines(block.name, block.input), [block]);
   // What of it rides in the conversation itself, rather than inside the card.
-  // Null at `quiet`, which asked for a rail of actions and not their contents.
   const preview = useMemo(
-    () =>
-      diffLines === null || !inlinesEdits(level)
-        ? null
-        : previewDiff(diffLines, INLINE_DIFF_LINES),
-    [diffLines, level],
+    () => (diffLines === null ? null : previewDiff(diffLines, INLINE_DIFF_LINES)),
+    [diffLines],
   );
   const filePath =
     typeof block.input.file_path === "string" ? (block.input.file_path as string) : null;
@@ -1070,6 +1042,13 @@ const ToolBlock = memo(function ToolBlock({
       }
     : undefined;
   const pathStyle = filePath ? { textDecoration: "underline", cursor: "pointer" } : undefined;
+  // A backgrounded command's card is done the moment it launches; its output
+  // keeps going in a file the result names, which is what following reads.
+  const launch = useMemo(
+    () => (block.name === "Bash" && result ? parseBackgroundLaunch(result.text) : null),
+    [block, result],
+  );
+  const [following, setFollowing] = useState(false);
 
   return (
     <div className="tool-block" data-error={result?.isError ?? false}>
@@ -1105,7 +1084,28 @@ const ToolBlock = memo(function ToolBlock({
             </span>
           </>
         )}
+        {launch && (
+          <button
+            type="button"
+            className="tool-follow"
+            aria-pressed={following}
+            title={launch.outputPath}
+            onClick={(event) => {
+              event.stopPropagation();
+              setFollowing((v) => !v);
+            }}
+          >
+            {following ? "unfollow" : "follow output"}
+          </button>
+        )}
       </div>
+      {launch && following && (
+        <OutputFollow
+          path={launch.outputPath}
+          label={`background ${launch.id}`}
+          onClose={() => setFollowing(false)}
+        />
+      )}
       {/* The change itself, in the flow, while the turn is still running.
           Without it a session at work is a list of file names: the diff is
           already synthesised for the card and the permission prompt, and
@@ -1132,11 +1132,18 @@ const ToolBlock = memo(function ToolBlock({
               <ToolDiff lines={diffLines} language={language} />
             )}
           </div>
-          {result && (
+          {result ? (
             <div className="tool-io" data-error={result.isError}>
               <span className="io-tag">OUT</span>
               <ToolOutput name={block.name} input={block.input} result={result} />
             </div>
+          ) : (
+            liveOutput && (
+              <div className="tool-io" data-live="true">
+                <span className="io-tag">LIVE</span>
+                <OutputFollow path={liveOutput} label="running" />
+              </div>
+            )
           )}
         </>
       )}
@@ -1634,6 +1641,7 @@ const Timeline = memo(function Timeline({
   logMenu,
   level,
   times,
+  live,
 }: {
   entries: TimelineEntry[];
   toolResults: Record<string, { text: string; isError: boolean }>;
@@ -1670,6 +1678,8 @@ const Timeline = memo(function Timeline({
   level: FeedbackLevel;
   /** Whether the clock gutter shows. */
   times: boolean;
+  /** The running Bash call and the file its output is going to. */
+  live: { toolId: string; path: string } | null;
 }) {
   const menu = useMenu();
   // Null while stamps are off, which is also what keeps the gutter out of the
@@ -1724,11 +1734,7 @@ const Timeline = memo(function Timeline({
             )}
 
             {entry.kind === "thinking" && (
-              <ThinkingRow
-                text={entry.text}
-                folded={foldsThinking(level)}
-                labelled={level === "verbose"}
-              />
+              <ThinkingRow text={entry.text} labelled={level === "verbose"} />
             )}
 
             {entry.kind === "subagent" && (
@@ -1755,6 +1761,7 @@ const Timeline = memo(function Timeline({
                 result={toolResults[entry.block.id]}
                 onOpenFile={onOpenFile}
                 level={level}
+                liveOutput={live?.toolId === entry.block.id ? live.path : null}
               />
             )}
 
@@ -1966,6 +1973,12 @@ export const ChatPane = memo(function ChatPane({
   const [pendingTool, setPendingTool] = useState<PendingTool | null>(null);
   /** What the /proc probe says is executing under the CLI right now. */
   const [toolActivity, setToolActivity] = useState<string | null>(null);
+  /** The file that process is writing its output to, when it is a file. */
+  const [toolOutput, setToolOutput] = useState<string | null>(null);
+  /** Every process the probe sees running for this turn, newest first. */
+  const [toolProcesses, setToolProcesses] = useState<string[]>([]);
+  /** Last command the probe reported, so only its transitions are logged. */
+  const probeCommandRef = useRef<string | null>(null);
   /** Accumulates input_json_delta while the model types a tool call. */
   const partialToolRef = useRef<{ name: string; json: string } | null>(null);
   /**
@@ -2648,6 +2661,8 @@ export const ChatPane = memo(function ChatPane({
             setPhase("receiving");
             setPendingTool(null);
             setToolActivity(null);
+            setToolOutput(null);
+            setToolProcesses([]);
             setToolResults((current) => mergeToolResults(current, results, MAX_TOOL_RESULTS));
           }
           return;
@@ -2662,6 +2677,8 @@ export const ChatPane = memo(function ChatPane({
           setPhase("ready");
           setPendingTool(null);
           setToolActivity(null);
+          setToolOutput(null);
+          setToolProcesses([]);
           partialToolRef.current = null;
           setTurnStartedAt(null);
           thinkingTextRef.current = new Map();
@@ -2874,8 +2891,15 @@ export const ChatPane = memo(function ChatPane({
       }),
       onClaudeToolActivity((event) => {
         if (event.chatId === chatId && isCurrent(event.instance)) {
-          logDebug(chatId, "probe", event.command ?? "(tool finished)", event);
+          // Tail-only changes arrive every second; logging them would bury the
+          // probe's real transitions.
+          if (probeCommandRef.current !== event.command) {
+            logDebug(chatId, "probe", event.command ?? "(tool finished)", event);
+          }
+          probeCommandRef.current = event.command;
           setToolActivity(event.command);
+          setToolOutput(event.output);
+          setToolProcesses(event.processes ?? []);
         }
       }),
       onClaudeExit((event) => {
@@ -2885,6 +2909,8 @@ export const ChatPane = memo(function ChatPane({
         setPhase("exited");
         setPendingTool(null);
         setToolActivity(null);
+        setToolOutput(null);
+        setToolProcesses([]);
         setTurnStartedAt(null);
         // Nothing is going to answer the panels still waiting; a card saying so
         // beats one spinning until its timeout.
@@ -3515,6 +3541,23 @@ export const ChatPane = memo(function ChatPane({
     return showsSubagents(level) ? entries : entries.filter((e) => e.kind !== "subagent");
   }, [items, toolResults, level]);
 
+  /**
+   * The card the probe's output file belongs to: the newest top-level Bash
+   * call still without a result. The probe names one process, the newest, so
+   * parallel calls show live output on the latest only.
+   */
+  const liveTool = useMemo(() => {
+    // At `verbose` the tail rides under the spinner instead; one copy is enough.
+    if (toolOutput === null || tailsActivity(level)) return null;
+    for (let index = timeline.length - 1; index >= 0; index -= 1) {
+      const entry = timeline[index];
+      if (entry.kind === "tool" && entry.block.name === "Bash" && !toolResults[entry.block.id]) {
+        return { toolId: entry.block.id, path: toolOutput };
+      }
+    }
+    return null;
+  }, [timeline, toolResults, toolOutput, level]);
+
   const statusLabel = useMemo(() => {
     // "stopped" claims an exit; a cold pane simply has not started yet.
     if (!alive) return warmed ? "stopped" : "not started";
@@ -3683,6 +3726,7 @@ export const ChatPane = memo(function ChatPane({
             logMenu={logMenu}
             level={level}
             times={timesOn}
+            live={liveTool}
           />
 
           {running && !awaitingPermission && (
@@ -3694,6 +3738,8 @@ export const ChatPane = memo(function ChatPane({
               }
               startedAt={pendingTool?.startedAt ?? turnStartedAt}
               sub={toolActivity}
+              processes={tailsActivity(level) ? toolProcesses : null}
+              output={tailsActivity(level) ? toolOutput : null}
             />
           )}
         </div>

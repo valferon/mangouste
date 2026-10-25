@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { OutputFollow } from "./OutputFollow";
 
 /**
  * Whimsical verbs, in the spirit of the Claude Code CLI spinner.
@@ -36,9 +37,17 @@ interface ActivityProps {
   startedAt?: number | null;
   /** Second line: the process actually executing right now, from the probe. */
   sub?: string | null;
+  /**
+   * At `verbose`: everything running, newest first, in place of `sub`. A call
+   * that pipes through `grep` or captures with `$(...)` writes nothing to its
+   * output file until it ends, so these lines are its only live sign.
+   */
+  processes?: string[] | null;
+  /** At `verbose`: the running call's output file, followed live. */
+  output?: string | null;
 }
 
-export function Activity({ detail, startedAt, sub }: ActivityProps) {
+export function Activity({ detail, startedAt, sub, processes, output }: ActivityProps) {
   const [frame, setFrame] = useState(0);
   const [verb, setVerb] = useState(() => Math.floor(Math.random() * VERBS.length));
 
@@ -67,7 +76,18 @@ export function Activity({ detail, startedAt, sub }: ActivityProps) {
         <span className="activity-elapsed">{seconds}s</span>
       )}
       <span className="activity-hint">esc to interrupt</span>
-      {sub && <span className="activity-sub">└ {sub}</span>}
+      {processes && processes.length > 0
+        ? processes.map((line, index) => (
+            <span className="activity-sub" key={`${index}:${line}`} title={line}>
+              {index === processes.length - 1 ? "└" : "├"} {line}
+            </span>
+          ))
+        : sub && <span className="activity-sub">└ {sub}</span>}
+      {output && (
+        <div className="activity-output">
+          <OutputFollow path={output} label="running" />
+        </div>
+      )}
     </div>
   );
 }

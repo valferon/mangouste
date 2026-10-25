@@ -60,6 +60,7 @@ import {
 import { pinnedFirst } from "../lib/sessionStore";
 import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
 import { windowLabel, windowName, windowTint } from "../lib/windowScope";
+import { OutputFollow } from "./OutputFollow";
 import { SessionTitleInput } from "./SessionTitleInput";
 import { ThreadHeader, ThreadNote } from "./ThreadGroup";
 import type {
@@ -513,6 +514,15 @@ export const SessionsPane = memo(function SessionsPane({
   /** Sessions whose recap is open, and what has been read for each. */
   const [recapOpen, setRecapOpen] = useState<Set<string>>(new Set());
   const [recaps, setRecaps] = useState<Map<string, RecapState>>(new Map());
+  /** Backgrounded commands whose output is open under their row. */
+  const [followedTasks, setFollowedTasks] = useState<Set<string>>(new Set());
+  const toggleFollowedTask = useCallback((id: string) => {
+    setFollowedTasks((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
 
   const flags = useFlags();
   const visited = useVisitedRepos();
@@ -1201,21 +1211,43 @@ export const SessionsPane = memo(function SessionsPane({
    * file rather than a sidechain log.
    */
   const taskRow = (task: BackgroundTask, session: SessionMeta) => (
-    <div
-      key={task.id}
-      className="task-row"
-      onClick={() => openSession(session)}
-      title={[
-        task.label || task.id,
-        "backgrounded command, still running",
-        `output last written ${shortAge(task.mtimeMs)} ago`,
-        task.outputPath,
-      ].join("\n")}
-    >
-      <BackgroundTaskGlyph />
-      <span className="title">{task.label || task.id}</span>
-      <span className="agent-type">{task.id}</span>
-    </div>
+    <Fragment key={task.id}>
+      <div
+        className="task-row"
+        onClick={() => openSession(session)}
+        title={[
+          task.label || task.id,
+          "backgrounded command, still running",
+          `output last written ${shortAge(task.mtimeMs)} ago`,
+          task.outputPath,
+        ].join("\n")}
+      >
+        <BackgroundTaskGlyph />
+        <span className="title">{task.label || task.id}</span>
+        <span className="agent-type">{task.id}</span>
+        <button
+          type="button"
+          className="task-follow"
+          aria-pressed={followedTasks.has(task.id)}
+          title={followedTasks.has(task.id) ? "Stop following" : "Follow output"}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleFollowedTask(task.id);
+          }}
+        >
+          {followedTasks.has(task.id) ? "▾" : "▸"}
+        </button>
+      </div>
+      {followedTasks.has(task.id) && (
+        <div className="task-follow-view">
+          <OutputFollow
+            path={task.outputPath}
+            label={task.label || task.id}
+            onClose={() => toggleFollowedTask(task.id)}
+          />
+        </div>
+      )}
+    </Fragment>
   );
 
   /** One session's row and everything that hangs off it: hits, recap, fan-out. */

@@ -270,15 +270,38 @@ export const onClaudeDebug = (
 
 /**
  * What is actually executing under the CLI right now, from the Rust /proc
- * probe. `command: null` means the tool subprocess has finished.
+ * probe. `command: null` means the tool subprocess has finished. `output` is
+ * the file its stdout goes to, when that is a file (Linux only).
  */
+export interface ToolActivityEvent {
+  chatId: string;
+  instance: number;
+  command: string | null;
+  /** The file that output is going to, for `toolOutputTail`. */
+  output: string | null;
+  /** Every process the turn started that is still running, newest first. */
+  processes?: string[];
+}
+
+/** The end of a command's output file, as the follow view polls it. */
+export interface OutputTail {
+  text: string;
+  bytes: number;
+  mtimeMs: number;
+}
+
+/**
+ * Last `lines` lines of a running command's output. Only paths the probe
+ * reported, or the CLI's own `tasks/<id>.output` files, are served. Null once
+ * the file is gone.
+ */
+export const toolOutputTail = (path: string, lines: number) =>
+  invoke<OutputTail | null>("tool_output_tail", { path, lines });
+
 export const onClaudeToolActivity = (
-  handler: (event: { chatId: string; instance: number; command: string | null }) => void,
+  handler: (event: ToolActivityEvent) => void,
 ): Promise<UnlistenFn> =>
-  listen<{ chatId: string; instance: number; command: string | null }>(
-    "claude://tool-activity",
-    (e) => handler(e.payload),
-  );
+  listen<ToolActivityEvent>("claude://tool-activity", (e) => handler(e.payload));
 
 export const onClaudeExit = (
   handler: (event: { chatId: string; instance: number; code: number | null }) => void,

@@ -4,17 +4,15 @@ import {
   FEEDBACK_LEVELS,
   feedbackArgs,
   feedbackNeedsRestart,
-  foldsThinking,
-  inlinesEdits,
-  namesIntent,
   opensTools,
   showsSubagents,
+  tailsActivity,
   type FeedbackLevel,
 } from "./feedback";
 
 describe("the feedback dial", () => {
   it("keeps the levels ordered from least to most, which is what the strip renders", () => {
-    expect(FEEDBACK_LEVELS).toEqual(["quiet", "normal", "verbose"]);
+    expect(FEEDBACK_LEVELS).toEqual(["normal", "verbose"]);
   });
 
   it("defaults to the behaviour that needs no explanation", () => {
@@ -22,29 +20,15 @@ describe("the feedback dial", () => {
     expect(FEEDBACK_DEFAULT).toBe("normal");
   });
 
-  it("only folds reasoning away at the quietest level", () => {
-    expect(FEEDBACK_LEVELS.filter(foldsThinking)).toEqual(["quiet"]);
-  });
-
-  it("names intent everywhere except quiet", () => {
-    expect(FEEDBACK_LEVELS.filter(namesIntent)).toEqual(["normal", "verbose"]);
-  });
-
-  it("shows edits in the flow everywhere except quiet", () => {
-    // Quiet asked for a list of actions; every other level asked what the
-    // session is doing, and for an edit the diff is that answer.
-    expect(FEEDBACK_LEVELS.filter(inlinesEdits)).toEqual(["normal", "verbose"]);
-  });
-
   it("opens calls and forwards subagents only at the loudest level", () => {
     expect(FEEDBACK_LEVELS.filter(opensTools)).toEqual(["verbose"]);
     expect(FEEDBACK_LEVELS.filter(showsSubagents)).toEqual(["verbose"]);
+    expect(FEEDBACK_LEVELS.filter(tailsActivity)).toEqual(["verbose"]);
   });
 });
 
 describe("what a level asks of the CLI", () => {
-  it("adds no flags below verbose, so quiet and normal cost nothing on the wire", () => {
-    expect(feedbackArgs("quiet")).toEqual([]);
+  it("adds no flags below verbose, so normal costs nothing on the wire", () => {
     expect(feedbackArgs("normal")).toEqual([]);
   });
 
@@ -56,8 +40,6 @@ describe("what a level asks of the CLI", () => {
      changed but whose flags did not must not claim it is waiting on a restart —
      that is the tooltip lying about work already done. */
   it("says a restart is needed only when the spawn flags actually differ", () => {
-    expect(feedbackNeedsRestart("quiet", "normal")).toBe(false);
-    expect(feedbackNeedsRestart("normal", "quiet")).toBe(false);
     expect(feedbackNeedsRestart("normal", "verbose")).toBe(true);
     expect(feedbackNeedsRestart("verbose", "normal")).toBe(true);
   });

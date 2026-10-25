@@ -715,7 +715,7 @@ The rest follows from the tab holding a program instead of a pane:
 ## How much a session tells you
 
 The rail at the bottom of the chat pane has a third switch, next to the model and
-the permission mode: **quiet · normal · verbose**. It answers one question — how
+the permission mode: **normal · verbose**. It answers one question — how
 much of the model's own account of itself you want in the transcript while the
 turn is still running.
 
@@ -724,17 +724,22 @@ read is a session you cannot stop. A column of collapsed `Bash` rows tells you
 that work is happening and nothing about what it is *for*, so by the time a wrong
 approach is legible the wrong edit has landed.
 
-- **quiet** — the transcript as a list of actions. Reasoning folds to a
-  `thought · 214 words` chip you can open. Nothing is dropped; a turn rendered
-  with its reasoning deleted would read as a turn that did not reason.
 - **normal** — the default. Every call is headlined with the model's own
-  description of it, with the command or path to its right, and reasoning is
-  inline prose.
+  description of it, with the command or path to its right, edits show their
+  diff in the flow, and reasoning is inline prose.
 - **verbose** — the above, plus every call's arguments and output already open,
-  plus the inside of subagents.
+  plus the inside of subagents. Under the spinner, every process the turn has
+  running and the live tail of the call's output. At `normal`, open a running
+  `Bash` card by hand to follow its output there. A command that pipes through
+  `grep` or captures with `$(...)` writes nothing until it ends; the process
+  lines are its only live sign.
 
-Two of the three are decisions about frames already received and apply on the
-click. Only `verbose` changes how `claude` is spawned, so only `verbose` can show
+There used to be a `quiet` level that folded reasoning to a chip and dropped the
+headlines and diffs. It saved no real space and made the rail harder to read, so
+it is gone; a stored `quiet` comes back as `normal`.
+
+`normal` is a decision about frames already received and applies on the click.
+Only `verbose` changes how `claude` is spawned, so only `verbose` can show
 the switch as pending: it adds `--forward-subagent-text`, and there is no control
 request for "start forwarding", so that half waits for a restart. The tooltip
 says which half you are waiting on.
@@ -743,7 +748,7 @@ says which half you are waiting on.
 carries a human-written `description`, and until this switch existed it reached
 only the spinner, where it lives exactly as long as the call does.
 `grep -n "MAX_THINKING_TOKENS" -r src-tauri/src src` and "Check thinking env
-plumbing" are the same call; only one of them answers "why". Above `quiet` the
+plumbing" are the same call; only one of them answers "why". So the
 description is the headline and the payload moves to its right.
 
 **Thinking is not in the transcript.** This is worth knowing because it looks
