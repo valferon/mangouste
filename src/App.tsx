@@ -165,6 +165,7 @@ import {
   FEEDBACK_LEVELS,
   type FeedbackLevel,
 } from "./lib/feedback";
+import { EFFORT_DEFAULT, EFFORT_LEVELS, type EffortLevel } from "./lib/effort";
 import {
   idScope,
   isMainWindow,
@@ -191,6 +192,7 @@ const SIDEBAR_VIEW_KEY = KEYS.state.sidebarView;
 const TERMINAL_DOCK_KEY = KEYS.state.terminalDock;
 const SESSION_SURFACE_KEY = KEYS.prefs.sessionSurface;
 const FEEDBACK_KEY = KEYS.prefs.feedback;
+const EFFORT_KEY = KEYS.prefs.effort;
 
 /** The left sidebar shows one of these at a time. */
 type SidebarView = "explorer" | "search" | "git" | "history" | "prompts";
@@ -396,6 +398,10 @@ function Workbench() {
    */
   const [feedback, setFeedback] = useState<FeedbackLevel>(() =>
     readEnum<FeedbackLevel>(FEEDBACK_KEY, FEEDBACK_LEVELS, FEEDBACK_DEFAULT),
+  );
+  /** Thinking effort new panes spawn with, shared like the model alias. */
+  const [effort, setEffort] = useState<EffortLevel>(() =>
+    readEnum<EffortLevel>(EFFORT_KEY, EFFORT_LEVELS, EFFORT_DEFAULT),
   );
   /**
    * What a session tab holds: this app's chat pane, or `claude` in a pty.
@@ -978,6 +984,10 @@ function Workbench() {
   useEffect(() => {
     writeString(FEEDBACK_KEY, feedback);
   }, [feedback]);
+
+  useEffect(() => {
+    writeString(EFFORT_KEY, effort);
+  }, [effort]);
 
   /* ---------- workspace discovery ---------- */
 
@@ -3293,6 +3303,8 @@ function Workbench() {
                       onModel={setModelAlias}
                       feedback={feedback}
                       onFeedback={setFeedback}
+                      effort={effort}
+                      onEffort={setEffort}
                       initialDraft={tab.draft}
                       pasteRequest={pasteRequestFor(tab.id)}
                       directRequests={directRequests[tab.id]}

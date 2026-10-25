@@ -31,6 +31,7 @@ import {
 } from "../lib/ipc";
 import {
   abortControl,
+  controlApplyFlagSettings,
   controlInitialize,
   controlSetModel,
   controlSetPermissionMode,
@@ -82,6 +83,7 @@ import {
   showsSubagents,
   type FeedbackLevel,
 } from "../lib/feedback";
+import { EFFORT_LEVELS, effortArgs, liveEffortSetting, type EffortLevel } from "../lib/effort";
 import { hiddenLabel, previewDiff } from "../lib/editPreview";
 import { recallThinking, rememberThinking } from "../lib/thinkingStore";
 import {
@@ -190,6 +192,10 @@ interface ChatPaneProps {
   feedback: FeedbackLevel;
   /** Picking a level here becomes the default the next pane spawns with. */
   onFeedback: (level: FeedbackLevel) => void;
+  /** Thinking effort for newly spawned processes. */
+  effort: EffortLevel;
+  /** Picking an effort here becomes the default the next pane spawns with. */
+  onEffort: (level: EffortLevel) => void;
   /** Text the composer opens with. Read once, at mount. */
   initialDraft?: string;
   /** A saved prompt to drop into the composer, and send when it asks to be. */
@@ -318,9 +324,6 @@ const MODE_LABELS: Record<(typeof PERMISSION_MODES)[number], string> = {
  */
 const modeLabel = (mode: string): string => (MODE_LABELS as Record<string, string>)[mode] ?? mode;
 
-/** The readable half of a rejection, for a row a person has to act on. */
-const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
 /**
  * CLI `--model` aliases, plus a sentinel for "don't pass the flag at all".
  *
@@ -329,6 +332,10 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  */
 const MODEL_DEFAULT = "default";
 const MODELS = [MODEL_DEFAULT, "fable", "opus", "sonnet", "haiku"] as const;
+
+/** Sent after a respawn cut a turn short, so the session finishes what it started. */
+const RESUME_AFTER_RESTART =
+  "The session was restarted to apply a settings change, which interrupted your last turn. Carry on from where you left off.";
 
 /// Conversational entries loaded when resuming. Transcripts reach thousands of
 /// records, and only the recent tail is worth rendering.
@@ -1833,6 +1840,8 @@ export const ChatPane = memo(function ChatPane({
   onModel,
   feedback: defaultFeedback,
   onFeedback,
+  effort: defaultEffort,
+  onEffort,
   initialDraft,
   pasteRequest = null,
   directRequests = NO_DIRECT,
@@ -1870,6 +1879,9 @@ export const ChatPane = memo(function ChatPane({
   /** Images pasted into the composer, sent as content blocks alongside the text. */
   const [attachments, setAttachments] = useState<PendingImage[]>([]);
   const [running, setRunning] = useState(false);
+  /** Read by a restart to know whether a turn needs picking back up after. */
+  const runningRef = useRef(false);
+  runningRef.current = running;
   /**
    * The last turn stopped without closing: ESC, an API error, a dead stream.
    *
@@ -1931,6 +1943,15 @@ export const ChatPane = memo(function ChatPane({
   const [level, setLevel] = useState<FeedbackLevel>(defaultFeedback);
   const levelRef = useRef(defaultFeedback);
   const [spawnedLevel, setSpawnedLevel] = useState<FeedbackLevel>(defaultFeedback);
+  /** Chosen thinking effort, and the one the live process runs at. */
+  const [effort, setEffort] = useState<EffortLevel>(defaultEffort);
+  const effortRef = useRef(defaultEffort);
+  const [spawnedEffort, setSpawnedEffort] = useState<EffortLevel>(defaultEffort);
+  /**
+   * The level the process was launched with, which is what clearing the live
+   * setting falls back to — not the last live pick `spawnedEffort` tracks.
+   */
+  const launchedEffortRef = useRef(defaultEffort);
   const [sessionId, setSessionId] = useState<string | null>(resume);
   const [costUsd, setCostUsd] = useState<number | null>(null);
   const [model, setModel] = useState<string | null>(null);
@@ -2083,7 +2104,11 @@ export const ChatPane = memo(function ChatPane({
     levelRef.current = defaultFeedback;
     setLevel(defaultFeedback);
     setSpawnedLevel(defaultFeedback);
-  }, [defaultPermissionMode, defaultModelAlias, defaultFeedback]);
+    effortRef.current = defaultEffort;
+    launchedEffortRef.current = defaultEffort;
+    setEffort(defaultEffort);
+    setSpawnedEffort(defaultEffort);
+  }, [defaultPermissionMode, defaultModelAlias, defaultFeedback, defaultEffort]);
   /** Mirrors `sessionId` state for the stable frame handler. */
   const sessionIdRef = useRef<string | null>(resume);
 
@@ -2307,6 +2332,9 @@ export const ChatPane = memo(function ChatPane({
     setSpawnedModelAlias(spawnModelAlias);
     const spawnLevel = levelRef.current;
     setSpawnedLevel(spawnLevel);
+    const spawnEffort = effortRef.current;
+    launchedEffortRef.current = spawnEffort;
+    setSpawnedEffort(spawnEffort);
     const options = {
       chatId,
       cwd,
@@ -2316,6 +2344,7 @@ export const ChatPane = memo(function ChatPane({
       // The only part of a feedback level the CLI has to know about.
       extraArgs: [
         ...feedbackArgs(spawnLevel),
+        ...effortArgs(spawnEffort),
         ...(resumeTarget && forkRef.current ? ["--fork-session"] : []),
       ],
       debug: cliDebugEnabled(),
@@ -3296,6 +3325,30 @@ export const ChatPane = memo(function ChatPane({
     [restart],
   );
 
+  /**
+   * Respawn so a change the live process cannot take lands now.
+   *
+   * The choice is already armed in its ref, so the respawn picks it up and
+   * resumes the same session id. A turn in flight is interrupted first rather
+   * than killed mid-write, and asked to carry on once the new process is up —
+   * the pick is what the person wanted, the turn is what they were waiting on.
+   */
+  const restartToApply = useCallback(
+    async (what: string) => {
+      if (!alive) return;
+      const wasRunning = runningRef.current;
+      if (wasRunning) await interrupt();
+      await spawn("restart");
+      emitNotice(
+        wasRunning
+          ? `restarted to apply ${what} — picking the interrupted turn back up.`
+          : `restarted to apply ${what}.`,
+      );
+      if (wasRunning) await dispatchTurn(RESUME_AFTER_RESTART, []);
+    },
+    [alive, interrupt, spawn, emitNotice, dispatchTurn],
+  );
+
   /*
    * A control request moved the live process, so the composer switch that arms
    * the next spawn has to move with it — otherwise the two disagree and the
@@ -3342,14 +3395,10 @@ export const ChatPane = memo(function ChatPane({
         })
         .catch((e) => {
           logDebug(chatId, "control", `set_model failed: ${String(e)}`);
-          emitNotice(
-            `Could not switch to ${alias} on the running session: ${errorText(e)}`,
-            "warn",
-            { label: "Restart to apply", kind: "restart" },
-          );
+          void restartToApply(`model ${alias}`);
         });
     },
-    [alive, chatId, emitNotice, onModel],
+    [alive, chatId, emitNotice, onModel, restartToApply],
   );
 
   /**
@@ -3365,15 +3414,48 @@ export const ChatPane = memo(function ChatPane({
       setLevel(next);
       onFeedback(next);
       // Everything but subagent forwarding is a rendering choice this pane makes
-      // on frames it already has, so most of a level change is live at once and
-      // only the flag half waits. Say which half was just bought.
-      emitNotice(
-        feedbackNeedsRestart(spawnedLevel, next)
-          ? `verbosity: ${next} — subagent forwarding applies on restart, the rest is live.`
-          : `verbosity: ${next}.`,
-      );
+      // on frames it already has, so most of a level change is live at once;
+      // only the flag half takes a respawn, and that one happens now.
+      if (feedbackNeedsRestart(spawnedLevel, next) && alive) {
+        void restartToApply(`verbosity ${next}`);
+        return;
+      }
+      emitNotice(`verbosity: ${next}.`);
     },
-    [emitNotice, onFeedback, spawnedLevel],
+    [alive, emitNotice, onFeedback, spawnedLevel, restartToApply],
+  );
+
+  /**
+   * Set the thinking effort: live over `apply_flag_settings` when the level
+   * lives in the settings layer, by respawn when it does not (`max`, or back to
+   * `default` from a process launched with a level).
+   */
+  const pickEffort = useCallback(
+    (next: EffortLevel) => {
+      effortRef.current = next;
+      setEffort(next);
+      onEffort(next);
+      if (!alive) {
+        emitNotice(`effort armed: ${next} — applies when this session starts.`);
+        return;
+      }
+      const setting = liveEffortSetting(launchedEffortRef.current, next);
+      if (setting === undefined) {
+        void restartToApply(`effort ${next}`);
+        return;
+      }
+      void controlApplyFlagSettings(chatId, { effortLevel: setting })
+        .then(() => {
+          logDebug(chatId, "control", `apply_flag_settings · effortLevel ${next}`);
+          setSpawnedEffort(next);
+          emitNotice(`effort: ${next} — applied to the running session.`);
+        })
+        .catch((e) => {
+          logDebug(chatId, "control", `apply_flag_settings failed: ${String(e)}`);
+          void restartToApply(`effort ${next}`);
+        });
+    },
+    [alive, chatId, emitNotice, onEffort, restartToApply],
   );
 
   const pickPermissionMode = useCallback(
@@ -3400,20 +3482,16 @@ export const ChatPane = memo(function ChatPane({
         })
         .catch((e) => {
           logDebug(chatId, "control", `set_permission_mode failed: ${String(e)}`);
-          // The pick stays armed for the next spawn — the strip's pending badge
-          // says so — but a refusal that only reached the debug log read as the
-          // switch doing nothing at all. The one people hit is
+          // The pick is armed for the next spawn, so respawning applies it
+          // instead of leaving the switch looking like it did nothing. The
+          // refusal people hit is
           // `bypassPermissions`, which the CLI will not raise a process into
           // unless it was launched there; a restart resumes the same session id,
-          // so taking the offer costs the transcript nothing.
-          emitNotice(
-            `Could not switch to ${modeLabel(mode)} on the running session: ${errorText(e)}`,
-            "warn",
-            { label: "Restart to apply", kind: "restart" },
-          );
+          // so applying it that way costs the transcript nothing.
+          void restartToApply(`permission mode ${modeLabel(mode)}`);
         });
     },
-    [alive, chatId, emitNotice],
+    [alive, chatId, emitNotice, restartToApply],
   );
 
   const panelContext = useMemo<PanelContext>(
@@ -3713,6 +3791,28 @@ export const ChatPane = memo(function ChatPane({
                 onClick={() => pickModel(alias)}
               >
                 {alias}
+              </button>
+            ))}
+          </div>
+          <div
+            className="mode-switch"
+            data-pending={effort !== spawnedEffort}
+            title={
+              effort !== spawnedEffort
+                ? `Pending — running at "${spawnedEffort}".`
+                : alive
+                  ? "Thinking effort (applies to the running session)"
+                  : "Thinking effort (applies on next start)"
+            }
+          >
+            {EFFORT_LEVELS.map((option) => (
+              <button
+                key={option}
+                className="toggle-button"
+                data-active={option === effort}
+                onClick={() => pickEffort(option)}
+              >
+                {option}
               </button>
             ))}
           </div>

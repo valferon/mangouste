@@ -71,6 +71,8 @@ export const KEYS = {
     /** Whether file editors show the git blame column. */
     blame: "mangouste.blame",
     feedback: "mangouste.feedback",
+    /** Thinking effort new panes spawn with. */
+    effort: "mangouste.effort",
     /** Whether the conversation shows a clock time beside each turn. */
     chatTimes: "mangouste.chatTimes",
     updateCheck: "mangouste.updateCheck",

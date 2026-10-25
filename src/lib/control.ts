@@ -205,3 +205,11 @@ export const controlReloadSkills = (chatId: string) =>
 
 export const controlReloadPlugins = (chatId: string) =>
   claudeControl<ReloadPluginsResult>(chatId, "reload_plugins");
+
+/**
+ * Merge a patch into the running process's flag-settings layer — the one
+ * `--settings` seeds at spawn. Applies from the next request; `null` clears a
+ * key back to what the process was launched with.
+ */
+export const controlApplyFlagSettings = (chatId: string, settings: Record<string, unknown>) =>
+  claudeControl<unknown>(chatId, "apply_flag_settings", { settings });
