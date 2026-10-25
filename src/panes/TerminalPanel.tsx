@@ -1,7 +1,18 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Resizer } from "../layout/Split";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
+import {
+  layoutTree,
+  leaf,
+  paneIds,
+  removePane,
+  resizeSplit,
+  splitPane,
+  type PaneNode,
+  type Rect,
+  type SplitDirection,
+} from "../lib/terminalLayout";
 import { idScope } from "../lib/windowScope";
 import { TerminalPane } from "./TerminalPane";
 
@@ -20,25 +31,27 @@ export interface TerminalActions {
    * service, and a second click wants the one already running, not a twin.
    */
   runInTab: (launch: string, title: string) => void;
+  /** Split the pane in front side by side. */
   split: () => void;
+  /** Split the pane in front into two stacked ones. */
+  splitDown: () => void;
   closePane: () => void;
 }
 
 /** Which edge of the centre column the panel is docked to. */
 export type TerminalDock = "bottom" | "right";
 
-/** One shell. `id` is the key the Rust side stores the pty under. */
-interface TerminalSlot {
-  id: string;
-  /** Flex weight inside its tab, so a split can be dragged. */
-  weight: number;
-}
-
-/** One tab, holding one shell or several side by side. */
+/**
+ * One tab, holding one shell or several split side by side and stacked.
+ *
+ * Each pane's id is the key the Rust side stores its pty under.
+ */
 interface TerminalTab {
   id: string;
-  slots: TerminalSlot[];
+  layout: PaneNode;
   activeSlot: string;
+  /** The shell the tab opened with, the one `launch` is typed into. */
+  origin: string;
   /** Typed into the tab's first shell once it is up. Absent for a plain shell. */
   launch?: string;
   /** Shown in place of the tab's number, for a tab opened to run something. */
@@ -66,22 +79,15 @@ let sequence = 0;
 
 const mintId = (prefix: string) => `${idScope()}${prefix}:${(sequence += 1)}`;
 
-function makeSlot(): TerminalSlot {
-  return { id: mintId("term"), weight: 1 };
-}
-
 function makeTab(launch?: string, title?: string): TerminalTab {
-  const slot = makeSlot();
-  return { id: mintId("tab"), slots: [slot], activeSlot: slot.id, launch, title };
+  const slot = mintId("term");
+  return { id: mintId("tab"), layout: leaf(slot), activeSlot: slot, origin: slot, launch, title };
 }
 
 function makeGroup(): RepoTerminals {
   const tab = makeTab();
   return { tabs: [tab], activeTab: tab.id };
 }
-
-/** Smallest share of a tab's width a split pane can be dragged down to. */
-const MIN_SHARE = 0.08;
 
 interface TerminalPanelProps {
   /** Repo in front. Its group is the one the tab strip and stack show. */
@@ -106,7 +112,7 @@ interface TerminalPanelProps {
 
 /**
  * The bottom terminal panel: one group of terminals per repo, tabs within a
- * group, and side-by-side splits within a tab.
+ * group, and splits within a tab, side by side or stacked.
  *
  * Nothing is unmounted while the app is running. `TerminalPane`'s cleanup closes
  * its pty, which kills the shell and everything running in it, so a hidden pane
@@ -204,26 +210,27 @@ export function TerminalPanel({
     [repo, visible, groups, onRequestShow, focusSlot],
   );
 
-  const splitTab = useCallback(() => {
+  const splitTab = useCallback((dir: SplitDirection) => {
     if (!repo) return;
     if (!visible) onRequestShow();
-    const slot = makeSlot();
-    focusSlot(slot.id);
+    const slot = mintId("term");
+    focusSlot(slot);
     setGroups((current) => {
       const existing = current[repo];
       if (!existing) return current;
       const tabs = existing.tabs.map((tab) => {
         if (tab.id !== existing.activeTab) return tab;
-        // Inserted after the pane being split, as a split of that pane rather
-        // than an append to the row.
-        const at = tab.slots.findIndex((candidate) => candidate.id === tab.activeSlot);
-        const index = at < 0 ? tab.slots.length : at + 1;
-        const slots = [...tab.slots.slice(0, index), slot, ...tab.slots.slice(index)];
-        return { ...tab, slots, activeSlot: slot.id };
+        // A split of the pane in front, not an append to the tab: the new
+        // shell lands right of it or below it, wherever it sits in the tree.
+        const layout = splitPane(tab.layout, tab.activeSlot, slot, dir);
+        return { ...tab, layout, activeSlot: slot };
       });
       return { ...current, [repo]: { ...existing, tabs } };
     });
   }, [repo, visible, onRequestShow, focusSlot]);
+
+  const splitRight = useCallback(() => splitTab("row"), [splitTab]);
+  const splitDown = useCallback(() => splitTab("column"), [splitTab]);
 
   const selectTab = useCallback((tabId: string) => {
     if (!repo) return;
@@ -257,7 +264,7 @@ export function TerminalPanel({
    * function would read it.
    */
   const closeSlots = useCallback(
-    (tabId: string, doomed: (slot: TerminalSlot) => boolean) => {
+    (tabId: string, doomed: (slot: string) => boolean) => {
       if (!repo) return;
       const existing = groups[repo];
       if (!existing) return;
@@ -267,13 +274,15 @@ export function TerminalPanel({
           tabs.push(tab);
           continue;
         }
-        const slots = tab.slots.filter((slot) => !doomed(slot));
+        let layout: PaneNode | null = tab.layout;
+        for (const slot of paneIds(tab.layout)) {
+          if (layout && doomed(slot)) layout = removePane(layout, slot);
+        }
         // A tab is its panes; the last one closing takes the tab with it.
-        if (slots.length === 0) continue;
-        const activeSlot = slots.some((slot) => slot.id === tab.activeSlot)
-          ? tab.activeSlot
-          : slots[0].id;
-        tabs.push({ ...tab, slots, activeSlot });
+        if (!layout) continue;
+        const remaining = paneIds(layout);
+        const activeSlot = remaining.includes(tab.activeSlot) ? tab.activeSlot : remaining[0];
+        tabs.push({ ...tab, layout, activeSlot });
       }
       if (tabs.length === 0) {
         // Dropping the group and hiding the panel together: the effect above
@@ -299,7 +308,7 @@ export function TerminalPanel({
   );
 
   const closeSlot = useCallback(
-    (tabId: string, slotId: string) => closeSlots(tabId, (slot) => slot.id === slotId),
+    (tabId: string, slotId: string) => closeSlots(tabId, (slot) => slot === slotId),
     [closeSlots],
   );
 
@@ -317,34 +326,29 @@ export function TerminalPanel({
   /**
    * Turn a divider drag into a weight change for the pair it sits between.
    *
-   * `index` is the slot to the right of the divider, matching the render below.
+   * `extent` is the split's share of the tab body along `dir`, from the layout,
+   * so the pixel delta can be read as a fraction of the split itself.
    */
   const resizeSlot = useCallback(
-    (tabId: string, index: number, delta: number) => {
+    (
+      tabId: string,
+      split: string,
+      index: number,
+      dir: SplitDirection,
+      extent: number,
+      delta: number,
+    ) => {
       if (!repo) return;
-      const width = bodies.current.get(tabId)?.clientWidth ?? 0;
-      if (width <= 0) return;
+      const body = bodies.current.get(tabId);
+      const size = (dir === "row" ? body?.clientWidth : body?.clientHeight) ?? 0;
+      if (size * extent <= 0) return;
       setGroups((current) => {
         const existing = current[repo];
         if (!existing) return current;
         const tabs = existing.tabs.map((tab) => {
           if (tab.id !== tabId) return tab;
-          const left = tab.slots[index - 1];
-          const right = tab.slots[index];
-          if (!left || !right) return tab;
-          const total = tab.slots.reduce((sum, slot) => sum + slot.weight, 0);
-          const pair = left.weight + right.weight;
-          const min = MIN_SHARE * total;
-          // Two minimums do not fit in the pair, so there is nothing to give.
-          if (pair < min * 2) return tab;
-          const wanted = left.weight + (delta / width) * total;
-          const nextLeft = Math.min(Math.max(wanted, min), pair - min);
-          const slots = tab.slots.map((slot, at) => {
-            if (at === index - 1) return { ...slot, weight: nextLeft };
-            if (at === index) return { ...slot, weight: pair - nextLeft };
-            return slot;
-          });
-          return { ...tab, slots };
+          const layout = resizeSplit(tab.layout, split, index, delta / (size * extent));
+          return layout === tab.layout ? tab : { ...tab, layout };
         });
         return { ...current, [repo]: { ...existing, tabs } };
       });
@@ -358,21 +362,28 @@ export function TerminalPanel({
     onRegisterActions?.({
       newTab: addTab,
       runInTab,
-      split: splitTab,
+      split: splitRight,
+      splitDown,
       closePane: closeActiveSlot,
     });
     return () => onRegisterActions?.(null);
-  }, [onRegisterActions, addTab, runInTab, splitTab, closeActiveSlot]);
+  }, [onRegisterActions, addTab, runInTab, splitRight, splitDown, closeActiveSlot]);
 
   /** Right-click on the bar, a tab, or the empty strip beside them. */
   const barMenu = useCallback(
     (tabId: string | null): MenuEntry[] => [
       { label: "New Terminal Tab", accelerator: CHORD.newTerminal, run: addTab },
       {
-        label: "Split Terminal",
+        label: "Split Terminal Right",
         accelerator: CHORD.splitTerminal,
         disabled: !group,
-        run: splitTab,
+        run: splitRight,
+      },
+      {
+        label: "Split Terminal Down",
+        accelerator: CHORD.splitTerminalDown,
+        disabled: !group,
+        run: splitDown,
       },
       "separator",
       tabId && {
@@ -392,7 +403,7 @@ export function TerminalPanel({
         run: onClose,
       },
     ],
-    [addTab, splitTab, closeTab, group, dock, onDock, onClose],
+    [addTab, splitRight, splitDown, closeTab, group, dock, onDock, onClose],
   );
 
   return (
@@ -416,18 +427,20 @@ export function TerminalPanel({
           {repo.split("/").pop() ?? ""}
         </span>
         <div className="terminal-tabs">
-          {group?.tabs.map((tab, index) => (
+          {group?.tabs.map((tab, index) => {
+            const panes = paneIds(tab.layout).length;
+            return (
             <button
               key={tab.id}
               className="terminal-tab"
               data-active={tab.id === group.activeTab}
               onClick={() => selectTab(tab.id)}
               onContextMenu={(event) => menu.openContextMenu(event, barMenu(tab.id))}
-              title={tab.launch ?? (tab.slots.length > 1 ? `${tab.slots.length} panes` : undefined)}
+              title={tab.launch ?? (panes > 1 ? `${panes} panes` : undefined)}
             >
               <span>
                 {tab.title ?? index + 1}
-                {tab.slots.length > 1 ? ` · ${tab.slots.length}` : ""}
+                {panes > 1 ? ` · ${panes}` : ""}
               </span>
               <span
                 className="close"
@@ -441,7 +454,8 @@ export function TerminalPanel({
                 ×
               </span>
             </button>
-          ))}
+            );
+          })}
         </div>
         <div className="actions">
           <button
@@ -453,11 +467,19 @@ export function TerminalPanel({
           </button>
           <button
             className="toggle-button"
-            onClick={splitTab}
-            title="Split terminal side by side (Ctrl+Shift+5)"
+            onClick={splitRight}
+            title={`Split terminal right (${CHORD.splitTerminal})`}
             disabled={!group}
           >
             ⇔
+          </button>
+          <button
+            className="toggle-button"
+            onClick={splitDown}
+            title={`Split terminal down (${CHORD.splitTerminalDown})`}
+            disabled={!group}
+          >
+            ⇕
           </button>
           <button className="toggle-button" onClick={onClose} title="Hide terminal (Ctrl+`)">
             ×
@@ -476,6 +498,8 @@ export function TerminalPanel({
             >
               {groupState.tabs.map((tab) => {
                 const tabShown = repoShown && tab.id === groupState.activeTab;
+                const { panes, dividers } = layoutTree(tab.layout);
+                const split = panes.length > 1;
                 return (
                   <div
                     key={tab.id}
@@ -486,57 +510,75 @@ export function TerminalPanel({
                       else bodies.current.delete(tab.id);
                     }}
                   >
-                    {tab.slots.map((slot, index) => {
-                      const slotActive = tabShown && visible && slot.id === tab.activeSlot;
+                    {/* Flat and placed by rectangle, never nested: a pane that
+                        moved under a new wrapper on a split would be remounted,
+                        and remounting closes its pty. */}
+                    {panes.map((pane) => {
+                      const slotActive = tabShown && visible && pane.id === tab.activeSlot;
                       return (
-                        <Fragment key={slot.id}>
-                          {index > 0 && (
-                            <Resizer
-                              orientation="vertical"
-                              onDelta={(delta) => resizeSlot(tab.id, index, delta)}
-                            />
+                        <div
+                          key={pane.id}
+                          className="terminal-slot"
+                          style={placeAt(pane)}
+                          data-active={slotActive && split}
+                          data-edge-left={pane.x > 0}
+                          data-edge-top={pane.y > 0}
+                          onMouseDown={() => selectSlot(tab.id, pane.id)}
+                        >
+                          {split && (
+                            <button
+                              className="terminal-slot-close"
+                              title={`Close pane (${CHORD.closeTerminal})`}
+                              onClick={() => closeSlot(tab.id, pane.id)}
+                            >
+                              ×
+                            </button>
                           )}
-                          <div
-                            className="terminal-slot"
-                            style={{ flex: `${slot.weight} 1 0` }}
-                            data-active={slotActive && tab.slots.length > 1}
-                            onMouseDown={() => selectSlot(tab.id, slot.id)}
-                          >
-                            {tab.slots.length > 1 && (
-                              <button
-                                className="terminal-slot-close"
-                                title="Close pane (Ctrl+Shift+W)"
-                                onClick={() => closeSlot(tab.id, slot.id)}
-                              >
-                                ×
-                              </button>
-                            )}
-                            <TerminalPane
-                              id={slot.id}
-                              cwd={groupRepo}
-                              // The tab's command runs in the shell it opened
-                              // with; a split beside it is a plain shell.
-                              launch={slot.id === tab.slots[0].id ? tab.launch : undefined}
-                              refitToken={refitToken + showToken}
-                              themeKey={themeKey}
-                              focusRequest={
-                                focusTarget.slot === slot.id ? focusTarget.seq : 0
-                              }
-                              paneActions={[
-                                "separator",
-                                ...barMenu(tab.id),
-                                tab.slots.length > 1 && {
-                                  label: "Close Pane",
-                                  accelerator: CHORD.closeTerminal,
-                                  danger: true,
-                                  run: () => closeSlot(tab.id, slot.id),
-                                },
-                              ]}
-                            />
-                          </div>
-                        </Fragment>
+                          <TerminalPane
+                            id={pane.id}
+                            cwd={groupRepo}
+                            // The tab's command runs in the shell it opened
+                            // with; a split beside it is a plain shell.
+                            launch={pane.id === tab.origin ? tab.launch : undefined}
+                            refitToken={refitToken + showToken}
+                            themeKey={themeKey}
+                            focusRequest={focusTarget.slot === pane.id ? focusTarget.seq : 0}
+                            paneActions={[
+                              "separator",
+                              ...barMenu(tab.id),
+                              split && {
+                                label: "Close Pane",
+                                accelerator: CHORD.closeTerminal,
+                                danger: true,
+                                run: () => closeSlot(tab.id, pane.id),
+                              },
+                            ]}
+                          />
+                        </div>
                       );
                     })}
+                    {dividers.map((divider) => (
+                      <div
+                        key={`${divider.split}:${divider.index}`}
+                        className="terminal-divider"
+                        data-dir={divider.dir}
+                        style={placeAt(divider)}
+                      >
+                        <Resizer
+                          orientation={divider.dir === "row" ? "vertical" : "horizontal"}
+                          onDelta={(delta) =>
+                            resizeSlot(
+                              tab.id,
+                              divider.split,
+                              divider.index,
+                              divider.dir,
+                              divider.extent,
+                              delta,
+                            )
+                          }
+                        />
+                      </div>
+                    ))}
                   </div>
                 );
               })}
@@ -547,3 +589,14 @@ export function TerminalPanel({
     </div>
   );
 }
+
+/** A layout rectangle as absolute percentages of the tab body. */
+function placeAt(rect: Rect): React.CSSProperties {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.w * 100}%`,
+    height: `${rect.h * 100}%`,
+  };
+}
+

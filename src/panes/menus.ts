@@ -55,6 +55,7 @@ export const ID = {
   fullScreen: "view.fullScreen",
 
   splitTerminal: "terminal.split",
+  splitTerminalDown: "terminal.splitDown",
   closeTerminalPane: "terminal.closePane",
   dockToggle: "terminal.dock",
 
@@ -121,6 +122,7 @@ export function terminalEntries(commands: Rows): MenuEntry[] {
   return [
     entry(commands, ID.newTerminal),
     entry(commands, ID.splitTerminal),
+    entry(commands, ID.splitTerminalDown),
     entry(commands, ID.closeTerminalPane),
     "separator",
     entry(commands, ID.dockToggle),

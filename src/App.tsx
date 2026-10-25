@@ -2750,11 +2750,20 @@ function Workbench() {
 
       {
         id: ID.splitTerminal,
-        label: "Split Terminal",
+        label: "Split Terminal Right",
         chord: CHORD.splitTerminal,
         run: () => {
           showTerminal();
           terminalActions.current?.split();
+        },
+      },
+      {
+        id: ID.splitTerminalDown,
+        label: "Split Terminal Down",
+        chord: CHORD.splitTerminalDown,
+        run: () => {
+          showTerminal();
+          terminalActions.current?.splitDown();
         },
       },
       {

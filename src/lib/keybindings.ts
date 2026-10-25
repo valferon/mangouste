@@ -51,7 +51,9 @@ const BASE_CHORD = {
   fullScreen: "F11",
 
   newTerminal: "Ctrl+Shift+T",
+  // tmux's pair: % splits side by side, " stacks.
   splitTerminal: "Ctrl+Shift+5",
+  splitTerminalDown: "Ctrl+Shift+'",
   closeTerminal: "Ctrl+Shift+W",
   dockTerminal: "Ctrl+Shift+M",
   terminalCopy: "Ctrl+Shift+C",
@@ -207,7 +209,8 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     rows: [
       { keys: CHORD.toggleTerminal, what: "Show or hide the panel" },
       { keys: CHORD.newTerminal, what: "New terminal tab" },
-      { keys: CHORD.splitTerminal, what: "Split the terminal tab" },
+      { keys: CHORD.splitTerminal, what: "Split the terminal pane right" },
+      { keys: CHORD.splitTerminalDown, what: "Split the terminal pane down" },
       { keys: CHORD.closeTerminal, what: "Close the terminal pane" },
       { keys: CHORD.dockTerminal, what: "Move the panel between the bottom and the right" },
       { keys: CHORD.terminalCopy, what: "Copy the selection" },

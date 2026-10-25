@@ -3290,23 +3290,43 @@ select {
 .terminal-tab-body {
   position: absolute;
   inset: 0;
-  flex-direction: row;
 }
 
-/* A split pane. `flex` comes from its stored weight, so the divider can drag.
+/* A split pane, placed by the rectangle its tab's split tree gives it rather
+   than by flex, so a split never moves a pane under a new parent.
    The inset lives here rather than on `.terminal-host` below: everything is
    `border-box`, so `getComputedStyle(host).height` reports the padded box, and
    FitAddon subtracts only the *terminal's* own padding — never its parent's. A
    padded host therefore over-reports the space by 8px, which is enough to buy
    one extra row and hang it past the bottom of the panel. */
 .terminal-slot {
-  position: relative;
+  position: absolute;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
   padding: 4px 6px;
   overflow: hidden;
+}
+
+.terminal-slot[data-edge-left="true"] {
+  border-left: 1px solid var(--border);
+}
+
+.terminal-slot[data-edge-top="true"] {
+  border-top: 1px solid var(--border);
+}
+
+/* A zero-width (or zero-height) box on a boundary between panes; the resizer
+   inside overhangs it by its own negative margin. */
+.terminal-divider {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+}
+
+.terminal-divider[data-dir="column"] {
+  flex-direction: column;
 }
 
 /* Only marked while a tab is split, since a lone pane needs no "which one". */
