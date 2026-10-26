@@ -3640,6 +3640,7 @@ function Workbench() {
           onRestoreTabs={setRestoreTabs}
           workspaceRoot={workspaceRoot}
           onWorkspaceRoot={setWorkspaceRoot}
+          repoPath={activeRepo || null}
           onClose={() => setSettingsOpen(false)}
         />
       )}

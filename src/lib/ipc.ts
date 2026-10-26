@@ -5,6 +5,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
+  AvailablePlugin,
+  InstalledPlugin,
+  Marketplace,
+  PluginAction,
+  PluginRun,
+  PluginScope,
+} from "./plugins";
+import type {
   Blame,
   BranchList,
   ChatStatus,
@@ -297,6 +305,37 @@ export interface OutputTail {
  */
 export const toolOutputTail = (path: string, lines: number) =>
   invoke<OutputTail | null>("tool_output_tail", { path, lines });
+
+/** Installed plugins, as `claude plugin list --json` prints them from `cwd`. */
+export const pluginList = (cwd: string | null) =>
+  invoke<InstalledPlugin[]>("plugin_list", { cwd, available: false });
+
+/** Installed plugins and every marketplace's catalog. Slow: it reads them all. */
+export const pluginCatalog = (cwd: string | null) =>
+  invoke<{ installed: InstalledPlugin[]; available: AvailablePlugin[] }>("plugin_list", {
+    cwd,
+    available: true,
+  });
+
+export const pluginMarketplaces = (cwd: string | null) =>
+  invoke<Marketplace[]>("plugin_marketplaces", { cwd });
+
+/**
+ * One `claude plugin` action. `acceptCommand` is the fingerprint of a
+ * marketplace-declared command a person has just approved.
+ */
+export const pluginAction = (
+  action: PluginAction,
+  target: string,
+  options: { scope?: PluginScope; cwd?: string | null; acceptCommand?: string } = {},
+) =>
+  invoke<PluginRun>("plugin_action", {
+    action,
+    target,
+    scope: options.scope ?? null,
+    cwd: options.cwd ?? null,
+    acceptCommand: options.acceptCommand ?? null,
+  });
 
 export const onClaudeToolActivity = (
   handler: (event: ToolActivityEvent) => void,

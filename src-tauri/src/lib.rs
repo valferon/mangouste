@@ -8,6 +8,7 @@ mod fileops;
 mod format;
 mod git;
 mod permission;
+mod plugins;
 mod primary;
 mod pty;
 mod recap;
@@ -356,6 +357,9 @@ pub fn run() {
             changes::session_change_patch,
             chats::rename_session,
             tail::tool_output_tail,
+            plugins::plugin_list,
+            plugins::plugin_marketplaces,
+            plugins::plugin_action,
             chats::expand_search_terms,
             retitle::retitle_session,
             // chat transport

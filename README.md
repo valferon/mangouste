@@ -1218,6 +1218,36 @@ that is not downloadable yet. Failures are silent on the timer and spoken on the
 menu item — a rate limit or an offline laptop is not worth a notice about a
 check nobody asked to run, but it is worth an answer to someone who did.
 
+## Plugins
+
+`Settings ▸ plugins` manages Claude Code plugins without a terminal. It has three
+views:
+
+- **installed**: every installed plugin with its marketplace, version and scope.
+  Switch it on or off, update it, or remove it.
+- **browse**: every marketplace's catalog, most installed first, searchable and
+  filterable by marketplace. Pick the scope an install goes to (`user`, or
+  `project` / `local` for the repo in front) and install.
+- **marketplaces**: the marketplaces you have added. Update one or all, remove
+  one, or add one by `owner/repo`, git URL or path.
+
+All of it runs the `claude plugin` CLI with `--json`, the same thing `/plugin`
+does. mangouste never writes `~/.claude/plugins` or `enabledPlugins` itself:
+those files are the CLI's state, under its locks and its migrations. After a
+change, every open session in every window gets a `reload_plugins` control
+request, so its `/` menu picks up the new commands without a restart. An update
+can still want one; the CLI says so when it does.
+
+Some installs run a command their marketplace declares. The CLI will not run it
+unasked, so the panel shows the command and asks; yes sends back that command's
+fingerprint as `--accept-command`, which accepts exactly the command shown and
+nothing else. `synced` plugins (from claude.ai) and `managed` ones (from policy)
+can be switched on and off but not updated or removed here; whatever put them
+there owns them.
+
+The CLI's `enable` accepts any id, installed or not, and writes it into
+`enabledPlugins`. The panel only offers the switch on installed plugins.
+
 ## Terminal
 
 `Ctrl+\`` toggles the panel; `Ctrl+Shift+T` adds a tab, `Ctrl+Shift+5` splits the

@@ -4749,6 +4749,121 @@ select {
   line-height: 1.45;
 }
 
+/* General and Plugins. Plugins rows carry names, versions and three buttons,
+   so that section gets the width, and both scroll inside the sheet rather than
+   running off the bottom of the window. */
+.settings {
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+
+.settings[data-section="plugins"] {
+  width: min(720px, 92vw);
+}
+
+.settings-sections {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+}
+
+.settings-sections + .actions {
+  margin-left: 6px;
+}
+
+.plugins-panel .setting-hint {
+  margin-left: 14px;
+}
+
+.plugins-status[data-failed="true"] {
+  color: var(--red);
+}
+
+.plugins-filters input {
+  flex: 1;
+}
+
+.plugins-filters select,
+.plugins-filters input {
+  min-width: 0;
+}
+
+.plugins-list {
+  padding: 6px 14px;
+}
+
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.plugin-row:last-child {
+  border-bottom: none;
+}
+
+.plugin-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.plugin-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plugin-meta,
+.plugin-note,
+.plugin-description {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.plugin-note {
+  color: var(--orange);
+}
+
+.plugin-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.plugin-button {
+  padding: 3px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plugin-button:disabled,
+.segmented button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.segmented button[data-active="true"]:disabled {
+  opacity: 1;
+}
+
 /* Hints name things — a flag, a command, a menu item, a file — and every one
    of those names is a bare `<code>` with nothing styling it. Two problems, one
    rule: it had no chip at all, and WebKit sizes an unstyled monospace run off

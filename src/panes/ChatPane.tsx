@@ -33,6 +33,7 @@ import {
   abortControl,
   controlApplyFlagSettings,
   controlInitialize,
+  controlReloadPlugins,
   controlSetModel,
   controlSetPermissionMode,
   resolveControlResponse,
@@ -94,6 +95,7 @@ import {
   type ChatStamp,
 } from "../lib/chatTimes";
 import { parseBackgroundLaunch } from "../lib/outputFollow";
+import { onPluginsChanged } from "../lib/plugins";
 import { OutputFollow } from "./OutputFollow";
 import {
   COMPOSER_DEFAULT,
@@ -2020,6 +2022,22 @@ export const ChatPane = memo(function ChatPane({
   const [menuCursor, setMenuCursor] = useState(0);
   /** Results for an `@` mention, from mangouste's own file index. */
   const [fileMatches, setFileMatches] = useState<string[]>([]);
+
+  // A running `claude` reads plugins at start and again only on request, so a
+  // change made in Settings reaches it through `reload_plugins`. The reply's
+  // commands replace the catalog's, which is what the `/` menu lists.
+  useEffect(() => {
+    if (!alive) return;
+    const unlisten = onPluginsChanged(() => {
+      void controlReloadPlugins(chatId)
+        .then((result) => {
+          logDebug(chatId, "control", `reload_plugins · ${result.commands.length} commands`);
+          setCatalog((current) => current && { ...current, commands: result.commands });
+        })
+        .catch((e: unknown) => logDebug(chatId, "control", `reload_plugins failed: ${String(e)}`));
+    });
+    return () => void unlisten.then((stop) => stop());
+  }, [alive, chatId]);
 
   /** Spawn this pane is currently bound to; events from older spawns are dropped. */
   const instanceRef = useRef<number | null>(null);
