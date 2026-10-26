@@ -28,15 +28,25 @@ interface QuickOpenProps {
  * means "recently worked on with Claude", which is the thing worth reopening.
  */
 export function buildEntries(groups: ProjectGroup[], repos: RepoInfo[]): QuickOpenEntry[] {
-  const entries: QuickOpenEntry[] = groups.map((group) => ({
-    path: group.cwd,
-    label: group.label,
-    live: group.sessions.filter((s) => s.status === "active" || s.status === "awaiting").length,
-    total: group.sessions.length,
-    lastActivityMs: group.sessions[0]?.lastActivityMs ?? 0,
-  }));
+  // Several project dirs can resolve to one cwd (a worktree's session that cd'd
+  // back to the main checkout), and the row is keyed by path: fold them, or
+  // React's duplicate keys leave stale copies behind as the filter changes.
+  const byPath = new Map<string, QuickOpenEntry>();
+  for (const group of groups) {
+    const prev = byPath.get(group.cwd);
+    const live = group.sessions.filter((s) => s.status === "active" || s.status === "awaiting").length;
+    const lastActivityMs = group.sessions[0]?.lastActivityMs ?? 0;
+    byPath.set(group.cwd, {
+      path: group.cwd,
+      label: group.label,
+      live: (prev?.live ?? 0) + live,
+      total: (prev?.total ?? 0) + group.sessions.length,
+      lastActivityMs: Math.max(prev?.lastActivityMs ?? 0, lastActivityMs),
+    });
+  }
+  const entries = [...byPath.values()];
 
-  const seen = new Set(entries.map((e) => e.path));
+  const seen = new Set(byPath.keys());
   const rest = repos
     .filter((repo) => !seen.has(repo.path))
     .map((repo) => ({ path: repo.path, label: repo.name, live: 0, total: 0, lastActivityMs: 0 }))
@@ -55,12 +65,31 @@ function relativeAge(ms: number): string {
 }
 
 /**
- * Type-to-filter repo switcher, in place of a 180-entry dropdown.
+ * Entries matching `query`, best first.
  *
  * Matching is a subsequence test over the repo name, then a substring test over
  * the full path — so "pay" finds `payments-service` and "ws/an" finds
- * `~/workspace/ansible`.
+ * `~/workspace/ansible`. A subsequence is loose ("ans" is in `mangouste`), so a
+ * name holding the query as a run ranks ahead; within a rank, the incoming
+ * recency order holds.
  */
+export function filterEntries(all: QuickOpenEntry[], query: string): QuickOpenEntry[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return all;
+  const rank = (entry: QuickOpenEntry): number => {
+    const label = entry.label.toLowerCase();
+    if (label.includes(needle)) return 0;
+    if (isSubsequence(needle, label)) return 1;
+    if (entry.path.toLowerCase().includes(needle)) return 2;
+    return -1;
+  };
+  return all
+    .map((entry) => ({ entry, rank: rank(entry) }))
+    .filter((ranked) => ranked.rank >= 0)
+    .sort((a, b) => a.rank - b.rank)
+    .map((ranked) => ranked.entry);
+}
+
 /**
  * True when a click or Enter asks for a new window: Ctrl/Cmd or Shift held,
  * the modifiers a browser uses for "open in new window" on a link.
@@ -69,6 +98,7 @@ export function wantsNewWindow(event: { ctrlKey: boolean; metaKey: boolean; shif
   return event.ctrlKey || event.metaKey || event.shiftKey;
 }
 
+/** Type-to-filter repo switcher, in place of a 180-entry dropdown. */
 export function QuickOpen({ groups, repos, onPick, onPickNewWindow, onClose }: QuickOpenProps) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -83,15 +113,7 @@ export function QuickOpen({ groups, repos, onPick, onPickNewWindow, onClose }: Q
 
   // Every match is rendered: the list is the only way to reach a repo, so a cap
   // silently hides the tail of the alphabet behind a scrollbar that looks done.
-  const matches = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return all;
-    return all.filter(
-      (entry) =>
-        isSubsequence(needle, entry.label.toLowerCase()) ||
-        entry.path.toLowerCase().includes(needle),
-    );
-  }, [all, query]);
+  const matches = useMemo(() => filterEntries(all, query), [all, query]);
 
   // Any change to the result set invalidates the highlighted row.
   useEffect(() => setCursor(0), [query]);
@@ -153,7 +175,9 @@ export function QuickOpen({ groups, repos, onPick, onPickNewWindow, onClose }: Q
             >
               {entry.live > 0 && <span className="status-dot" data-status="active" />}
               <span className="qo-label">{entry.label}</span>
-              <span className="qo-path">{entry.path}</span>
+              {/* LRM first: under the `rtl` that puts the ellipsis on the left, the
+                  leading "/" is otherwise laid out at the end. */}
+              <span className="qo-path">{`\u200E${entry.path}`}</span>
               {entry.total > 0 && (
                 <span className="qo-meta">
                   {entry.total} · {relativeAge(entry.lastActivityMs)}
