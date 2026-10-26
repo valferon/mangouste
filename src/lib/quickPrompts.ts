@@ -68,11 +68,19 @@ const isMode = (value: unknown): value is PromptMode =>
   typeof value === "string" && (PROMPT_MODES as readonly string[]).includes(value);
 
 /** Which of the pane's lists a prompt sits in. Also what reordering respects. */
-export type PromptGroup = "here" | "new" | "scheduled";
+export type PromptGroup = "here" | "new" | "scheduled" | "later";
 
 export function groupOf(prompt: QuickPrompt): PromptGroup {
-  if (isTimed(prompt)) return "scheduled";
+  if (prompt.schedule !== null) return "scheduled";
+  if (prompt.at !== null) return "later";
   return prompt.newSession ? "new" : "here";
+}
+
+/** One-offs as a to-do list: soonest first, so the order is the due date's. */
+export function laterByDue(prompts: readonly QuickPrompt[]): QuickPrompt[] {
+  return prompts
+    .filter((prompt) => groupOf(prompt) === "later")
+    .sort((a, b) => Date.parse(a.at!) - Date.parse(b.at!));
 }
 
 /** Runs on its own, from the schedule clock, rather than only on a click. */

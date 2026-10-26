@@ -1021,8 +1021,11 @@ second window does not double every run. A run whose minute passed while the app
 was closed or the machine asleep is skipped, not replayed late. Clicking a
 scheduled prompt runs it now, in front.
 
+A prompt set to run once goes to a To do list under it instead, soonest first:
+the checks for later, as against the ones that recur.
+
 `+` adds one, the pencil edits it, the bin deletes it after asking once, and a
-right-click reorders. The label is optional: a blank one is the prompt's first
+right-click reorders (To do keeps its due-date order). The label is optional: a blank one is the prompt's first
 line. The list is a preference, so every window shares it and an edit in one
 shows up in the others.
 

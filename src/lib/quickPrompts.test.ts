@@ -9,6 +9,7 @@ import {
   exportPrompts,
   fromLocalInput,
   groupOf,
+  laterByDue,
   importPrompts,
   parseImport,
   toLocalInput,
@@ -127,6 +128,14 @@ describe("schedules", () => {
     expect(groupOf(prompt("a", { newSession: true, schedule: "@daily" }))).toBe("scheduled");
     expect(groupOf(prompt("a", { newSession: true }))).toBe("new");
     expect(groupOf(prompt("a"))).toBe("here");
+  });
+
+  it("puts a one-off in the to-do list, soonest first", () => {
+    const late = prompt("late", { newSession: true, at: "2026-11-23T09:30:00Z" });
+    const soon = prompt("soon", { newSession: true, at: "2026-11-10T09:30:00Z" });
+    const daily = prompt("daily", { newSession: true, schedule: "@daily" });
+    expect(groupOf(soon)).toBe("later");
+    expect(laterByDue([late, daily, soon, prompt("b")]).map((p) => p.id)).toEqual(["soon", "late"]);
   });
 });
 

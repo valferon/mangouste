@@ -21,6 +21,7 @@ import {
   exportPrompts,
   fromLocalInput,
   groupOf,
+  laterByDue,
   importedMode,
   importPrompts,
   isTimed,
@@ -573,8 +574,13 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
       label: prompt.submit ? "Paste Only, Don't Send" : "Send on Click",
       run: () => commit(updatePrompt(prompts, prompt.id, { ...prompt, submit: !prompt.submit })),
     },
-    { label: "Move Up", disabled: !canMove(prompt.id, -1), run: () => commit(movePrompt(prompts, prompt.id, -1)) },
-    {
+    // To-do rows sit in due order, so a manual move would change nothing on screen.
+    groupOf(prompt) !== "later" && {
+      label: "Move Up",
+      disabled: !canMove(prompt.id, -1),
+      run: () => commit(movePrompt(prompts, prompt.id, -1)),
+    },
+    groupOf(prompt) !== "later" && {
       label: "Move Down",
       disabled: !canMove(prompt.id, 1),
       run: () => commit(movePrompt(prompts, prompt.id, 1)),
@@ -636,6 +642,7 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
   const here = prompts.filter((prompt) => groupOf(prompt) === "here");
   const fresh = prompts.filter((prompt) => groupOf(prompt) === "new");
   const timed = prompts.filter((prompt) => groupOf(prompt) === "scheduled");
+  const later = laterByDue(prompts);
 
   const renderPrompt = (prompt: QuickPrompt) => {
     if (editing === prompt.id) {
@@ -825,10 +832,19 @@ export function QuickPromptsPane({ onRun, target, projects }: QuickPromptsPanePr
         {timed.length > 0 && (
           <PromptGroup
             title="Scheduled"
-            detail="while mangouste is open"
+            detail="recurring, while mangouste is open"
             detailTitle="Each run opens a new session and sends. Runs missed while the app was closed or asleep are skipped."
           >
             {timed.map(renderPrompt)}
+          </PromptGroup>
+        )}
+        {later.length > 0 && (
+          <PromptGroup
+            title="To do"
+            detail="one-off, soonest first"
+            detailTitle="Each runs once, in a new session, then leaves the list. One that came due while the app was closed runs late."
+          >
+            {later.map(renderPrompt)}
           </PromptGroup>
         )}
       </div>
