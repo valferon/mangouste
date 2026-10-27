@@ -106,6 +106,7 @@ import {
 } from "./lib/sessionControl";
 import { repoLabel } from "./lib/visitedRepos";
 import { claimedByShell, runChord, type Command } from "./lib/commands";
+import type { MatchTarget } from "./lib/findInFile";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
 import {
@@ -650,12 +651,9 @@ function Workbench() {
    * click would do nothing. Deliberately not part of the tab — a tab is
    * persisted, and where you last jumped to is not worth restoring.
    */
-  const [reveal, setReveal] = useState<{
-    path: string;
-    line: number;
-    column: number;
-    nonce: number;
-  } | null>(null);
+  const [reveal, setReveal] = useState<
+    (MatchTarget & { path: string; nonce: number }) | null
+  >(null);
   const revealCounter = useRef(0);
 
   /** Session id of the chat tab currently in front, for the status panel. */
@@ -1697,9 +1695,9 @@ function Workbench() {
   );
   /** Open a file and land on the match the search pane was showing. */
   const openMatch = useCallback(
-    (path: string, line: number, column: number) => {
+    (path: string, target: MatchTarget) => {
       openFileHere(path);
-      setReveal({ path, line, column, nonce: (revealCounter.current += 1) });
+      setReveal({ ...target, path, nonce: (revealCounter.current += 1) });
     },
     [openFileHere],
   );

@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyText } from "../lib/editing";
 import { replaceMatches, revealPath, searchText } from "../lib/ipc";
 import { ClearIcon, FindReplaceIcon, RefreshIcon } from "../lib/icons";
+import type { MatchTarget } from "../lib/findInFile";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir, relativePath } from "../lib/paths";
 import type { FileHit, SearchMatch, SearchOptions, SearchOutcome } from "../lib/types";
@@ -16,8 +17,8 @@ interface SearchPaneProps {
    * be the restored view and the caret belongs to the session's composer.
    */
   focusToken: number;
-  /** Open a file with the caret on the match that was clicked. */
-  onOpenMatch: (path: string, line: number, column: number) => void;
+  /** Open a file with the match that was clicked selected. */
+  onOpenMatch: (path: string, target: MatchTarget) => void;
 }
 
 /** Keystrokes settle before a repo-wide sweep starts. */
@@ -35,6 +36,20 @@ const MIN_AUTO_QUERY = 2;
 
 /** Per-sweep match ceiling asked of Rust, which clamps it again. */
 const MATCH_BUDGET = 1_000;
+
+/**
+ * Where the editor should look for `hit`.
+ *
+ * The matched text rides along only when the snippet kept all of it: a long
+ * match is cut with an ellipsis, and looking for that in the buffer would find
+ * nothing, or worse, something else.
+ */
+const targetOf = (hit: SearchMatch): MatchTarget => ({
+  line: hit.line,
+  column: hit.column,
+  endColumn: hit.endColumn,
+  text: [...hit.matched].length === hit.endColumn - hit.column ? hit.matched : null,
+});
 
 /** Identity of one match inside the current result set. */
 const matchKey = (path: string, hit: SearchMatch): string => `${path}:${hit.start}`;
@@ -322,7 +337,7 @@ export const SearchPane = memo(function SearchPane({
   const fileMenu = useCallback(
     (file: FileHit): MenuEntry[] => [
       { header: file.relative },
-      { label: "Open File", run: () => onOpenMatch(file.path, file.matches[0].line, 1) },
+      { label: "Open File", run: () => onOpenMatch(file.path, { line: file.matches[0].line, column: 1, endColumn: 1, text: null }) },
       {
         label: `Replace in this File (${
           pending.find((entry) => entry.file.path === file.path)?.matches.length ?? 0
@@ -344,7 +359,7 @@ export const SearchPane = memo(function SearchPane({
   const matchMenu = useCallback(
     (file: FileHit, hit: SearchMatch): MenuEntry[] => [
       { header: `${file.relative}:${hit.line}` },
-      { label: "Open", run: () => onOpenMatch(file.path, hit.line, hit.column) },
+      { label: "Open", run: () => onOpenMatch(file.path, targetOf(hit)) },
       {
         label: "Dismiss Match",
         disabled: dismissed.has(matchKey(file.path, hit)),
@@ -595,7 +610,7 @@ export const SearchPane = memo(function SearchPane({
                       className="search-match-row"
                       data-dismissed={gone}
                       title={`${file.relative}:${hit.line}:${hit.column}`}
-                      onClick={() => onOpenMatch(file.path, hit.line, hit.column)}
+                      onClick={() => onOpenMatch(file.path, targetOf(hit))}
                       onContextMenu={(event) =>
                         menu.openContextMenu(event, matchMenu(file, hit))
                       }

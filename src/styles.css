@@ -3815,6 +3815,47 @@ select {
 }
 
 /* Opaque selection would hide the coloured text underneath, so it tints. */
+/* Over the coloured copy, under the textarea: transparent text, so only the
+   marks show, and the colours under them read through. */
+.editor-find {
+  color: transparent;
+}
+
+mark.find-hit {
+  border-radius: 2px;
+  color: transparent;
+  background: color-mix(in srgb, var(--amber) 30%, transparent);
+}
+
+mark.find-hit[data-current="true"] {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  outline: 1px solid var(--accent);
+}
+
+.editor-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.editor-find-bar .search-input {
+  flex: 0 1 280px;
+  min-width: 120px;
+}
+
+.editor-find-bar .count {
+  min-width: 70px;
+}
+
+.editor-find-bar .count[data-error="true"] {
+  color: var(--red);
+}
+
 .editor-input::selection {
   background: color-mix(in srgb, var(--accent) 45%, transparent);
 }

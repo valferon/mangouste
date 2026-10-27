@@ -82,6 +82,9 @@ pub struct SearchMatch {
     pub line: u32,
     /// 1-based character column, for placing the caret when the file opens.
     pub column: u32,
+    /// 1-based character column just past the match, so the editor can select
+    /// the match itself rather than guess at its length from a cut snippet.
+    pub end_column: u32,
     /// Absolute byte offsets in the file. The identity of the match for replace.
     pub start: u64,
     pub end: u64,
@@ -241,6 +244,7 @@ fn matches_in(text: &str, matcher: &Regex, budget: usize) -> (Vec<SearchMatch>, 
             found.push(SearchMatch {
                 line: index as u32 + 1,
                 column: line[..found_match.start()].chars().count() as u32 + 1,
+                end_column: line[..found_match.end()].chars().count() as u32 + 1,
                 start: (offset + found_match.start()) as u64,
                 end: (offset + found_match.end()) as u64,
                 before,
@@ -575,7 +579,7 @@ mod tests {
         assert_eq!(found.files[0].relative, "a.txt");
 
         let first = &found.files[0].matches[0];
-        assert_eq!((first.line, first.column), (1, 7));
+        assert_eq!((first.line, first.column, first.end_column), (1, 7, 11));
         assert_eq!(
             (&*first.before, &*first.matched, &*first.after),
             ("alpha ", "beta", "")

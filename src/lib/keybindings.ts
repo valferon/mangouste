@@ -24,6 +24,7 @@ const BASE_CHORD = {
   newWindow: "Ctrl+Shift+N",
   quickOpen: "Ctrl+P",
   save: "Ctrl+S",
+  find: "Ctrl+F",
   // What every editor this borrows its keymap from formats with, and free of
   // Ctrl on purpose: it needs no macOS spelling of its own.
   format: "Shift+Alt+F",
@@ -202,6 +203,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Editor",
     rows: [
       { keys: CHORD.save, what: "Save the file in front" },
+      { keys: CHORD.find, what: "Find in the file; Enter and Shift+Enter step through matches" },
       { keys: CHORD.format, what: "Reformat the file with the repo's own formatter" },
       { keys: CHORD.indent, what: "Indent two spaces" },
       { keys: CHORD.undo, what: "Undo" },

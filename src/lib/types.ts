@@ -324,6 +324,8 @@ export interface SearchMatch {
   line: number;
   /** 1-based character column, for placing the caret when the file opens. */
   column: number;
+  /** 1-based character column just past the match, on the same line. */
+  endColumn: number;
   start: number;
   end: number;
   before: string;

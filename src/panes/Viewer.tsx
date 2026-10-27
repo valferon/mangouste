@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useDeferredValue,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -26,6 +27,15 @@ import { highlightCode, highlightDiff, languageForPath } from "../lib/highlight"
 import { diffFileHeaderPath, diffHeaderPath, diffLineClass } from "../lib/diff";
 import { clearEditorFacts, factsFor, publishEditorFacts } from "../lib/editorFacts";
 import {
+  asFieldText,
+  findAll,
+  locateMatch,
+  nearestFrom,
+  type FindResult,
+  type MatchTarget,
+  type Span,
+} from "../lib/findInFile";
+import {
   formatText,
   gitBlame,
   gitShow,
@@ -35,6 +45,7 @@ import {
   revealPath,
   writeTextFile,
 } from "../lib/ipc";
+import { matchChord } from "../lib/commands";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
@@ -613,13 +624,13 @@ interface FileViewProps {
    */
   onRegisterFormat?: (path: string, format: (() => Promise<boolean>) | null) => void;
   /**
-   * Where to put the caret, from a search result that was clicked.
+   * The match to select, from a search result that was clicked.
    *
    * `nonce` is the trigger, not the position: two clicks on different matches in
    * the same file can carry the same line, and only something that always
    * changes makes the second one move anything.
    */
-  reveal?: { line: number; column: number; nonce: number };
+  reveal?: MatchTarget & { nonce: number };
   /**
    * Opens a patch in a diff tab, for a commit picked out of the blame column.
    *
@@ -628,6 +639,23 @@ interface FileViewProps {
    */
   onShowDiff?: (title: string, patch: string) => void;
 }
+
+/** What the find layer shows while the box is closed or empty. */
+const NOTHING_FOUND: FindResult = { spans: [], capped: false, error: null };
+
+/** Width of one monospace character in `style`'s font, in px. */
+function measureCharWidth(style: CSSStyleDeclaration): number {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return 0;
+  context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  return context.measureText("0").width;
+}
+
+/** Somewhere typing goes: a field, or a terminal's hidden textarea. */
+const isTextField = (element: HTMLElement): boolean =>
+  element instanceof HTMLInputElement ||
+  element instanceof HTMLTextAreaElement ||
+  element.isContentEditable;
 
 /**
  * What the status line has to say, which is the tail of whatever was last done
@@ -868,19 +896,96 @@ export const FileView = memo(function FileView({
     draftRef.current = draft;
   }, [draft, saved]);
 
+  /** The find layer, scrolled with the others. */
+  const findLayerRef = useRef<HTMLPreElement | null>(null);
+  /**
+   * Mounts already scrolled to where the textarea is. The layer comes and goes
+   * with the matches, and one that appears mid-file from an edit would sit at
+   * the top until the next scroll.
+   */
+  const attachFindLayer = useCallback((layer: HTMLPreElement | null) => {
+    findLayerRef.current = layer;
+    const field = textareaRef.current;
+    if (!layer || !field) return;
+    layer.scrollTop = field.scrollTop;
+    layer.scrollLeft = field.scrollLeft;
+  }, []);
+
+  /**
+   * Put every layer beside the textarea where the textarea is.
+   *
+   * Called from its scroll handler and straight after a programmatic scroll,
+   * which may or may not reach that handler before the next paint.
+   */
+  const syncLayers = useCallback((scrollTop: number, scrollLeft: number) => {
+    if (gutterRef.current) gutterRef.current.scrollTop = scrollTop;
+    if (blameRef.current) blameRef.current.scrollTop = scrollTop;
+    for (const layer of [highlightRef.current, findLayerRef.current]) {
+      if (!layer) continue;
+      layer.scrollTop = scrollTop;
+      layer.scrollLeft = scrollLeft;
+    }
+  }, []);
+
+  /**
+   * Scroll `span` into view.
+   *
+   * `always` puts its line a third down whether or not it was showing, which is
+   * what a jump from the search pane wants: you came from somewhere else and the
+   * lines above are context. Stepping through Ctrl+F matches only scrolls when
+   * the next one is off screen, or the view would lurch on every Enter.
+   */
+  const scrollToSpan = useCallback(
+    (span: Span, always: boolean) => {
+      const field = textareaRef.current;
+      if (!field) return;
+      const text = field.value;
+      const lineStart = text.lastIndexOf("\n", span.start - 1) + 1;
+      let index = 0;
+      for (let i = 0; i < lineStart; i += 1) if (text[i] === "\n") index += 1;
+
+      const style = getComputedStyle(field);
+      // `line-height: 1.5` on a 12px font computes to a px value; `normal` would
+      // not, and a NaN scrollTop silently leaves the view where it was.
+      const lineHeight = Number.parseFloat(style.lineHeight) || 18;
+      const padTop = Number.parseFloat(style.paddingTop) || 0;
+      const padLeft = Number.parseFloat(style.paddingLeft) || 0;
+      const lineTop = padTop + index * lineHeight;
+      let top = field.scrollTop;
+      if (always || lineTop < top || lineTop + lineHeight > top + field.clientHeight) {
+        top = Math.max(0, lineTop - field.clientHeight / 3);
+      }
+
+      // Monospace, so a column is a fixed width. Tabs make this approximate,
+      // which only costs a scroll that lands a little short.
+      const charWidth = measureCharWidth(style) || 7;
+      const x = padLeft + (span.start - lineStart) * charWidth;
+      const xEnd = padLeft + (span.end - lineStart) * charWidth;
+      let left = field.scrollLeft;
+      if (x < left || xEnd > left + field.clientWidth) {
+        left = Math.max(0, x - field.clientWidth / 3);
+      }
+
+      field.scrollTop = top;
+      field.scrollLeft = left;
+      syncLayers(field.scrollTop, field.scrollLeft);
+      // Once more after the engine's own reveal of the new selection, which
+      // WebKit may run at the next layout and without a scroll event we see.
+      requestAnimationFrame(() => syncLayers(field.scrollTop, field.scrollLeft));
+    },
+    [syncLayers],
+  );
+
   /** The `nonce` already acted on, so a save cannot re-trigger an old jump. */
   const revealedRef = useRef(0);
 
   /**
-   * Land the caret on the line a search result named.
+   * Select the match a search result named.
    *
    * Waits on `saved`: a freshly opened tab mounts with an empty buffer and the
    * read is a round trip, so the jump has to happen when the text arrives rather
-   * than when the click did. The line is selected, not just scrolled to — coming
-   * from a list of matches, seeing *which* text matched is the point — and the
-   * gutter and highlight layers are nudged directly because they are scrolled
-   * from the textarea's own handler, which a programmatic scroll may or may not
-   * reach first.
+   * than when the click did. The match itself is selected — coming from a list
+   * of matches, seeing *which* text matched is the point.
    */
   useEffect(() => {
     if (!reveal || saved === null) return;
@@ -889,29 +994,138 @@ export const FileView = memo(function FileView({
     if (!field) return;
     revealedRef.current = reveal.nonce;
 
-    // The draft, not what is on disk: this is where the caret is going, and a
-    // dirty buffer is what the reader is looking at.
-    const lines = draftRef.current.split("\n");
-    const index = Math.min(Math.max(reveal.line, 1), lines.length) - 1;
-    let lineStart = 0;
-    for (let before = 0; before < index; before += 1) lineStart += lines[before].length + 1;
-    const column = Math.min(Math.max(reveal.column, 1) - 1, lines[index].length);
-
+    // The field, not what is on disk: this is where the caret is going, and a
+    // dirty buffer is what the reader is looking at. The sweep read the disk,
+    // so `locateMatch` re-finds the text when the two have drifted apart. Not
+    // the draft either, whose CRLFs the field does not have.
+    const span = locateMatch(field.value, reveal);
     field.focus();
-    field.setSelectionRange(lineStart + column, lineStart + lines[index].length);
+    field.setSelectionRange(span.start, span.end);
+    scrollToSpan(span, true);
+  }, [reveal, saved, scrollToSpan]);
 
-    const style = getComputedStyle(field);
-    // `line-height: 1.5` on a 12px font computes to a px value; `normal` would
-    // not, and a NaN scrollTop silently leaves the view where it was.
-    const lineHeight = Number.parseFloat(style.lineHeight) || 18;
-    const padding = Number.parseFloat(style.paddingTop) || 0;
-    // A third down rather than at the top: a match reads with the lines above it.
-    const top = Math.max(0, padding + index * lineHeight - field.clientHeight / 3);
-    field.scrollTop = top;
-    if (gutterRef.current) gutterRef.current.scrollTop = top;
-    if (highlightRef.current) highlightRef.current.scrollTop = top;
-    if (blameRef.current) blameRef.current.scrollTop = top;
-  }, [reveal, saved]);
+  /* ---------- find in file ---------- */
+
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCase, setFindCase] = useState(false);
+  const [findRegex, setFindRegex] = useState(false);
+  /** Which match is current. Clamped on read: an edit can shrink the list. */
+  const [findIndex, setFindIndex] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Off the deferred draft, like the highlighter, so typing with the box open
+  // does not re-scan the file per keystroke. Searched as the field holds it, so
+  // a match's offsets select the same text there in a CRLF file too.
+  const deferredDraft = useDeferredValue(draft);
+  const findText = useMemo(
+    () => (findOpen ? asFieldText(deferredDraft) : ""),
+    [deferredDraft, findOpen],
+  );
+  const found = useMemo<FindResult>(
+    () =>
+      findOpen
+        ? findAll(findText, findQuery, { caseSensitive: findCase, regex: findRegex })
+        : NOTHING_FOUND,
+    [findText, findOpen, findQuery, findCase, findRegex],
+  );
+  const current = found.spans.length === 0 ? -1 : Math.min(findIndex, found.spans.length - 1);
+
+  /** Make match `index` current: select it in the textarea and bring it into view. */
+  const selectFound = useCallback(
+    (spans: Span[], index: number) => {
+      setFindIndex(index);
+      const field = textareaRef.current;
+      if (!field || index < 0) return;
+      // Selected without focus, so the box keeps the caret. The find layer
+      // paints the current match, since an unfocused selection may not show.
+      field.setSelectionRange(spans[index].start, spans[index].end);
+      scrollToSpan(spans[index], false);
+    },
+    [scrollToSpan],
+  );
+
+  // A new query lands on the first match from the caret, as every editor's find
+  // box does. Keyed on the query and toggles only: an edit to the buffer also
+  // changes `found`, and must not pull the caret away from the edit.
+  useEffect(() => {
+    if (!findOpen) return;
+    const caret = textareaRef.current?.selectionStart ?? 0;
+    selectFound(found.spans, nearestFrom(found.spans, caret));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findOpen, findQuery, findCase, findRegex]);
+
+  const stepFound = useCallback(
+    (delta: 1 | -1) => {
+      const count = found.spans.length;
+      if (count === 0) return;
+      const from = current < 0 ? (delta === 1 ? -1 : 0) : current;
+      selectFound(found.spans, (from + delta + count) % count);
+    },
+    [found.spans, current, selectFound],
+  );
+
+  /** Close the box and hand the caret back, on the current match. */
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    const field = textareaRef.current;
+    if (!field) return;
+    field.focus();
+    if (current >= 0) {
+      field.setSelectionRange(found.spans[current].start, found.spans[current].end);
+    }
+  }, [current, found.spans]);
+
+  // Ctrl+F while this file is in front. Not from another text field: the chat
+  // composer or a terminal beside the editor has its own use for the keys, and
+  // whoever is typing there did not mean this file.
+  useEffect(() => {
+    if (!visible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!matchChord(CHORD.find, event)) return;
+      const active = document.activeElement;
+      const inEditor = active !== null && rootRef.current?.contains(active) === true;
+      if (!inEditor && active instanceof HTMLElement && isTextField(active)) return;
+      event.preventDefault();
+      // A one-line selection is what you meant to look for.
+      const field = textareaRef.current;
+      if (field && field.selectionEnd > field.selectionStart) {
+        const picked = field.value.slice(field.selectionStart, field.selectionEnd);
+        if (!picked.includes("\n")) setFindQuery(picked);
+      }
+      setFindOpen(true);
+      requestAnimationFrame(() => {
+        findInputRef.current?.focus();
+        findInputRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [visible]);
+
+  /*
+   * The find layer's content: the buffer with every match wrapped.
+   *
+   * Its text is transparent and it sits over the coloured copy, so only the
+   * marks show — the same trick the textarea plays over the highlighter.
+   */
+  const findNodes = useMemo(() => {
+    if (!findOpen || found.spans.length === 0) return null;
+    const nodes: ReactNode[] = [];
+    let at = 0;
+    found.spans.forEach((span, index) => {
+      if (span.start > at) nodes.push(findText.slice(at, span.start));
+      nodes.push(
+        <mark key={span.start} className="find-hit" data-current={index === current}>
+          {findText.slice(span.start, span.end)}
+        </mark>,
+      );
+      at = span.end;
+    });
+    nodes.push(findText.slice(at));
+    return nodes;
+  }, [findOpen, found.spans, current, findText]);
 
   // Reload when the window regains focus and nothing local would be lost:
   // claude edits these files, and a stale buffer that only says so at save time
@@ -954,8 +1168,13 @@ export const FileView = memo(function FileView({
     setState((current) => (current.kind === "formatted" ? { kind: "clean" } : current));
   }, []);
 
-  /** Tab indents instead of leaving the field. */
+  /** Tab indents instead of leaving the field; Escape closes an open find box. */
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Escape" && findOpen) {
+      event.preventDefault();
+      setFindOpen(false);
+      return;
+    }
     if (event.key !== "Tab" || event.ctrlKey || event.metaKey || event.altKey) return;
     event.preventDefault();
     const field = event.currentTarget;
@@ -967,7 +1186,7 @@ export const FileView = memo(function FileView({
       field.selectionStart = field.selectionEnd = selectionStart + 2;
       setDraft(field.value);
     }
-  }, []);
+  }, [findOpen]);
 
   /**
    * Right-click in the editor.
@@ -1158,7 +1377,6 @@ export const FileView = memo(function FileView({
   }, [visible, path, reportFacts]);
   // Typing must not wait on the tokeniser: the deferred copy lags behind during
   // a burst of keystrokes and catches up once it stops, so the caret never does.
-  const deferredDraft = useDeferredValue(draft);
   const tokens = useMemo(
     () => highlightCode(deferredDraft, language, EDITOR_HIGHLIGHT_MAX),
     [deferredDraft, language],
@@ -1169,6 +1387,19 @@ export const FileView = memo(function FileView({
     () => Array.from({ length: lineCount }, (_, index) => index + 1).join("\n"),
     [lineCount],
   );
+
+  /*
+   * Re-sync the layers whenever what they hold changes.
+   *
+   * A layer's scrollTop is clamped to its content, and the coloured copy is
+   * built from the deferred draft: on a freshly opened tab it is still empty
+   * when a search jump scrolls, so it pins at the top and stays there, showing
+   * line 1 beside a textarea on line 585. Before paint, so it never shows.
+   */
+  useLayoutEffect(() => {
+    const field = textareaRef.current;
+    if (field) syncLayers(field.scrollTop, field.scrollLeft);
+  }, [tokens, gutter, blameNodes, findNodes, syncLayers]);
 
   // A file the text reader refused is not an error to print — it is a different
   // pane. Everything else it refuses (too large, not a regular file) has no
@@ -1193,7 +1424,11 @@ export const FileView = memo(function FileView({
   else if (dirty) status = <span className="count">Unsaved</span>;
 
   return (
-    <div className="editor" onContextMenu={(event) => menu.openContextMenu(event, editorMenu())}>
+    <div
+      className="editor"
+      ref={rootRef}
+      onContextMenu={(event) => menu.openContextMenu(event, editorMenu())}
+    >
       <div className="editor-bar">
         <span className="editor-path" title={path}>
           {dirty && <span className="editor-dirty">●</span>}
@@ -1258,6 +1493,72 @@ export const FileView = memo(function FileView({
           </button>
         </div>
       )}
+      {findOpen && (
+        <div className="editor-find-bar">
+          <input
+            ref={findInputRef}
+            className="search-input"
+            value={findQuery}
+            placeholder="Find in file"
+            spellCheck={false}
+            onChange={(event) => setFindQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeFind();
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                stepFound(event.shiftKey ? -1 : 1);
+              }
+            }}
+          />
+          <span className="count" data-error={found.error !== null} title={found.error ?? undefined}>
+            {found.error !== null
+              ? "invalid regex"
+              : findQuery === ""
+                ? ""
+                : found.spans.length === 0
+                  ? "no results"
+                  : `${current + 1} of ${found.spans.length}${found.capped ? "+" : ""}`}
+          </span>
+          <button
+            className="toggle-button"
+            data-active={findCase}
+            onClick={() => setFindCase((v) => !v)}
+            title="Match case"
+          >
+            Aa
+          </button>
+          <button
+            className="toggle-button"
+            data-active={findRegex}
+            onClick={() => setFindRegex((v) => !v)}
+            title="Regular expression"
+          >
+            .*
+          </button>
+          <button
+            className="toggle-button"
+            onClick={() => stepFound(-1)}
+            disabled={found.spans.length === 0}
+            title="Previous match (Shift+Enter)"
+          >
+            ↑
+          </button>
+          <button
+            className="toggle-button"
+            onClick={() => stepFound(1)}
+            disabled={found.spans.length === 0}
+            title="Next match (Enter)"
+          >
+            ↓
+          </button>
+          <button className="toggle-button" onClick={closeFind} title="Close (Escape)">
+            ×
+          </button>
+        </div>
+      )}
       <div className="editor-body">
         {/* Left of the line numbers, as `git gui blame` puts it, and its own
             scroller driven from the textarea — the same arrangement the gutter
@@ -1292,6 +1593,12 @@ export const FileView = memo(function FileView({
                 without this the last line drifts out of step with the gutter. */}
             {"\n"}
           </pre>
+          {findNodes !== null && (
+            <pre className="editor-highlight editor-find" aria-hidden ref={attachFindLayer}>
+              {findNodes}
+              {"\n"}
+            </pre>
+          )}
           <textarea
             ref={textareaRef}
             className="editor-input selectable"
@@ -1309,18 +1616,9 @@ export const FileView = memo(function FileView({
             // The gutter and the highlight layer are separate scrollers driven
             // from here; neither has a scrollbar of its own and neither can
             // drift out of step with the text it sits beside.
-            onScroll={(event) => {
-              const { scrollTop, scrollLeft } = event.currentTarget;
-              const gutterElement = gutterRef.current;
-              if (gutterElement) gutterElement.scrollTop = scrollTop;
-              const blameElement = blameRef.current;
-              if (blameElement) blameElement.scrollTop = scrollTop;
-              const highlightElement = highlightRef.current;
-              if (highlightElement) {
-                highlightElement.scrollTop = scrollTop;
-                highlightElement.scrollLeft = scrollLeft;
-              }
-            }}
+            onScroll={(event) =>
+              syncLayers(event.currentTarget.scrollTop, event.currentTarget.scrollLeft)
+            }
           />
         </div>
       </div>
