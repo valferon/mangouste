@@ -15,8 +15,9 @@
  * saved no space worth having and made the rail harder to read, so it went; a
  * stored `quiet` reads back as the default.
  *
- * Only `verbose` changes how `claude` is spawned; `normal` is a decision about
- * frames already on the wire and applies the instant you pick it.
+ * Neither level changes how `claude` is spawned: subagent text is always
+ * forwarded and `normal` just leaves it out, so a switch applies the instant you
+ * pick it and never costs a restart.
  */
 export type FeedbackLevel = "normal" | "verbose";
 
@@ -41,28 +42,23 @@ export const opensTools = (level: FeedbackLevel): boolean => level === "verbose"
 export const tailsActivity = (level: FeedbackLevel): boolean => level === "verbose";
 
 /**
- * Ask the CLI to forward what subagents say, and render it.
+ * Render what subagents say.
  *
  * A fan-out is precisely when the parent transcript goes quiet for minutes at a
- * time, so this is the level's largest single gain — and its only cost, since
- * every subagent's text and thinking now crosses the pipe.
+ * time, so this is the level's largest single gain.
  */
 export const showsSubagents = (level: FeedbackLevel): boolean => level === "verbose";
 
 /**
- * Extra `claude` args this level needs.
+ * Extra `claude` args every spawn carries, whatever the level.
  *
  * `--forward-subagent-text` is documented as working only with `--print` and
  * `--output-format stream-json`, which is exactly how `build_args` spawns.
  *
- * Compared rather than just applied: these take effect at spawn, so the switch
- * uses this to tell a level that is live from one that is waiting on a restart.
+ * Always on rather than per level: there is no control request to start
+ * forwarding on a live process, so tying it to `verbose` made every switch a
+ * respawn that interrupted the running turn. The price is that every subagent's
+ * text and thinking crosses the pipe even at `normal`, where the pane drops it;
+ * the gain is that flipping to `verbose` mid fan-out shows what was already said.
  */
-export function feedbackArgs(level: FeedbackLevel): string[] {
-  return showsSubagents(level) ? ["--forward-subagent-text"] : [];
-}
-
-/** Whether moving between two levels needs a respawn to take effect. */
-export function feedbackNeedsRestart(from: FeedbackLevel, to: FeedbackLevel): boolean {
-  return feedbackArgs(from).join(" ") !== feedbackArgs(to).join(" ");
-}
+export const FEEDBACK_ARGS: readonly string[] = ["--forward-subagent-text"];

@@ -75,8 +75,7 @@ import {
 import { cliDebugEnabled, logDebug } from "../lib/debugLog";
 import {
   FEEDBACK_LEVELS,
-  feedbackArgs,
-  feedbackNeedsRestart,
+  FEEDBACK_ARGS,
   opensTools,
   showsSubagents,
   tailsActivity,
@@ -1948,16 +1947,11 @@ export const ChatPane = memo(function ChatPane({
   const modelAliasRef = useRef(defaultModelAlias);
   const [spawnedModelAlias, setSpawnedModelAlias] = useState(defaultModelAlias);
   /**
-   * Chosen feedback level, and the one the live process was spawned with.
-   *
-   * Both, because the level is two things at once. Folding, labelling and
-   * expanding are decisions about frames already received and apply on the
-   * click; asking the CLI to forward what subagents say is a spawn flag, and
-   * `feedbackNeedsRestart` is what stops the strip from claiming otherwise.
+   * Chosen feedback level. Only one, unlike model and effort: every part of a
+   * level is a decision about frames already received, since subagent text is
+   * forwarded at every level (`FEEDBACK_ARGS`), so nothing waits on a spawn.
    */
   const [level, setLevel] = useState<FeedbackLevel>(defaultFeedback);
-  const levelRef = useRef(defaultFeedback);
-  const [spawnedLevel, setSpawnedLevel] = useState<FeedbackLevel>(defaultFeedback);
   /** Chosen thinking effort, and the one the live process runs at. */
   const [effort, setEffort] = useState<EffortLevel>(defaultEffort);
   const effortRef = useRef(defaultEffort);
@@ -2138,9 +2132,7 @@ export const ChatPane = memo(function ChatPane({
     modelAliasRef.current = defaultModelAlias;
     setModelAlias(defaultModelAlias);
     setSpawnedModelAlias(defaultModelAlias);
-    levelRef.current = defaultFeedback;
     setLevel(defaultFeedback);
-    setSpawnedLevel(defaultFeedback);
     effortRef.current = defaultEffort;
     launchedEffortRef.current = defaultEffort;
     setEffort(defaultEffort);
@@ -2367,8 +2359,6 @@ export const ChatPane = memo(function ChatPane({
     noticedModeRef.current = spawnMode;
     const spawnModelAlias = modelAliasRef.current;
     setSpawnedModelAlias(spawnModelAlias);
-    const spawnLevel = levelRef.current;
-    setSpawnedLevel(spawnLevel);
     const spawnEffort = effortRef.current;
     launchedEffortRef.current = spawnEffort;
     setSpawnedEffort(spawnEffort);
@@ -2378,9 +2368,8 @@ export const ChatPane = memo(function ChatPane({
       resume: resumeTarget,
       permissionMode: spawnMode,
       model: spawnModelAlias === MODEL_DEFAULT ? null : spawnModelAlias,
-      // The only part of a feedback level the CLI has to know about.
       extraArgs: [
-        ...feedbackArgs(spawnLevel),
+        ...FEEDBACK_ARGS,
         ...effortArgs(spawnEffort),
         ...(resumeTarget && forkRef.current ? ["--fork-session"] : []),
       ],
@@ -3453,27 +3442,16 @@ export const ChatPane = memo(function ChatPane({
   );
 
   /**
-   * Arm a feedback level.
-   *
-   * No control-channel counterpart to the model and permission pickers: there is
-   * no request for "start forwarding subagent text", so the spawn-flag half of a
-   * level genuinely waits for a restart and the strip says so.
+   * Pick a feedback level. Live at once: the process already forwards subagent
+   * text, so the level only changes what this pane renders.
    */
   const pickFeedback = useCallback(
     (next: FeedbackLevel) => {
-      levelRef.current = next;
       setLevel(next);
       onFeedback(next);
-      // Everything but subagent forwarding is a rendering choice this pane makes
-      // on frames it already has, so most of a level change is live at once;
-      // only the flag half takes a respawn, and that one happens now.
-      if (feedbackNeedsRestart(spawnedLevel, next) && alive) {
-        void restartToApply(`verbosity ${next}`);
-        return;
-      }
       emitNotice(`verbosity: ${next}.`);
     },
-    [alive, emitNotice, onFeedback, spawnedLevel, restartToApply],
+    [emitNotice, onFeedback],
   );
 
   /**
@@ -3909,15 +3887,7 @@ export const ChatPane = memo(function ChatPane({
               </button>
             ))}
           </div>
-          <div
-            className="mode-switch"
-            data-pending={feedbackNeedsRestart(spawnedLevel, level)}
-            title={
-              feedbackNeedsRestart(spawnedLevel, level)
-                ? `Pending — running as "${spawnedLevel}". Restart to apply subagent forwarding; everything else is already applied.`
-                : "How much of a turn this pane narrates"
-            }
-          >
+          <div className="mode-switch" title="How much of a turn this pane narrates">
             {FEEDBACK_LEVELS.map((option) => (
               <button
                 key={option}
