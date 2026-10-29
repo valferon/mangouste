@@ -12,6 +12,7 @@ import type {
   PluginRun,
   PluginScope,
 } from "./plugins";
+import type { ProbeProcess } from "./processTree";
 import type {
   Blame,
   BranchList,
@@ -287,8 +288,11 @@ export interface ToolActivityEvent {
   command: string | null;
   /** The file that output is going to, for `toolOutputTail`. */
   output: string | null;
-  /** Every process the turn started that is still running, newest first. */
-  processes?: string[];
+  /**
+   * Every process the turn started that is still running, newest first. Past
+   * the cap the oldest are kept, as the roots of the pane's tree.
+   */
+  processes?: ProbeProcess[];
 }
 
 /** The end of a command's output file, as the follow view polls it. */

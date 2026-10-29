@@ -12,6 +12,8 @@ interface OutputFollowProps {
   path: string;
   /** Header label; the file name when absent. */
   label?: string | null;
+  /** Shown while the file is still empty, in place of "(no output yet)". */
+  emptyText?: string | null;
   onClose?: () => void;
 }
 
@@ -23,7 +25,7 @@ interface OutputFollowProps {
  * Stays pinned to the end while you are at the end, and stops moving the
  * moment you scroll up to read something.
  */
-export function OutputFollow({ path, label, onClose }: OutputFollowProps) {
+export function OutputFollow({ path, label, emptyText, onClose }: OutputFollowProps) {
   const [tail, setTail] = useState<OutputTail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -93,7 +95,7 @@ export function OutputFollow({ path, label, onClose }: OutputFollowProps) {
           pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < PIN_SLACK;
         }}
       >
-        {error ?? (tail === null ? "…" : tail.text || "(no output yet)")}
+        {error ?? (tail === null ? "…" : tail.text || emptyText || "(no output yet)")}
       </pre>
     </div>
   );

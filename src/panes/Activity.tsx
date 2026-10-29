@@ -1,4 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  bufferingFilter,
+  formatElapsed,
+  processRows,
+  type ProbeProcess,
+} from "../lib/processTree";
 import { OutputFollow } from "./OutputFollow";
 
 /**
@@ -38,11 +44,11 @@ interface ActivityProps {
   /** Second line: the process actually executing right now, from the probe. */
   sub?: string | null;
   /**
-   * At `verbose`: everything running, newest first, in place of `sub`. A call
-   * that pipes through `grep` or captures with `$(...)` writes nothing to its
-   * output file until it ends, so these lines are its only live sign.
+   * At `verbose`: everything running, drawn as a tree in place of `sub`. A
+   * call that pipes through `grep` or captures with `$(...)` writes nothing to
+   * its output file until it ends, so these lines are its only live sign.
    */
-  processes?: string[] | null;
+  processes?: ProbeProcess[] | null;
   /** At `verbose`: the running call's output file, followed live. */
   output?: string | null;
 }
@@ -64,8 +70,12 @@ export function Activity({ detail, startedAt, sub, processes, output }: Activity
     };
   }, []);
 
+  const rows = useMemo(() => (processes ? processRows(processes) : []), [processes]);
+  const filter = useMemo(() => (processes ? bufferingFilter(processes) : null), [processes]);
+
   // Derived from the spinner's own re-render, so no second timer is needed.
-  const seconds = startedAt != null ? Math.floor((Date.now() - startedAt) / 1000) : null;
+  const now = Date.now();
+  const seconds = startedAt != null ? Math.floor((now - startedAt) / 1000) : null;
 
   return (
     <div className="activity" aria-live="polite">
@@ -76,16 +86,31 @@ export function Activity({ detail, startedAt, sub, processes, output }: Activity
         <span className="activity-elapsed">{seconds}s</span>
       )}
       <span className="activity-hint">esc to interrupt</span>
-      {processes && processes.length > 0
-        ? processes.map((line, index) => (
-            <span className="activity-sub" key={`${index}:${line}`} title={line}>
-              {index === processes.length - 1 ? "└" : "├"} {line}
-            </span>
-          ))
-        : sub && <span className="activity-sub">└ {sub}</span>}
+      {rows.length > 0 ? (
+        <div className="activity-procs">
+          {rows.map((row, index) => (
+            <div className="activity-proc" key={`${index}:${row.command}`} title={row.full}>
+              <span className="activity-proc-tree">{row.prefix}</span>
+              <span className="activity-proc-cmd">{row.command}</span>
+              {row.count > 1 && <span className="activity-proc-count">×{row.count}</span>}
+              <span className="activity-proc-age">{formatElapsed(now - row.startedMs)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        sub && <span className="activity-sub">└ {sub}</span>
+      )}
       {output && (
         <div className="activity-output">
-          <OutputFollow path={output} label="running" />
+          <OutputFollow
+            path={output}
+            label="running"
+            emptyText={
+              filter
+                ? `(no output yet; ${filter} is running, and output piped through it often arrives only when the command ends)`
+                : null
+            }
+          />
         </div>
       )}
     </div>

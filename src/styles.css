@@ -5546,6 +5546,56 @@ mark.find-hit[data-current="true"] {
   max-height: 16em;
 }
 
+/* At `verbose`, every process the turn has running, as a tree: command on
+   the left, cut with an ellipsis, then the fold count and how long it has run,
+   which never get cut. */
+.activity-procs {
+  flex-basis: 100%;
+  min-width: 0;
+  padding-left: 3ch;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.activity-proc {
+  display: flex;
+  gap: 1ch;
+  min-width: 0;
+  opacity: 0.75;
+}
+
+.activity-proc:hover {
+  opacity: 1;
+}
+
+.activity-proc-tree {
+  flex: none;
+  white-space: pre;
+  margin-right: -1ch;
+  opacity: 0.6;
+}
+
+.activity-proc-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-proc-count {
+  flex: none;
+  color: var(--orange);
+}
+
+.activity-proc-age {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  min-width: 4ch;
+  text-align: right;
+}
+
 /* The probe's "what is actually executing" line, wrapped under the spinner row. */
 .activity-sub {
   flex-basis: 100%;

@@ -903,12 +903,16 @@ mod expand_tests {
 
 struct GroupProc {
     pid: u32,
+    ppid: u32,
     pgrp: u32,
     /// Ordering key only: higher means more recently started. On Linux this is
     /// the kernel start time in ticks since boot; elsewhere it is derived from
     /// elapsed time, so the values are comparable within a scan but not across
     /// platforms and not meaningful on their own.
     rank: u64,
+    /// Wall-clock start, epoch milliseconds, for "running for 6m" in the UI.
+    /// Whole-second precision: Linux's boot time and `ps`'s etime are both.
+    started_ms: u64,
     zombie: bool,
 }
 
@@ -918,6 +922,7 @@ struct ProcRow {
     ppid: u32,
     pgrp: u32,
     rank: u64,
+    started_ms: u64,
     zombie: bool,
 }
 
@@ -989,8 +994,10 @@ fn under_root(root: u32, rows: Vec<ProcRow>) -> Vec<GroupProc> {
         .filter(|row| row.pid != root && (row.pgrp == root || below.contains(&row.pid)))
         .map(|row| GroupProc {
             pid: row.pid,
+            ppid: row.ppid,
             pgrp: row.pgrp,
             rank: row.rank,
+            started_ms: row.started_ms,
             zombie: row.zombie,
         })
         .collect()
@@ -1001,6 +1008,19 @@ fn process_table() -> Vec<ProcRow> {
     let mut rows = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return rows;
+    };
+    // starttime is in clock ticks since boot; `btime` anchors boot to the epoch.
+    let boot_secs = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|stat| {
+            stat.lines()
+                .find_map(|line| line.strip_prefix("btime "))
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    let ticks = match unsafe { libc::sysconf(libc::_SC_CLK_TCK) } {
+        n if n > 0 => n as u64,
+        _ => 100,
     };
     for entry in entries.flatten() {
         let Some(pid) = entry
@@ -1022,11 +1042,13 @@ fn process_table() -> Vec<ProcRow> {
         if fields.len() < 20 {
             continue;
         }
+        let start_ticks: u64 = fields[19].parse().unwrap_or(0);
         rows.push(ProcRow {
             pid,
             ppid: fields[1].parse().unwrap_or(0),
             pgrp: fields[2].parse().unwrap_or(0),
-            rank: fields[19].parse().unwrap_or(0),
+            rank: start_ticks,
+            started_ms: boot_secs * 1000 + start_ticks * 1000 / ticks,
             zombie: fields[0] == "Z",
         });
     }
@@ -1044,6 +1066,10 @@ fn process_table() -> Vec<ProcRow> {
     else {
         return rows;
     };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 5 {
@@ -1052,13 +1078,15 @@ fn process_table() -> Vec<ProcRow> {
         let Ok(pid) = fields[0].parse::<u32>() else {
             continue;
         };
+        let elapsed = parse_etime(fields[4]);
         rows.push(ProcRow {
             pid,
             ppid: fields[1].parse().unwrap_or(0),
             pgrp: fields[2].parse().unwrap_or(0),
             // `ps` offers elapsed time, not a boot-relative start, so invert it
             // to keep the Linux ordering: larger rank means started later.
-            rank: u64::MAX - parse_etime(fields[4]),
+            rank: u64::MAX - elapsed,
+            started_ms: now_secs.saturating_sub(elapsed) * 1000,
             // macOS decorates state with flags like `Z+`, so match the prefix.
             zombie: fields[3].starts_with('Z'),
         });
@@ -1082,27 +1110,52 @@ fn parse_etime(raw: &str) -> u64 {
     days * 86_400 + seconds
 }
 
-/// Process lines the probe sends per tick. An `xargs -P 16` fan-out fits.
-const MAX_ACTIVITY_PROCESSES: usize = 24;
+/// Process lines the probe sends per tick. Generous, because the pane folds
+/// identical siblings: an ansible run with 16 forks and their `ssh` children
+/// is 33 processes but a handful of lines.
+const MAX_ACTIVITY_PROCESSES: usize = 64;
 
-/// One display line for a pid, from its argv. None for anything already gone,
-/// for empty cmdlines, and for our own permission-prompt server — which is a
-/// group member for the whole session but never what the user is waiting on.
-#[cfg(target_os = "linux")]
-fn command_line_of(pid: u32) -> Option<String> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let joined = raw
-        .split(|b| *b == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
-    shape_command(&joined)
+/// One running process, as the activity pane draws it into a tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityProcess {
+    pid: u32,
+    ppid: u32,
+    started_ms: u64,
+    /// Shaped for a glance: see `shape_argv`.
+    command: String,
+    /// The whole command line, for the hover title.
+    full: String,
 }
 
-/// Same line from `ps`, which already joins argv with spaces.
+fn activity_process(proc: &GroupProc) -> Option<ActivityProcess> {
+    let argv = argv_of(proc.pid)?;
+    let command = shape_argv(&argv)?;
+    Some(ActivityProcess {
+        pid: proc.pid,
+        ppid: proc.ppid,
+        started_ms: proc.started_ms,
+        command,
+        full: cap_end(&flatten(&argv.join(" ")), MAX_FULL_CHARS),
+    })
+}
+
+/// A pid's argv. None for anything already gone.
+#[cfg(target_os = "linux")]
+fn argv_of(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect(),
+    )
+}
+
+/// Same from `ps`, which has already joined argv with spaces: splitting on
+/// whitespace again is approximate, but only quoting is lost.
 #[cfg(not(target_os = "linux"))]
-fn command_line_of(pid: u32) -> Option<String> {
+fn argv_of(pid: u32) -> Option<Vec<String>> {
     // `-ww`: BSD `ps` truncates each line to the terminal width, and with no
     // terminal it truncates to 80 columns — which is well inside the length of
     // the `node .../claude ...` lines this exists to show.
@@ -1110,21 +1163,138 @@ fn command_line_of(pid: u32) -> Option<String> {
         .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    shape_command(&String::from_utf8_lossy(&output.stdout))
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
-/// Collapse whitespace, drop what should never be shown, and cap the length.
-fn shape_command(raw: &str) -> Option<String> {
-    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.is_empty() || flat.contains("--permission-server") {
+/// Only `/proc` keeps argv's word boundaries. Re-split from `ps`, a quoted
+/// `-o "ProxyCommand=ssh -W %h:%p bastion"` is several words, and dropping
+/// options by word would eat the wrong ones.
+const ARGV_IS_EXACT: bool = cfg!(target_os = "linux");
+
+const MAX_COMMAND_CHARS: usize = 200;
+const MAX_FULL_CHARS: usize = 2000;
+
+/// Interpreters whose script is the interesting name: `python3
+/// /usr/bin/ansible-playbook -i ...` reads as `ansible-playbook -i ...`.
+fn is_interpreter(name: &str) -> bool {
+    let bare = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    matches!(
+        bare,
+        "python" | "node" | "perl" | "ruby" | "bash" | "sh" | "zsh" | "dash"
+    )
+}
+
+/// The options of the ssh family that consume the next word, per tool.
+fn ssh_options_with_value(tool: &str) -> Option<&'static str> {
+    match tool {
+        "ssh" => Some("BbcDEeFIiJLlmOoPpQRSWw"),
+        "scp" => Some("cDFiJloPSX"),
+        "sftp" => Some("BbcDFiJloPRSsX"),
+        _ => None,
+    }
+}
+
+/// `ssh -C -o A=1 -o B=2 ... host cmd` as `ssh host cmd`: ansible's option
+/// soup fills the line before the host it is talking to ever shows.
+fn drop_ssh_options(args: &[String], with_value: &str) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if !kept.is_empty() || !arg.starts_with('-') || arg.len() < 2 {
+            kept.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            kept.extend(iter.by_ref().cloned());
+            break;
+        }
+        // Flags cluster (`-tt`, `-Ci`); the first that takes a value ends the
+        // cluster, with the value attached (`-oX=1`) or as the next word.
+        for (index, flag) in arg.char_indices().skip(1) {
+            if with_value.contains(flag) {
+                if index + flag.len_utf8() == arg.len() {
+                    iter.next();
+                }
+                break;
+            }
+        }
+    }
+    kept
+}
+
+fn base_name(word: &str) -> &str {
+    // `ssh: /home/u/.ansible/cp/abc [mux]` is a retitled argv, not a path.
+    if word.contains(char::is_whitespace) {
+        return word;
+    }
+    word.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(word)
+}
+
+/// Shape argv for one line in the activity pane: program names without their
+/// directory, an interpreter folded into its script, ssh-family options
+/// dropped, whitespace collapsed, and the middle cut if it is still long, so
+/// both the program and its last arguments show. None for empty argv and for
+/// our own permission-prompt server, which is a group member for the whole
+/// session but never what the user is waiting on.
+fn shape_argv(argv: &[String]) -> Option<String> {
+    let (first, rest) = argv.split_first()?;
+    if argv.iter().any(|arg| arg.contains("--permission-server")) {
         return None;
     }
-    const MAX_CHARS: usize = 160;
-    if flat.chars().count() > MAX_CHARS {
-        let cut: String = flat.chars().take(MAX_CHARS).collect();
-        return Some(format!("{cut}…"));
+    let (program, args) = match rest.split_first() {
+        Some((script, args)) if is_interpreter(base_name(first)) && !script.starts_with('-') => {
+            (base_name(script), args)
+        }
+        _ => (base_name(first), rest),
+    };
+    let args = match ssh_options_with_value(program) {
+        Some(with_value) if ARGV_IS_EXACT => drop_ssh_options(args, with_value),
+        _ => args.to_vec(),
+    };
+    let line = flatten(
+        &std::iter::once(program.to_string())
+            .chain(args)
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    if line.is_empty() {
+        return None;
     }
-    Some(flat)
+    Some(cap_middle(&line, MAX_COMMAND_CHARS))
+}
+
+fn flatten(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn cap_end(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{cut}…")
+}
+
+/// Keep the head and the tail: a host or a path at the end is often the part
+/// that tells two otherwise identical lines apart.
+fn cap_middle(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let tail_len = max / 3;
+    let head_len = max - tail_len - 1;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text.chars().skip(count - tail_len).collect();
+    format!("{head}…{tail}")
 }
 
 /// Client tags handed to the CLI as `CLAUDE_CODE_ENTRYPOINT`.
@@ -1619,7 +1789,8 @@ pub fn start(
         let running = Arc::clone(&running);
         let baseline = Arc::clone(&baseline);
         std::thread::spawn(move || {
-            let mut last: (Option<String>, Option<String>, Vec<String>) = (None, None, Vec::new());
+            let mut last: (Option<String>, Option<String>, Vec<ActivityProcess>) =
+                (None, None, Vec::new());
             while alive.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 if !running.load(Ordering::SeqCst) {
@@ -1651,12 +1822,14 @@ pub fn start(
                 // Everything running, newest first, for the pane that shows it
                 // all: a `$(...)` or `| grep` keeps the output file empty until
                 // the pipeline ends, and then the processes are the only news.
-                let processes: Vec<String> = fresh
-                    .iter()
-                    .filter_map(|p| command_line_of(p.pid))
-                    .take(MAX_ACTIVITY_PROCESSES)
-                    .collect();
-                let command = processes.first().cloned();
+                let mut processes: Vec<ActivityProcess> =
+                    fresh.iter().filter_map(|p| activity_process(p)).collect();
+                let command = processes.first().map(|p| p.command.clone());
+                // Past the cap, keep the oldest: they are the roots the pane's
+                // tree hangs from, and the newest are leaves, usually copies of
+                // each other that the pane folds anyway.
+                let excess = processes.len().saturating_sub(MAX_ACTIVITY_PROCESSES);
+                processes.drain(..excess);
                 // Newest first, like the command: in `cmd > log | ...` the
                 // innermost writer is the one whose output is worth following.
                 let output = command.as_ref().and_then(|_| {
@@ -1829,8 +2002,10 @@ mod tests {
     fn tree_signals_reach_setsid_shells_but_no_foreign_group() {
         let proc = |pid, pgrp| GroupProc {
             pid,
+            ppid: 0,
             pgrp,
             rank: 0,
+            started_ms: 0,
             zombie: false,
         };
         let procs = vec![
@@ -1890,6 +2065,7 @@ mod tests {
             ppid,
             pgrp,
             rank: pid as u64,
+            started_ms: 0,
             zombie: false,
         };
         let rows = vec![
@@ -1905,18 +2081,69 @@ mod tests {
         assert_eq!(pids, vec![101, 200, 201, 400]);
     }
 
+    fn argv(line: &str) -> Vec<String> {
+        line.split(' ').map(str::to_string).collect()
+    }
+
     #[test]
-    fn shape_command_collapses_and_caps() {
+    fn shape_argv_collapses_and_caps_in_the_middle() {
         assert_eq!(
-            shape_command("  git   status  ").as_deref(),
+            shape_argv(&argv("/usr/bin/git  status")).as_deref(),
             Some("git status")
         );
-        assert_eq!(shape_command("   "), None);
-        assert_eq!(shape_command("claude --permission-server /tmp/s"), None);
-        let long = "x".repeat(200);
-        let shaped = shape_command(&long).expect("shaped");
-        assert_eq!(shaped.chars().count(), 161);
-        assert!(shaped.ends_with('…'));
+        assert_eq!(shape_argv(&[]), None);
+        assert_eq!(shape_argv(&argv("claude --permission-server /tmp/s")), None);
+        let long = format!("{} tail-host", "x".repeat(300));
+        let shaped = shape_argv(&argv(&long)).expect("shaped");
+        assert_eq!(shaped.chars().count(), MAX_COMMAND_CHARS);
+        assert!(shaped.starts_with("xxx"));
+        assert!(shaped.ends_with(" tail-host"));
+        assert!(shaped.contains('…'));
+    }
+
+    #[test]
+    fn shape_argv_folds_an_interpreter_into_its_script() {
+        assert_eq!(
+            shape_argv(&argv(
+                "/usr/bin/python3 /usr/bin/ansible-playbook -i inv.yaml"
+            ))
+            .as_deref(),
+            Some("ansible-playbook -i inv.yaml")
+        );
+        assert_eq!(
+            shape_argv(&argv("bash /tmp/s/rollout.sh rs-prod")).as_deref(),
+            Some("rollout.sh rs-prod")
+        );
+        assert_eq!(
+            shape_argv(&argv("/bin/bash -c true")).as_deref(),
+            Some("bash -c true")
+        );
+        assert_eq!(
+            shape_argv(&argv("python3.11 -m http.server")).as_deref(),
+            Some("python3.11 -m http.server")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn shape_argv_drops_ssh_options_so_the_host_shows() {
+        assert_eq!(
+            shape_argv(&argv(
+                "ssh -C -o ControlMaster=auto -o ControlPersist=60s -i key -oUser=ubuntu -tt 10.0.0.1 /bin/sh -c 'x -o y'"
+            ))
+            .as_deref(),
+            Some("ssh 10.0.0.1 /bin/sh -c 'x -o y'")
+        );
+        assert_eq!(
+            shape_argv(&argv("sftp -b - -C -o A=1 [10.0.0.2]")).as_deref(),
+            Some("sftp [10.0.0.2]")
+        );
+        // A retitled ControlMaster keeps its title whole.
+        let mux = vec!["ssh: /home/u/.ansible/cp/abc [mux]".to_string()];
+        assert_eq!(
+            shape_argv(&mux).as_deref(),
+            Some("ssh: /home/u/.ansible/cp/abc [mux]")
+        );
     }
 
     #[test]

@@ -94,6 +94,7 @@ import {
   type ChatStamp,
 } from "../lib/chatTimes";
 import { parseBackgroundLaunch } from "../lib/outputFollow";
+import type { ProbeProcess } from "../lib/processTree";
 import { onPluginsChanged } from "../lib/plugins";
 import { OutputFollow } from "./OutputFollow";
 import {
@@ -1978,7 +1979,7 @@ export const ChatPane = memo(function ChatPane({
   /** The file that process is writing its output to, when it is a file. */
   const [toolOutput, setToolOutput] = useState<string | null>(null);
   /** Every process the probe sees running for this turn, newest first. */
-  const [toolProcesses, setToolProcesses] = useState<string[]>([]);
+  const [toolProcesses, setToolProcesses] = useState<ProbeProcess[]>([]);
   /** Last command the probe reported, so only its transitions are logged. */
   const probeCommandRef = useRef<string | null>(null);
   /** Accumulates input_json_delta while the model types a tool call. */
@@ -2907,7 +2908,11 @@ export const ChatPane = memo(function ChatPane({
           // Tail-only changes arrive every second; logging them would bury the
           // probe's real transitions.
           if (probeCommandRef.current !== event.command) {
-            logDebug(chatId, "probe", event.command ?? "(tool finished)", event);
+            // Commands only: `full` is whole argv, which can carry a token.
+            logDebug(chatId, "probe", event.command ?? "(tool finished)", {
+              ...event,
+              processes: event.processes?.map((p) => p.command),
+            });
           }
           probeCommandRef.current = event.command;
           setToolActivity(event.command);
