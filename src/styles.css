@@ -3992,6 +3992,13 @@ mark.find-hit[data-current="true"] {
   color: var(--fg-bright);
 }
 
+/* Many themes paint --bg and --bg-elevated identically or one step apart, so
+   the fill alone does not say which tab is active. An accent bar along the top
+   does, and keeps it apart from the view row's underline. */
+.tab[data-active="true"]:not([data-drop]) {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
 /* Reordering: the dragged tab fades, and the tab under the pointer grows the
    edge the drop will land on. */
 .tab[data-dragging="true"] {
