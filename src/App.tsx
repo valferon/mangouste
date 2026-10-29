@@ -2796,6 +2796,14 @@ function Workbench() {
         run: toggleTerminal,
       },
       {
+        // Keyboard only: no menu names it, so the menus keep printing Ctrl+`.
+        id: ID.toggleTerminalAlt,
+        label: "Terminal Panel",
+        chord: CHORD.toggleTerminalAlt,
+        shellFirst: true,
+        run: toggleTerminal,
+      },
+      {
         id: ID.debugLog,
         label: "Session Debug Log",
         checked: debugOpen,

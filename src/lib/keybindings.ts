@@ -47,6 +47,9 @@ const BASE_CHORD = {
   dashboard: "Ctrl+Shift+D",
   toggleSidebar: "Ctrl+B",
   toggleTerminal: "Ctrl+`",
+  // The same toggle, nearer the home row. Stands down inside a terminal, where
+  // readline transposes with it and fzf opens its file picker.
+  toggleTerminalAlt: "Ctrl+T",
   zoomIn: "Ctrl+=",
   zoomOut: "Ctrl+-",
   zoomReset: "Ctrl+0",
@@ -214,6 +217,13 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Terminal",
     rows: [
       { keys: CHORD.toggleTerminal, what: "Show or hide the panel" },
+      {
+        keys: CHORD.toggleTerminalAlt,
+        // Cmd+T reaches no shell, so on macOS it toggles from anywhere.
+        what: isMac()
+          ? "Show or hide the panel"
+          : "Show or hide the panel; inside a terminal the shell keeps it",
+      },
       { keys: CHORD.newTerminal, what: "New terminal tab" },
       { keys: CHORD.splitTerminal, what: "Split the terminal pane right" },
       { keys: CHORD.splitTerminalDown, what: "Split the terminal pane down" },
