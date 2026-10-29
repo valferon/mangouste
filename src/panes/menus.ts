@@ -47,7 +47,6 @@ export const ID = {
   quickPrompts: "view.quickPrompts",
   toggleSidebar: "view.toggleSidebar",
   toggleTerminal: "view.toggleTerminal",
-  toggleTerminalAlt: "view.toggleTerminalAlt",
   debugLog: "view.debugLog",
   themeSystem: "view.theme.system",
   zoomIn: "view.zoomIn",

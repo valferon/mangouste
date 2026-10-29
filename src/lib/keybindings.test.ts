@@ -41,12 +41,6 @@ describe("the macOS chord table", () => {
     expect(MAC.toggleTerminal).toBe("Ctrl+`");
   });
 
-  it("moves the second terminal toggle to Cmd, out of the shell's way", () => {
-    // `claimedByShell` stands down only for Ctrl chords, so on macOS Cmd+T
-    // toggles from inside a terminal too.
-    expect(MAC.toggleTerminalAlt).toBe("Cmd+T");
-  });
-
   it("does not leave a bare F-key where macOS has a media key", () => {
     expect(MAC.fullScreen).toBe("Ctrl+Cmd+F");
   });
