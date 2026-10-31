@@ -312,6 +312,11 @@ export function TerminalPane({
       const onMouseDown = (event: MouseEvent) => {
         if (event.button !== 1) return;
         event.preventDefault();
+        // Middle-click always means PRIMARY here, so xterm must not also report
+        // it to an app with mouse tracking on: vim (`mouse=a`) answered it by
+        // pasting its own register, interleaved with ours. Stopped in the
+        // capture phase, before it reaches xterm's listeners below `host`.
+        event.stopPropagation();
         if (deadRef.current) {
           sayDead();
           return;
