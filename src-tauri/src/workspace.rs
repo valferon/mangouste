@@ -1,6 +1,6 @@
 //! Repo discovery and lazy file-tree listing for the left sidebar.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,9 @@ pub struct DirEntryInfo {
     pub is_dir: bool,
     pub size: u64,
     pub modified_ms: u64,
+    /// Matched by a gitignore rule. Only ever set when the listing was asked to
+    /// include ignored entries; the tree draws these dimmed.
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,7 +42,8 @@ fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
 /// List one directory level. Directories sort first, then case-insensitive by name.
 ///
 /// `respect_gitignore` routes the listing through the `ignore` crate so the tree
-/// hides the same files git does; `show_hidden` still surfaces dotfiles.
+/// hides the same files git does; `show_hidden` still surfaces dotfiles. With
+/// it off, ignored entries are listed and flagged `ignored` instead.
 ///
 /// The walking commands here are all `async`: a cold-cache or network mount
 /// walk blocks long enough to freeze the UI if run on the main thread.
@@ -56,18 +60,29 @@ pub fn list_dir(
     let respect_gitignore = respect_gitignore.unwrap_or(true);
     let show_hidden = show_hidden.unwrap_or(true);
 
-    let mut entries = Vec::new();
-    let walker = WalkBuilder::new(&root)
-        .max_depth(Some(1))
-        .hidden(!show_hidden)
-        .git_ignore(respect_gitignore)
-        .git_global(respect_gitignore)
-        .git_exclude(respect_gitignore)
-        .parents(respect_gitignore)
-        .follow_links(false)
-        .build();
+    let walk = |gitignore: bool| {
+        WalkBuilder::new(&root)
+            .max_depth(Some(1))
+            .hidden(!show_hidden)
+            .git_ignore(gitignore)
+            .git_global(gitignore)
+            .git_exclude(gitignore)
+            .parents(gitignore)
+            .follow_links(false)
+            .build()
+    };
+    // What git would keep, to flag the rest. A second one-level walk rather than
+    // a hand-built matcher, so global excludes, `.git/info/exclude` and parent
+    // `.gitignore`s are judged exactly as the filtered listing judges them.
+    let kept: Option<HashSet<PathBuf>> = (!respect_gitignore).then(|| {
+        walk(true)
+            .flatten()
+            .map(|entry| entry.into_path())
+            .collect()
+    });
 
-    for entry in walker.flatten() {
+    let mut entries = Vec::new();
+    for entry in walk(respect_gitignore).flatten() {
         // Depth 0 is the directory being listed.
         if entry.depth() == 0 {
             continue;
@@ -110,6 +125,7 @@ pub fn list_dir(
             is_dir: file_type.is_dir(),
             size: metadata.len(),
             modified_ms: modified_ms(&metadata),
+            ignored: kept.as_ref().is_some_and(|kept| !kept.contains(entry_path)),
         });
     }
 
@@ -247,6 +263,7 @@ fn find_files(
                 is_dir: false,
                 size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
                 modified_ms: metadata.as_ref().map(modified_ms).unwrap_or(0),
+                ignored: false,
                 path,
             }
         })
@@ -525,6 +542,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    /// A `dir/*` rule ignores the contents but not the directory, which used to
+    /// leave a row that opened onto nothing. Ignored entries are listed, flagged.
+    #[test]
+    fn listing_with_ignored_flags_what_gitignore_matches() {
+        let dir = scratch("ignored");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "out/*\n*.log\n").unwrap();
+        std::fs::write(dir.join("out/secret.yaml"), "").unwrap();
+        std::fs::write(dir.join("kept.txt"), "").unwrap();
+        std::fs::write(dir.join("debug.log"), "").unwrap();
+
+        let list = |path: &Path, respect| {
+            list_dir(
+                path.to_string_lossy().into_owned(),
+                Some(respect),
+                Some(false),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.ignored))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            list(&dir, false),
+            [
+                ("out".into(), false),
+                ("debug.log".into(), true),
+                ("kept.txt".into(), false)
+            ]
+        );
+        assert_eq!(
+            list(&dir.join("out"), false),
+            [("secret.yaml".into(), true)]
+        );
+        assert_eq!(list(&dir.join("out"), true), []);
+        assert_eq!(
+            list(&dir, true),
+            [("out".into(), false), ("kept.txt".into(), false)]
+        );
     }
 
     /// The whole reason saving is not `fs::write`: claude edits the same files

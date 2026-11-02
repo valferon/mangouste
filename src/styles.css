@@ -807,6 +807,12 @@ body {
   opacity: 0.55;
 }
 
+/* Gitignored: listed so it can be opened, dimmed so it does not read as
+   part of the repo. */
+.tree-row[data-ignored="true"] {
+  opacity: 0.6;
+}
+
 /* Where a drag would land. Drawn on the directory row and on the pane body for
    the repo root, because those are the only two drops that go anywhere: a drop
    on a file resolves to its parent, which already shows this. */

@@ -274,6 +274,8 @@ export interface DirEntryInfo {
   isDir: boolean;
   size: number;
   modifiedMs: number;
+  /** Matched by a gitignore rule; the tree lists these dimmed. */
+  ignored: boolean;
 }
 
 /** A file's text plus the mtime it was read at, from `read_text_file_meta`. */

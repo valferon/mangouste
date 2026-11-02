@@ -205,7 +205,9 @@ export const FileTree = memo(function FileTree({
       listSeq.current.set(path, seq);
       const current = () => listSeq.current.get(path) === seq;
       try {
-        const entries = await listDir(path, true, showHidden);
+        // Ignored entries are listed, dimmed: a `dir/*` rule otherwise
+        // leaves a folder that expands onto nothing.
+        const entries = await listDir(path, false, showHidden);
         if (!current()) return;
         setChildren((cache) => ({ ...cache, [path]: entries }));
         setError(null);
@@ -756,6 +758,7 @@ export const FileTree = memo(function FileTree({
                 className={`row tree-row ${entry.isDir ? "dir" : "file"}`}
                 style={{ paddingLeft: INDENT_BASE + depth * INDENT_STEP }}
                 data-selected={selectedPath === entry.path}
+                data-ignored={entry.ignored}
                 data-cut={Boolean(clipboard?.cut) && isUnder(entry.path, clipboard?.path ?? "")}
                 data-drop={Boolean(dragPath) && dropDir === entry.path && entry.isDir}
                 onClick={() => (entry.isDir ? toggle(entry.path) : onOpenFile(entry.path))}
