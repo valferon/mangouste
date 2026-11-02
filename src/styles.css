@@ -6036,9 +6036,23 @@ mark.find-hit[data-current="true"] {
   word-break: break-word;
 }
 
-/* Claude's prose: no chrome at all, so reading is uninterrupted. */
+/* Claude's prose. The written answer is what the log is for, yet with no
+   chrome at all it sank between the raised tool rows around it. A faint band in
+   the assistant's orange and a hair more size lift it without boxing it the way
+   the user bubble is boxed: the words still read as prose, not as a card. */
 .timeline-row[data-kind="text"] .timeline-body {
-  padding: 2px 0;
+  padding: 6px 10px;
+  margin: 2px 0;
+  border-left: 2px solid color-mix(in srgb, var(--orange) 70%, transparent);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--orange) 6%, var(--bg));
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+/* A touch more leading goes with the larger size. */
+.timeline-row[data-kind="text"] .markdown {
+  line-height: 1.65;
 }
 
 /* Actions (tools, permission prompts, turn results) sit on a raised surface. */
