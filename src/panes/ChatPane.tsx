@@ -115,6 +115,7 @@ import { useMenu, type MenuEntry } from "../lib/menu";
 import type {
   ClaudeFrame,
   InitializeResult,
+  ModelOption,
   PermissionRequest,
   ContentBlock,
   TextBlock,
@@ -338,7 +339,32 @@ const modeLabel = (mode: string): string => (MODE_LABELS as Record<string, strin
  * `StartOptions.model`, letting the CLI's own configured default win.
  */
 const MODEL_DEFAULT = "default";
-const MODELS = [MODEL_DEFAULT, "fable", "opus", "sonnet", "haiku"] as const;
+const MODELS = [MODEL_DEFAULT, "mythos", "fable", "opus", "sonnet", "haiku"] as const;
+
+/**
+ * Picker names the CLI has no `--model` alias for, mapped to the full id it
+ * does accept. The CLI answers a bare `mythos` with `unrecognized_model`.
+ */
+const MODEL_IDS: Readonly<Record<string, string>> = { mythos: "claude-mythos-5-1" };
+
+/** What a picker name sends to the CLI: null for its default, else an alias or id. */
+const modelArg = (alias: string): string | null =>
+  alias === MODEL_DEFAULT ? null : (MODEL_IDS[alias] ?? alias);
+
+/**
+ * Hover text for a model button: the exact model behind the alias.
+ *
+ * `live` is the id the stream reported, passed only for the alias the process
+ * runs as, so it wins there. Other aliases fall back to what the CLI's
+ * `initialize` catalog says they resolve to, then to a pinned id, and to the
+ * bare alias before the catalog has arrived (a pane that never started).
+ */
+function modelTitle(alias: string, options: readonly ModelOption[], live: string | null): string {
+  if (live) return `${alias} · ${live}`;
+  const option = options.find((o) => o.value === alias);
+  if (!option) return MODEL_IDS[alias] ? `${alias} · ${MODEL_IDS[alias]}` : alias;
+  return option.resolvedModel ? `${option.displayName} · ${option.resolvedModel}` : option.displayName;
+}
 
 /** Sent after a respawn cut a turn short, so the session finishes what it started. */
 const RESUME_AFTER_RESTART =
@@ -2368,7 +2394,7 @@ export const ChatPane = memo(function ChatPane({
       cwd,
       resume: resumeTarget,
       permissionMode: spawnMode,
-      model: spawnModelAlias === MODEL_DEFAULT ? null : spawnModelAlias,
+      model: modelArg(spawnModelAlias),
       extraArgs: [
         ...FEEDBACK_ARGS,
         ...effortArgs(spawnEffort),
@@ -3431,7 +3457,7 @@ export const ChatPane = memo(function ChatPane({
         emitNotice(`model armed: ${alias} — applies when this session starts.`);
         return;
       }
-      void controlSetModel(chatId, alias === MODEL_DEFAULT ? null : alias)
+      void controlSetModel(chatId, modelArg(alias))
         .then((result) => {
           const applied = result.model ?? alias;
           logDebug(chatId, "control", `set_model · ${applied}`);
@@ -3842,6 +3868,11 @@ export const ChatPane = memo(function ChatPane({
                 key={alias}
                 className="toggle-button"
                 data-active={alias === modelAlias}
+                title={modelTitle(
+                  alias,
+                  catalog?.models ?? [],
+                  alive && alias === spawnedModelAlias ? model : null,
+                )}
                 onClick={() => pickModel(alias)}
               >
                 {alias}
