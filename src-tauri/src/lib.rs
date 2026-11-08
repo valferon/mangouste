@@ -530,15 +530,23 @@ mod tests {
     fn a_transcript_being_read_is_not_a_change() {
         // The scan itself opens every transcript; counting that as a change
         // re-armed the watcher on each scan and rescanned forever.
-        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
-        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!is_transcript_change(&EventKind::Access(
+            AccessKind::Close(AccessMode::Read)
+        )));
         assert!(!is_transcript_change(&EventKind::Access(AccessKind::Read)));
     }
 
     #[test]
     fn writes_and_new_files_are_changes() {
-        assert!(is_transcript_change(&EventKind::Modify(ModifyKind::Data(DataChange::Any))));
-        assert!(is_transcript_change(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
+        assert!(is_transcript_change(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Any
+        ))));
+        assert!(is_transcript_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
         assert!(is_transcript_change(&EventKind::Create(CreateKind::File)));
         assert!(is_transcript_change(&EventKind::Remove(RemoveKind::File)));
         // Queue overflow arrives as `Other`: something moved, rescan to be safe.
