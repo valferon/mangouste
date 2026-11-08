@@ -57,6 +57,7 @@ import {
   type ComposerTrigger,
   type NativeCommand,
 } from "../lib/slashCommands";
+import { resolvePath } from "../lib/paths";
 import { Activity } from "./Activity";
 import { ComposerMenu, type ComposerMenuItem } from "./ComposerMenu";
 import { ControlPanel } from "./ControlPanels";
@@ -1871,7 +1872,7 @@ export const ChatPane = memo(function ChatPane({
   resumeFile,
   anchor,
   onSessionId,
-  onOpenFile,
+  onOpenFile: onOpenAbsolute,
   onSystemMessage,
   onPhase,
   onStatus,
@@ -1902,6 +1903,13 @@ export const ChatPane = memo(function ChatPane({
   );
   // The handle is above the box, so dragging up (a negative delta) grows it.
   const onComposerDrag = useCallback((delta: number) => resizeComposer(-delta), []);
+  // Claude names files relative to where it runs (`src/lib/ipc.ts`), and the
+  // opener reads from disk with no cwd of its own, so every link is made
+  // absolute against this session's directory before it leaves the pane.
+  const onOpenFile = useCallback(
+    (path: string) => onOpenAbsolute(resolvePath(cwd, path)),
+    [cwd, onOpenAbsolute],
+  );
   const [items, setItems] = useState<ChatItem[]>([]);
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
     {},

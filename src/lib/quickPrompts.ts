@@ -492,3 +492,59 @@ export function fromLocalInput(value: string): string | null {
   const date = new Date(value);
   return value && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
 }
+
+/**
+ * A typed time of day, read leniently: `9`, `930`, `9:30`, `09h30`, `21.05`.
+ * Null for anything that is not a real time.
+ */
+export function parseClock(text: string): { hour: number; minute: number } | null {
+  const match = /^\s*(\d{1,2})(?:\s*[:h.]?\s*(\d{2}))?\s*h?\s*$/i.exec(text);
+  if (!match) {
+    // `930` and `0930`: the hour is whatever the last two digits are not.
+    const packed = /^\s*(\d{1,2})(\d{2})\s*$/.exec(text);
+    if (!packed) return null;
+    return clockOf(Number(packed[1]), Number(packed[2]));
+  }
+  return clockOf(Number(match[1]), match[2] === undefined ? 0 : Number(match[2]));
+}
+
+const clockOf = (hour: number, minute: number) =>
+  hour < 24 && minute < 60 ? { hour, minute } : null;
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** An ISO instant as a local `YYYY-MM-DD` day and `HH:MM` time, or blanks. */
+export function splitLocal(iso: string | null): { day: string; clock: string } {
+  const local = iso ? toLocalInput(iso) : "";
+  if (!local) return { day: "", clock: "" };
+  const [day, clock] = local.split("T");
+  return { day, clock };
+}
+
+/** A local day and a typed time back to an ISO instant, or null while either is incomplete. */
+export function joinLocal(day: string, clock: string): string | null {
+  const time = parseClock(clock);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !time) return null;
+  return fromLocalInput(`${day}T${pad2(time.hour)}:${pad2(time.minute)}`);
+}
+
+/** Today, as a local `YYYY-MM-DD`. */
+export function localDay(now: Date): string {
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+/** One-click times for a one-off, soonest first. */
+export function onceShortcuts(now: Date): Array<readonly [label: string, iso: string]> {
+  const at = (days: number, hour: number) => {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days, hour, 0);
+    return date.toISOString();
+  };
+  const inHour = new Date(now.getTime() + 60 * 60_000);
+  inHour.setSeconds(0, 0);
+  const toMonday = ((8 - now.getDay()) % 7) || 7;
+  const shortcuts: Array<readonly [string, string]> = [["In 1 hour", inHour.toISOString()]];
+  if (now.getHours() < 18) shortcuts.push(["Today 18:00", at(0, 18)]);
+  shortcuts.push(["Tomorrow 9:00", at(1, 9)]);
+  if (toMonday !== 1) shortcuts.push(["Monday 9:00", at(toMonday, 9)]);
+  return shortcuts;
+}

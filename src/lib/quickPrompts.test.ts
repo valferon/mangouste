@@ -8,6 +8,10 @@ import {
   duplicateDraft,
   exportPrompts,
   fromLocalInput,
+  joinLocal,
+  onceShortcuts,
+  parseClock,
+  splitLocal,
   groupOf,
   laterByDue,
   importPrompts,
@@ -346,5 +350,53 @@ describe("datetime-local values", () => {
   it("an empty value is no time", () => {
     expect(fromLocalInput("")).toBeNull();
     expect(toLocalInput("garbage")).toBe("");
+  });
+});
+
+describe("one-off day and time", () => {
+  it("reads a typed time leniently", () => {
+    expect(parseClock("9")).toEqual({ hour: 9, minute: 0 });
+    expect(parseClock("9:30")).toEqual({ hour: 9, minute: 30 });
+    expect(parseClock("09h30")).toEqual({ hour: 9, minute: 30 });
+    expect(parseClock("930")).toEqual({ hour: 9, minute: 30 });
+    expect(parseClock("2105")).toEqual({ hour: 21, minute: 5 });
+    expect(parseClock("21.05")).toEqual({ hour: 21, minute: 5 });
+  });
+
+  it("refuses what is not a time", () => {
+    expect(parseClock("")).toBeNull();
+    expect(parseClock("25:00")).toBeNull();
+    expect(parseClock("9:60")).toBeNull();
+    expect(parseClock("noon")).toBeNull();
+  });
+
+  it("splits and joins in local time", () => {
+    const iso = new Date(2026, 10, 9, 9, 30).toISOString();
+    expect(splitLocal(iso)).toEqual({ day: "2026-11-09", clock: "09:30" });
+    expect(joinLocal("2026-11-09", "9:30")).toBe(iso);
+  });
+
+  it("joins to nothing while either half is missing", () => {
+    expect(joinLocal("", "9:30")).toBeNull();
+    expect(joinLocal("2026-11-09", "")).toBeNull();
+    expect(splitLocal(null)).toEqual({ day: "", clock: "" });
+  });
+
+  it("offers shortcuts in the future, soonest first", () => {
+    const now = new Date(2026, 10, 8, 10, 15); // a Sunday morning
+    const shortcuts = onceShortcuts(now);
+    expect(shortcuts.map(([label]) => label)).toEqual(["In 1 hour", "Today 18:00", "Tomorrow 9:00"]);
+    const times = shortcuts.map(([, iso]) => Date.parse(iso));
+    expect(times.every((t) => t > now.getTime())).toBe(true);
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+  });
+
+  it("drops today's evening once it has passed, and keeps Monday apart from tomorrow", () => {
+    const now = new Date(2026, 10, 11, 19, 0); // a Wednesday evening
+    expect(onceShortcuts(now).map(([label]) => label)).toEqual([
+      "In 1 hour",
+      "Tomorrow 9:00",
+      "Monday 9:00",
+    ]);
   });
 });

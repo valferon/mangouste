@@ -18,6 +18,7 @@ import { FileTree } from "./FileTree";
 interface ExplorerStackProps {
   repo: string;
   onOpenFile: (path: string) => void;
+  onSearchIn?: (dir: string) => void;
   selectedPath: string | null;
   onPathRenamed: (from: string, to: string) => void;
   onPathDeleted: (path: string) => void;

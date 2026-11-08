@@ -1,8 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { previewFor } from "../lib/binary";
 import { highlightCode } from "../lib/highlight";
-import { clipboardSet, openExternal } from "../lib/ipc";
+import { clipboardSet, openExternal, readFileBytes } from "../lib/ipc";
+import { resolvePath } from "../lib/paths";
 import { isMac } from "../lib/platform";
 import { useMenu } from "../lib/menu";
 
@@ -10,6 +12,62 @@ interface MarkdownProps {
   children: string;
   /** Called when a fenced path or inline code that looks like a path is clicked. */
   onOpenFile?: (path: string) => void;
+  /**
+   * The folder a markdown file lives in, when this is a preview of one.
+   *
+   * Relative links then open as files beside it, and relative images are read
+   * from disk, as GitHub renders a README. Unset for Claude's prose, whose
+   * links are the web's.
+   */
+  baseDir?: string;
+}
+
+/** A link or image source with a scheme of its own, or a bare `#anchor`. */
+const NOT_A_FILE = /^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i;
+
+/** `%20` back to a space; a malformed escape is left as written rather than thrown. */
+function decodePath(text: string): string {
+  try {
+    return decodeURI(text);
+  } catch {
+    return text;
+  }
+}
+
+/** Largest image a preview reads off disk, so a stray video link cannot stall it. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * An image beside the markdown file, read through the backend.
+ *
+ * The webview cannot load `file://`, and a relative `src` resolves against the
+ * app's own origin, so the bytes come over IPC and go in as a data URL.
+ */
+function LocalImage({ path, alt }: { path: string; alt: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setSrc(null);
+    setFailed(false);
+    const preview = previewFor(path);
+    if (preview.kind !== "image") {
+      setFailed(true);
+      return;
+    }
+    void readFileBytes(path, MAX_IMAGE_BYTES)
+      .then((file) => {
+        if (cancelled) return;
+        if (file.truncated) setFailed(true);
+        else setSrc(`data:${preview.mime};base64,${file.data}`);
+      })
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+  if (failed) return <span className="markdown-missing-image" title={path}>[{alt || path}]</span>;
+  return src ? <img src={src} alt={alt} title={path} /> : null;
 }
 
 /** Inline code that looks like a path gets a click target. */
@@ -69,7 +127,7 @@ function CodeBlock({ language, code }: { language: string | null; code: string }
  * Raw HTML is deliberately NOT enabled: model output is untrusted input, and
  * `rehype-raw` would let it inject markup into the app's own DOM.
  */
-export const Markdown = memo(function Markdown({ children, onOpenFile }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ children, onOpenFile, baseDir }: MarkdownProps) {
   const menu = useMenu();
   return (
     <div className="markdown">
@@ -115,6 +173,22 @@ export const Markdown = memo(function Markdown({ children, onOpenFile }: Markdow
           // from the app, so it goes to the desktop browser instead. Modifier
           // clicks copy, which is all a link could do before.
           a({ href, children: content }) {
+            // In a preview, `docs/setup.md` is the file beside this one.
+            if (baseDir !== undefined && onOpenFile && href && !NOT_A_FILE.test(href)) {
+              const target = resolvePath(baseDir, decodePath(href.replace(/[?#].*$/, "")));
+              return (
+                <a
+                  href={href}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    onOpenFile(target);
+                  }}
+                  title={target}
+                >
+                  {content}
+                </a>
+              );
+            }
             return (
               <a
                 href={href}
@@ -138,6 +212,12 @@ export const Markdown = memo(function Markdown({ children, onOpenFile }: Markdow
                 {content}
               </a>
             );
+          },
+          img({ src, alt }) {
+            if (baseDir !== undefined && typeof src === "string" && src && !NOT_A_FILE.test(src)) {
+              return <LocalImage path={resolvePath(baseDir, decodePath(src))} alt={alt ?? ""} />;
+            }
+            return <img src={typeof src === "string" ? src : undefined} alt={alt ?? ""} />;
           },
         }}
       >

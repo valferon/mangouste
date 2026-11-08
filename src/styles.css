@@ -1131,6 +1131,25 @@ body {
   font-family: var(--font-mono);
 }
 
+/* A one-off's day and time side by side: the calendar takes the room, the
+   typed time only needs five characters. */
+.prompt-form-once {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.prompt-form-once input[type="date"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.prompt-form-clock {
+  flex: 0 0 7ch;
+  min-width: 0;
+  text-align: center;
+}
+
 .prompt-form-chips {
   display: flex;
   flex-wrap: wrap;
@@ -2038,6 +2057,30 @@ button.branch-chip:disabled {
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+/* The folder a "Find in Folder" narrowed the sweep to, with its way back out. */
+.search-scope {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.search-scope-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.search-scope .toggle-button {
+  padding: 0 5px;
 }
 
 /* A disclosure, not a button: it reads as the label of the two boxes it opens. */
@@ -3681,6 +3724,36 @@ select {
   background: var(--bg-active);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
+}
+
+/* A markdown or SVG file shown rendered. Reading width, not editor width:
+   prose run across a wide pane is a chore to read. */
+.editor-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px 32px;
+  background: var(--bg);
+}
+
+.editor-preview > .markdown {
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.editor-preview .markdown img {
+  max-width: 100%;
+}
+
+.editor-preview-image {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.markdown-missing-image {
+  color: var(--fg-dim);
+  font-style: italic;
 }
 
 .editor-body {

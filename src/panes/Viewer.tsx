@@ -49,6 +49,8 @@ import { matchChord } from "../lib/commands";
 import { CHORD } from "../lib/keybindings";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { baseName, parentDir } from "../lib/paths";
+import { KEYS, readBoolean, writeBoolean } from "../lib/persist";
+import { Markdown } from "./Markdown";
 import type { Blame, BlameCommit, FileBytes } from "../lib/types";
 
 /**
@@ -638,6 +640,18 @@ interface FileViewProps {
    * cannot show what else that commit touched.
    */
   onShowDiff?: (title: string, patch: string) => void;
+  /** Opens a file a markdown preview links to. */
+  onOpenFile?: (path: string) => void;
+}
+
+/** What a file can be shown as besides its source, if anything. */
+type PreviewKind = "markdown" | "svg";
+
+function previewKindOf(path: string): PreviewKind | null {
+  const name = baseName(path).toLowerCase();
+  if (/\.(md|markdown|mdx|mkd)$/.test(name)) return "markdown";
+  if (name.endsWith(".svg")) return "svg";
+  return null;
 }
 
 /** What the find layer shows while the box is closed or empty. */
@@ -687,8 +701,23 @@ export const FileView = memo(function FileView({
   onRegisterFormat,
   reveal,
   onShowDiff,
+  onOpenFile,
 }: FileViewProps) {
   const menu = useMenu();
+  const previewKind = useMemo(() => previewKindOf(path), [path]);
+  /**
+   * Rendered rather than source. Seeded from the last choice made with the
+   * button; a find or a search jump drops back to source without changing it,
+   * since both work on the text.
+   */
+  const [previewOn, setPreviewOn] = useState(() => readBoolean(KEYS.prefs.filePreview, true));
+  const previewing = previewKind !== null && previewOn;
+  const togglePreview = useCallback(() => {
+    setPreviewOn((on) => {
+      writeBoolean(KEYS.prefs.filePreview, !on);
+      return !on;
+    });
+  }, []);
   /** What is on disk, as far as this pane knows. */
   const [saved, setSaved] = useState<{ text: string; modifiedMs: number } | null>(null);
   /**
@@ -990,6 +1019,11 @@ export const FileView = memo(function FileView({
   useEffect(() => {
     if (!reveal || saved === null) return;
     if (revealedRef.current === reveal.nonce) return;
+    // A match is a place in the source; the effect runs again once it shows.
+    if (previewing) {
+      setPreviewOn(false);
+      return;
+    }
     const field = textareaRef.current;
     if (!field) return;
     revealedRef.current = reveal.nonce;
@@ -1002,7 +1036,7 @@ export const FileView = memo(function FileView({
     field.focus();
     field.setSelectionRange(span.start, span.end);
     scrollToSpan(span, true);
-  }, [reveal, saved, scrollToSpan]);
+  }, [reveal, saved, scrollToSpan, previewing]);
 
   /* ---------- find in file ---------- */
 
@@ -1094,6 +1128,7 @@ export const FileView = memo(function FileView({
         const picked = field.value.slice(field.selectionStart, field.selectionEnd);
         if (!picked.includes("\n")) setFindQuery(picked);
       }
+      setPreviewOn(false);
       setFindOpen(true);
       requestAnimationFrame(() => {
         findInputRef.current?.focus();
@@ -1220,6 +1255,11 @@ export const FileView = memo(function FileView({
         checked: blameOn,
         run: () => setBlameShown(!blameOn),
       },
+      previewKind !== null && {
+        label: "Show Preview",
+        checked: previewing,
+        run: togglePreview,
+      },
       "separator",
       "editing",
       "separator",
@@ -1232,7 +1272,7 @@ export const FileView = memo(function FileView({
         run: () => void revealPath(parentDir(path)),
       },
     ],
-    [dirty, state.kind, save, format, load, path, blameOn],
+    [dirty, state.kind, save, format, load, path, blameOn, previewKind, previewing, togglePreview],
   );
 
   const language = useMemo(() => languageForPath(path), [path]);
@@ -1443,6 +1483,16 @@ export const FileView = memo(function FileView({
           </span>
         )}
         <div className="actions">
+          {previewKind !== null && (
+            <button
+              className="toggle-button"
+              data-active={previewing}
+              onClick={togglePreview}
+              title={previewing ? "Show the source, to edit it" : "Show it rendered"}
+            >
+              Preview
+            </button>
+          )}
           <button
             className="toggle-button"
             data-active={blameOn}
@@ -1559,7 +1609,24 @@ export const FileView = memo(function FileView({
           </button>
         </div>
       )}
-      <div className="editor-body">
+      {previewing && (
+        <div className="editor-preview selectable">
+          {previewKind === "markdown" ? (
+            <Markdown onOpenFile={onOpenFile} baseDir={parentDir(path) || "/"}>
+              {deferredDraft}
+            </Markdown>
+          ) : (
+            <img
+              className="editor-preview-image"
+              alt={baseName(path)}
+              src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(deferredDraft)}`}
+            />
+          )}
+        </div>
+      )}
+      {/* Kept mounted under the preview: the draft, its undo stack and the
+          caret all live in the textarea. */}
+      <div className="editor-body" style={previewing ? { display: "none" } : undefined}>
         {/* Left of the line numbers, as `git gui blame` puts it, and its own
             scroller driven from the textarea — the same arrangement the gutter
             uses, and for the same reason. Dimmed while the buffer is dirty:

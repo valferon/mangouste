@@ -70,6 +70,8 @@ export const KEYS = {
     upstreamWatch: "mangouste.upstreamWatch",
     /** Whether file editors show the git blame column. */
     blame: "mangouste.blame",
+    /** Whether markdown and SVG files open rendered rather than as source. */
+    filePreview: "mangouste.filePreview",
     feedback: "mangouste.feedback",
     /** Thinking effort new panes spawn with. */
     effort: "mangouste.effort",

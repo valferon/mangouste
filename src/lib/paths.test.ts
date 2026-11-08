@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { baseName, parentDir, relativePath } from "./paths";
+import { ancestorsWithin, baseName, parentDir, relativePath, resolvePath } from "./paths";
 
 describe("baseName", () => {
   it("takes the last segment", () => {
@@ -58,5 +58,38 @@ describe("relativePath", () => {
   it("passes the path through when there is no root yet", () => {
     // Before a repo is chosen, activeRepo is "".
     expect(relativePath("", "/etc/hosts")).toBe("/etc/hosts");
+  });
+});
+
+describe("resolvePath", () => {
+  it("joins a relative path onto the base", () => {
+    expect(resolvePath("/repo", "src/lib/ipc.ts")).toBe("/repo/src/lib/ipc.ts");
+    expect(resolvePath("/repo/", "README.md")).toBe("/repo/README.md");
+  });
+
+  it("folds dot segments", () => {
+    expect(resolvePath("/repo/sub", "./a/../b.ts")).toBe("/repo/sub/b.ts");
+    expect(resolvePath("/repo/sub", "../other/x.md")).toBe("/repo/other/x.md");
+  });
+
+  it("leaves an absolute path where it is", () => {
+    expect(resolvePath("/repo", "/etc/hosts")).toBe("/etc/hosts");
+    expect(resolvePath("/repo", "/a/./b/../c")).toBe("/a/c");
+  });
+
+  it("does not climb past the root", () => {
+    expect(resolvePath("/repo", "../../../x")).toBe("/x");
+  });
+});
+
+describe("ancestorsWithin", () => {
+  it("lists the folders between root and file, outermost first", () => {
+    expect(ancestorsWithin("/repo", "/repo/src/lib/ipc.ts")).toEqual(["/repo/src", "/repo/src/lib"]);
+  });
+
+  it("is empty for a file at the root or outside it", () => {
+    expect(ancestorsWithin("/repo", "/repo/README.md")).toEqual([]);
+    expect(ancestorsWithin("/repo", "/elsewhere/x.ts")).toEqual([]);
+    expect(ancestorsWithin("/repo", "/repository/x.ts")).toEqual([]);
   });
 });

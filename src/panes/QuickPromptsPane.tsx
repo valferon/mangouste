@@ -19,7 +19,11 @@ import {
   deriveLabel,
   duplicateDraft,
   exportPrompts,
-  fromLocalInput,
+  joinLocal,
+  localDay,
+  onceShortcuts,
+  parseClock,
+  splitLocal,
   groupOf,
   laterByDue,
   importedMode,
@@ -34,7 +38,6 @@ import {
   PROMPTS_KEY,
   readPrompts,
   removePrompt,
-  toLocalInput,
   updatePrompt,
   writePrompts,
   type QuickPrompt,
@@ -107,6 +110,83 @@ const MODE_LABELS: Record<PromptMode, string> = {
   plan: "plan",
   bypassPermissions: "bypass",
 };
+
+/**
+ * A one-off's day and time, as a calendar and a typed time.
+ *
+ * Not one `datetime-local`: WebKitGTK draws that as a calendar popup with no
+ * clock, and its time segments hold nothing until the day is complete, so the
+ * time was all but impossible to set. The halves keep their own text here, and
+ * `at` only gets a value once both make sense. Picking a day with no time yet
+ * fills in 9:00, and typing a time with no day assumes today.
+ */
+function OnceField({ at, onChange }: { at: string | null; onChange: (at: string) => void }) {
+  const [day, setDay] = useState(() => splitLocal(at).day);
+  const [clock, setClock] = useState(() => splitLocal(at).clock);
+  // A shortcut writes `at` from outside; the two boxes follow it.
+  const lastSent = useRef(at);
+  useEffect(() => {
+    if (at === lastSent.current) return;
+    lastSent.current = at;
+    const parts = splitLocal(at);
+    if (parts.day) {
+      setDay(parts.day);
+      setClock(parts.clock);
+    }
+  }, [at]);
+  const commit = (nextDay: string, nextClock: string) => {
+    setDay(nextDay);
+    setClock(nextClock);
+    const iso = joinLocal(nextDay, nextClock) ?? "";
+    lastSent.current = iso;
+    onChange(iso);
+  };
+  const clockBad = clock.trim() !== "" && parseClock(clock) === null;
+  return (
+    <>
+      <div className="prompt-form-once">
+        <input
+          type="date"
+          className="prompt-form-input"
+          value={day}
+          onChange={(event) => {
+            const next = event.target.value;
+            commit(next, next && clock.trim() === "" ? "09:00" : clock);
+          }}
+          title="Day"
+        />
+        <input
+          className="prompt-form-input prompt-form-mono prompt-form-clock"
+          placeholder="09:00"
+          value={clock}
+          data-error={clockBad}
+          onChange={(event) => {
+            const next = event.target.value;
+            commit(day === "" && parseClock(next) ? localDay(new Date()) : day, next);
+          }}
+          spellCheck={false}
+          title="Time, 24h: 9, 930, 9:30 or 21:05"
+        />
+      </div>
+      <div className="prompt-form-chips">
+        {onceShortcuts(new Date()).map(([label, iso]) => (
+          <button
+            key={label}
+            type="button"
+            className="prompt-form-chip"
+            onClick={() => {
+              const parts = splitLocal(iso);
+              commit(parts.day, parts.clock);
+            }}
+            title={new Date(iso).toLocaleString()}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
 
 /** A row of mutually exclusive buttons; `danger` tints one choice red when picked. */
 function Segmented<T extends string>({
@@ -316,14 +396,7 @@ function PromptEditor({
               </>
             ) : (
               <>
-                <input
-                  type="datetime-local"
-                  className="prompt-form-input"
-                  value={draft.at ? toLocalInput(draft.at) : ""}
-                  onChange={(event) =>
-                    setDraft({ ...draft, at: fromLocalInput(event.target.value) ?? "" })
-                  }
-                />
+                <OnceField at={draft.at} onChange={(at) => setDraft({ ...draft, at })} />
                 <span className="prompt-form-hint" data-error={Number.isNaN(onceTime)}>
                   {onceHint}
                 </span>

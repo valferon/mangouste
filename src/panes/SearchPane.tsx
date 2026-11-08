@@ -19,6 +19,11 @@ interface SearchPaneProps {
   focusToken: number;
   /** Open a file with the match that was clicked selected. */
   onOpenMatch: (path: string, target: MatchTarget) => void;
+  /**
+   * A folder to narrow the sweep to, from the explorer's "Find in Folder".
+   * `nonce` is the trigger, so asking for the same folder twice still lands.
+   */
+  scope?: { dir: string; nonce: number } | null;
 }
 
 /** Keystrokes settle before a repo-wide sweep starts. */
@@ -71,6 +76,7 @@ export const SearchPane = memo(function SearchPane({
   root,
   focusToken,
   onOpenMatch,
+  scope = null,
 }: SearchPaneProps) {
   const menu = useMenu();
   const [query, setQuery] = useState("");
@@ -90,6 +96,14 @@ export const SearchPane = memo(function SearchPane({
   /** Matches excluded from the next replace, by `matchKey`. */
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const queryRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * The folder the sweep is narrowed to, or null for the whole repo.
+   *
+   * A walk root rather than an include glob: it reaches a folder outside the
+   * repo too, and leaves the include box to whatever the user typed in it.
+   */
+  const [folder, setFolder] = useState<string | null>(null);
+  const sweepRoot = folder ?? root;
 
   const options = useMemo<SearchOptions>(
     () => ({
@@ -117,7 +131,7 @@ export const SearchPane = memo(function SearchPane({
   const run = useCallback(
     async (text: string) => {
       const sweep = (generation.current += 1);
-      if (!root || text === "") {
+      if (!sweepRoot || text === "") {
         setOutcome(null);
         setError(null);
         setBusy(false);
@@ -125,7 +139,7 @@ export const SearchPane = memo(function SearchPane({
       }
       setBusy(true);
       try {
-        const found = await searchText(root, text, options);
+        const found = await searchText(sweepRoot, text, options);
         if (sweep !== generation.current) return;
         setOutcome(found);
         setError(null);
@@ -144,7 +158,7 @@ export const SearchPane = memo(function SearchPane({
         if (sweep === generation.current) setBusy(false);
       }
     },
-    [root, options],
+    [sweepRoot, options],
   );
 
   // Live search, once the typing stops. `note` is cleared here rather than in
@@ -174,7 +188,17 @@ export const SearchPane = memo(function SearchPane({
     setError(null);
     setNote(null);
     setBusy(false);
+    setFolder(null);
   }, [root]);
+
+  // Declared after the reset above, so a scope that arrives with a repo switch
+  // is not wiped by it in the same commit.
+  const seenScope = useRef(scope?.nonce ?? 0);
+  useEffect(() => {
+    if (!scope || scope.nonce === seenScope.current) return;
+    seenScope.current = scope.nonce;
+    setFolder(scope.dir === root ? null : scope.dir);
+  }, [scope, root]);
 
   /** Starts at the mounted value, so a restored view does not grab the caret. */
   const focused = useRef(focusToken);
@@ -439,7 +463,7 @@ export const SearchPane = memo(function SearchPane({
             ref={queryRef}
             className="search-input"
             value={query}
-            placeholder="Find in repository"
+            placeholder={folder ? "Find in folder" : "Find in repository"}
             spellCheck={false}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -515,6 +539,21 @@ export const SearchPane = memo(function SearchPane({
           </button>
         </div>
 
+        {folder && (
+          <div className="search-scope" title={folder}>
+            <span className="search-scope-label">in</span>
+            <span className="search-scope-path">
+              {folder.startsWith(`${root}/`) ? `${relativePath(root, folder)}/` : folder}
+            </span>
+            <button
+              className="toggle-button"
+              onClick={() => setFolder(null)}
+              title="Search the whole repository again"
+            >
+              ×
+            </button>
+          </div>
+        )}
         <button
           className="search-filters-toggle"
           onClick={() => setFiltersOpen((v) => !v)}

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { copyText } from "../lib/editing";
 import {
   ancestorsBetween,
@@ -37,7 +37,7 @@ import {
   RepoIcon,
 } from "../lib/icons";
 import { useMenu, type MenuEntry } from "../lib/menu";
-import { baseName, parentDir, relativePath } from "../lib/paths";
+import { ancestorsWithin, baseName, parentDir, relativePath } from "../lib/paths";
 import type { DirEntryInfo } from "../lib/types";
 
 interface FileTreeProps {
@@ -61,6 +61,12 @@ interface FileTreeProps {
    */
   onWatch: (dirs: string) => void;
   onOpenFile: (path: string) => void;
+  /** Open the find view scoped to this directory. Absent where there is no find view. */
+  onSearchIn?: (dir: string) => void;
+  /**
+   * The file in front. Its row is marked, its folders are opened and it is
+   * scrolled into view whenever it changes, so the tree always says where you are.
+   */
   selectedPath: string | null;
   /**
    * A rename or a move landed. Carries both paths because the tree does not own
@@ -142,6 +148,7 @@ export const FileTree = memo(function FileTree({
   onClose,
   onWatch,
   onOpenFile,
+  onSearchIn,
   selectedPath,
   onPathRenamed,
   onPathDeleted,
@@ -347,6 +354,42 @@ export const FileTree = memo(function FileTree({
     },
     [load],
   );
+
+  /**
+   * The selected file, until its row has been scrolled to.
+   *
+   * Set when the selection moves and cleared once the row is on screen: the
+   * folders above it may still be listing, so the row can arrive a render or
+   * three after the selection did.
+   */
+  const pendingReveal = useRef<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  // Open the way down to the file in front. Only on a change of file: a folder
+  // you collapse afterwards stays collapsed until another file comes forward.
+  useEffect(() => {
+    pendingReveal.current = selectedPath;
+    if (!selectedPath || !isUnder(selectedPath, root)) return;
+    const dirs = ancestorsWithin(root, selectedPath);
+    if (dirs.length === 0) return;
+    setExpanded((current) => {
+      if (dirs.every((dir) => current.has(dir))) return current;
+      const next = new Set(current);
+      for (const dir of dirs) next.add(dir);
+      return next;
+    });
+    for (const dir of dirs) if (!childrenRef.current[dir]) void load(dir);
+    // `root` too: a pane pointed somewhere new should find the file in it.
+  }, [selectedPath, root, load]);
+
+  // Before paint, so the tree never shows a frame scrolled away from the row.
+  useLayoutEffect(() => {
+    if (!pendingReveal.current) return;
+    const row = bodyRef.current?.querySelector('.tree-row[data-selected="true"]');
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest" });
+    pendingReveal.current = null;
+  }, [children, expanded, selectedPath]);
 
   /** Re-read directories after a write, skipping the duplicates and the blanks. */
   const reload = useCallback(
@@ -603,6 +646,7 @@ export const FileTree = memo(function FileTree({
       },
       { label: "Back to Repository", disabled: root === repoRoot, run: () => onReroot(repoRoot) },
       { label: "Go to Folder…", run: () => setTypedRoot(root) },
+      onSearchIn && { label: "Find in Folder…", run: () => onSearchIn(root) },
       { label: "Split Explorer", run: () => onSplit() },
       onClose && { label: "Close Explorer Pane", run: onClose },
       { label: "Show Dotfiles", checked: showHidden, run: () => setShowHidden((v) => !v) },
@@ -628,6 +672,7 @@ export const FileTree = memo(function FileTree({
       onReroot,
       onSplit,
       onClose,
+      onSearchIn,
     ],
   );
 
@@ -651,6 +696,12 @@ export const FileTree = memo(function FileTree({
       entry.isDir && { label: "Refresh", run: () => void load(entry.path) },
       entry.isDir && { label: "Open as Root", run: () => onReroot(entry.path) },
       entry.isDir && { label: "Open in New Pane", run: () => onSplit(entry.path) },
+      // A file row scopes to its own folder: the sweep walks directories, and
+      // the folder is what "search near this" means.
+      onSearchIn && {
+        label: entry.isDir ? "Find in Folder…" : "Find in Containing Folder…",
+        run: () => onSearchIn(entry.isDir ? entry.path : parentDir(entry.path) || "/"),
+      },
       "separator",
       // A create aimed at a file row means "beside this one", which is what its
       // own directory is. Nobody right-clicks a file to mean "inside it".
@@ -688,6 +739,7 @@ export const FileTree = memo(function FileTree({
       expanded,
       toggle,
       onOpenFile,
+      onSearchIn,
       load,
       repoRoot,
       onReroot,
@@ -955,6 +1007,7 @@ export const FileTree = memo(function FileTree({
       {renderPathBar()}
       <div
         className="pane-body"
+        ref={bodyRef}
         data-drop={Boolean(dragPath) && dropDir === root}
         onContextMenu={(event) =>
           menu.openContextMenu(event, [...paneEntries(), "separator", "app"])

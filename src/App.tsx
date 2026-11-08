@@ -63,7 +63,7 @@ import {
 import { clearDebug } from "./lib/debugLog";
 import { copyText } from "./lib/editing";
 import { isUnder, repointPath } from "./lib/fileOps";
-import { baseName } from "./lib/paths";
+import { baseName, resolvePath } from "./lib/paths";
 import {
   FilesIcon,
   FindReplaceIcon,
@@ -758,6 +758,8 @@ function Workbench() {
    */
   const [searchFocus, setSearchFocus] = useState(0);
   const focusSearch = useCallback(() => setSearchFocus((token) => token + 1), []);
+  /** The folder the explorer last asked the find view to narrow to. */
+  const [searchScope, setSearchScope] = useState<{ dir: string; nonce: number } | null>(null);
   /**
    * Rail click: switch views, or collapse when the view is already showing.
    *
@@ -773,6 +775,16 @@ function Workbench() {
       if (view === "search" && !collapsing) focusSearch();
     },
     [sidebarView, leftCollapsed, focusSearch],
+  );
+  /** Explorer "Find in Folder": the find view, narrowed to `dir`, caret in the box. */
+  const searchIn = useCallback(
+    (dir: string) => {
+      setSearchScope((current) => ({ dir, nonce: (current?.nonce ?? 0) + 1 }));
+      setLeftCollapsed(false);
+      setSidebarView("search");
+      focusSearch();
+    },
+    [focusSearch],
   );
   const [refitToken, setRefitToken] = useState(0);
   /**
@@ -1694,7 +1706,9 @@ function Workbench() {
    * re-renders the memoised ones.
    */
   const openFileHere = useCallback(
-    (path: string) => openFile(path, activeRepo),
+    // A relative path is the repo's: inline code in a README preview names
+    // files that way. Panes with a better base (a chat's cwd) resolve first.
+    (path: string) => openFile(resolvePath(activeRepo, path), activeRepo),
     [openFile, activeRepo],
   );
   /** Open a file and land on the match the search pane was showing. */
@@ -2138,6 +2152,14 @@ function Workbench() {
   );
 
   const currentTab = tabs.find((tab) => tab.id === activeTab);
+
+  // The file in front is the one the explorer marks, however it came forward:
+  // a tab click, a close that uncovered it, a repo switch. `openFile` setting it
+  // was only ever right for the moment of opening.
+  const frontFile = currentTab?.kind === "file" ? currentTab.path : null;
+  useEffect(() => {
+    if (frontFile !== null) setSelectedFile(frontFile);
+  }, [frontFile]);
 
   /** The chat tab in front, if the front tab is a chat at all. */
   const activeChat = currentTab?.kind === "chat" ? currentTab : null;
@@ -3224,6 +3246,7 @@ function Workbench() {
                 <ExplorerStack
                   repo={activeRepo}
                   onOpenFile={openFileHere}
+                  onSearchIn={searchIn}
                   selectedPath={selectedFile}
                   onPathRenamed={handlePathRenamed}
                   onPathDeleted={handlePathDeleted}
@@ -3245,6 +3268,7 @@ function Workbench() {
                 root={activeRepo}
                 focusToken={searchFocus}
                 onOpenMatch={openMatch}
+                scope={searchScope}
               />
             </PaneBoundary>
           </div>
@@ -3499,6 +3523,7 @@ function Workbench() {
                       onRegisterSave={registerFileSave}
                       onRegisterFormat={registerFileFormat}
                       onShowDiff={showDiffHere}
+                      onOpenFile={openFileHere}
                     />
                   </PaneBoundary>
                 </div>
