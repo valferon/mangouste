@@ -28,7 +28,8 @@ mod workspace;
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::RecursiveMode;
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::new_debouncer;
 use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent, Wry};
@@ -50,6 +51,20 @@ pub const EVENT_SESSIONS_CHANGED: &str = "sessions://changed";
 /// times a second, and each one re-read every transcript on the machine.
 const SESSIONS_DEBOUNCE: Duration = Duration::from_millis(1500);
 
+/// Whether a watcher event means a transcript actually moved.
+///
+/// inotify reports opens and read-only closes too, and every listener of
+/// `sessions://changed` answers by reading transcripts. Counting those reads as
+/// changes made each scan schedule the next: a rescan every debounce tick with
+/// nothing running, which kept the webview busy enough to lag every click.
+fn is_transcript_change(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Watch `~/.claude/projects` and ping the frontend when any transcript changes.
 ///
 /// The debouncer is leaked deliberately: it must outlive setup and live for the
@@ -65,8 +80,10 @@ fn watch_sessions(app: AppHandle) {
     std::thread::spawn(move || {
         let result = new_debouncer(SESSIONS_DEBOUNCE, None, move |result| {
             if let Ok(events) = result {
-                let _: Vec<notify_debouncer_full::DebouncedEvent> = events;
-                let _ = app.emit(EVENT_SESSIONS_CHANGED, ());
+                let events: Vec<notify_debouncer_full::DebouncedEvent> = events;
+                if events.iter().any(|event| is_transcript_change(&event.kind)) {
+                    let _ = app.emit(EVENT_SESSIONS_CHANGED, ());
+                }
             }
         });
 
@@ -502,4 +519,29 @@ pub fn run() {
                 manager.kill_all();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+
+    #[test]
+    fn a_transcript_being_read_is_not_a_change() {
+        // The scan itself opens every transcript; counting that as a change
+        // re-armed the watcher on each scan and rescanned forever.
+        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
+        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+        assert!(!is_transcript_change(&EventKind::Access(AccessKind::Read)));
+    }
+
+    #[test]
+    fn writes_and_new_files_are_changes() {
+        assert!(is_transcript_change(&EventKind::Modify(ModifyKind::Data(DataChange::Any))));
+        assert!(is_transcript_change(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
+        assert!(is_transcript_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_transcript_change(&EventKind::Remove(RemoveKind::File)));
+        // Queue overflow arrives as `Other`: something moved, rescan to be safe.
+        assert!(is_transcript_change(&EventKind::Other));
+    }
 }

@@ -3,9 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const gitRoot = vi.fn<(cwd: string) => Promise<string | null>>();
 vi.mock("./ipc", () => ({ gitRoot: (cwd: string) => gitRoot(cwd) }));
 
-const { knownRepoRoot, rememberRepoRoot, repoRoot, resetRepoRoots, warmRepoRoots } = await import(
-  "./repoRoot"
-);
+const {
+  aliasRepoRoot,
+  knownRepoRoot,
+  rememberRepoRoot,
+  repoRoot,
+  resetRepoRoots,
+  warmRepoRoots,
+  workspaceGroups,
+} = await import("./repoRoot");
 
 describe("repo root cache", () => {
   beforeEach(() => {
@@ -63,5 +69,44 @@ describe("repo root cache", () => {
     warmRepoRoots(["/w/app", "", "/w/app/src"]);
     await vi.waitFor(() => expect(gitRoot).toHaveBeenCalledTimes(1));
     expect(gitRoot).toHaveBeenCalledWith("/w/app/src");
+  });
+
+  describe("a workspace reached through a symlink", () => {
+    it("names a git root by the workspace path, not the physical one", async () => {
+      rememberRepoRoot("/home/u/ws/app", "/home/u/ws/app");
+      aliasRepoRoot("/data/ws/app", "/home/u/ws/app");
+      gitRoot.mockResolvedValue("/data/ws/app");
+      expect(await repoRoot("/data/ws/app/src")).toBe("/home/u/ws/app");
+    });
+
+    it("names a plain directory by the workspace path", async () => {
+      aliasRepoRoot("/data/ws/notes", "/home/u/ws/notes");
+      gitRoot.mockResolvedValue(null);
+      expect(await repoRoot("/data/ws/notes")).toBe("/home/u/ws/notes");
+      expect(gitRoot).not.toHaveBeenCalled();
+    });
+
+    it("rewrites an answer cached before discovery came back", async () => {
+      gitRoot.mockResolvedValue("/data/ws/app");
+      expect(await repoRoot("/data/ws/app/src")).toBe("/data/ws/app");
+      aliasRepoRoot("/data/ws/app", "/home/u/ws/app");
+      expect(knownRepoRoot("/data/ws/app/src")).toBe("/home/u/ws/app");
+    });
+
+    it("renames a scanned group to its workspace path", () => {
+      aliasRepoRoot("/data/ws/app", "/home/u/ws/app");
+      const other = { dirName: "-w-b", cwd: "/w/b", label: "b", sessions: [] };
+      const [app, untouched] = workspaceGroups([
+        { dirName: "-data-ws-app", cwd: "/data/ws/app", label: "app", sessions: [] },
+        other,
+      ]);
+      expect(app.cwd).toBe("/home/u/ws/app");
+      expect(untouched).toBe(other);
+    });
+
+    it("ignores a path that is already physical", () => {
+      aliasRepoRoot("/w/app", "/w/app");
+      expect(knownRepoRoot("/w/app")).toBeNull();
+    });
   });
 });

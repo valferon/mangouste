@@ -91,6 +91,21 @@ export function repoLabel(path: string): string {
   return leaf.length > 0 ? leaf : path;
 }
 
+/**
+ * Visits re-keyed by `rename`, the newest stamp winning where two keys meet.
+ *
+ * A workspace reached through a symlink can have one tree recorded under both
+ * its physical and its workspace path; keyed apart, one of them is a phantom row.
+ */
+export function mergeVisits(visits: RepoVisits, rename: (path: string) => string): RepoVisits {
+  const out: RepoVisits = {};
+  for (const [path, at] of Object.entries(visits)) {
+    const key = rename(path);
+    out[key] = Math.max(out[key] ?? 0, at);
+  }
+  return out;
+}
+
 export interface PlaceholderOptions {
   now: number;
   /** The rail's `idle` toggle: visits past the idle line show only with it on. */

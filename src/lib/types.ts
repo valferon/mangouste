@@ -379,6 +379,8 @@ export interface RepoInfo {
   name: string;
   path: string;
   isGit: boolean;
+  /** `path` with symlinks resolved: the form git reports a toplevel in. */
+  physical: string;
 }
 
 export interface Commit {

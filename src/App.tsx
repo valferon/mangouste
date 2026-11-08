@@ -110,6 +110,7 @@ import type { MatchTarget } from "./lib/findInFile";
 import { CHORD, formatChord } from "./lib/keybindings";
 import { MenuProvider, useMenu } from "./lib/menu";
 import {
+  aliasRepoRoot,
   knownRepoRoot,
   rememberRepoRoot,
   repoRoot,
@@ -1010,6 +1011,9 @@ function Workbench() {
     writeString(WORKSPACE_KEY, workspaceRoot);
     void discoverRepos(workspaceRoot)
       .then((found) => {
+        // Before the git rows below: a plain directory is a repo too, as far as
+        // a session started in one is concerned.
+        for (const repo of found) aliasRepoRoot(repo.physical, repo.path);
         const git = found.filter((repo) => repo.isGit);
         // A directory holding a `.git` is its own worktree root, so the picker's
         // rows never need a `rev-parse` when clicked and a switch lands on the
@@ -2439,8 +2443,12 @@ function Workbench() {
           const known = findSession(sessionGroupsRef.current, plan.value.session);
           const cwd = (plan.value.session === caller.sessionId ? caller.cwd : null) ?? known?.cwd;
           if (!cwd) return { ok: false, error: "mangouste does not know where that session lives" };
+          // Keyed by the repo root, as a resume from the sidebar is: the raw cwd
+          // (a subdirectory, or the physical side of a symlinked workspace) puts
+          // the tab on a strip that is never the active one.
+          const root = await repoRoot(cwd);
           const tab: ChatTab = {
-            ...newSessionTab(cwd),
+            ...newSessionTab(root),
             sessionId: null,
             surface: "chat",
             // The parent's transcript is what the fork opens on.
@@ -2451,7 +2459,6 @@ function Workbench() {
           setTabs((current) => [...current, tab]);
           if (plan.value.text) deliverDirect(tab.id, plan.value.text);
           if (plan.value.focus) {
-            const root = await repoRoot(cwd);
             setActiveRepo(root);
             setActiveTab(tab.id);
           }

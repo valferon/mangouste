@@ -598,15 +598,7 @@ fn collect_transcripts() -> Vec<Transcript> {
     let Some(root) = crate::sessions::projects_root() else {
         return found;
     };
-    let Ok(projects) = fs::read_dir(&root) else {
-        return found;
-    };
-    for project in projects.flatten() {
-        let project_path = project.path();
-        if !project_path.is_dir() {
-            continue;
-        }
-        let project_dir = project.file_name().to_string_lossy().into_owned();
+    for (project_path, project_dir) in crate::sessions::project_dirs(&root) {
         let Ok(entries) = fs::read_dir(&project_path) else {
             continue;
         };

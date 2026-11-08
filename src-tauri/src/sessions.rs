@@ -300,6 +300,41 @@ pub fn projects_root() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
+/// The project dirs under `root`, each paired with its dir name.
+///
+/// A symlink that points at another project dir under the same root is left
+/// out: moving a workspace (say `/home/u/ws` to `/data/ws`, symlinked back)
+/// leaves Claude Code writing into `-data-ws-x`, linked to `-home-u-ws-x`, and
+/// reading both would list every transcript twice. A symlink pointing outside
+/// the root is the only way to reach its transcripts, so it stays.
+pub(crate) fn project_dirs(root: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let canonical_root = std::fs::canonicalize(root).ok();
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
+            if is_link {
+                let target = std::fs::canonicalize(&path).ok()?;
+                let inside = canonical_root
+                    .as_deref()
+                    .is_some_and(|r| target.parent() == Some(r));
+                if inside {
+                    return None;
+                }
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            Some((path, name))
+        })
+        .collect()
+}
+
 /// Best-effort reverse of Claude Code's cwd escaping.
 ///
 /// The escaping is lossy (`/` and `-` both become `-`), so this is only a
@@ -1395,15 +1430,7 @@ pub fn list_sessions(
     // group has been read, and the helper group below is dropped whole.
     let mut transitions: Vec<crate::alerts::Transition> = Vec::new();
 
-    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let dir_name = entry.file_name().to_string_lossy().to_string();
+    for (project_path, dir_name) in project_dirs(&root) {
         let mut sessions = Vec::new();
         // Held at group scope so the helper-dir check below can throw the whole
         // lot away: the `claude -p` helpers are tooling, and tooling finishing
@@ -1411,7 +1438,7 @@ pub fn list_sessions(
         let mut group_transitions: Vec<(String, String, Option<String>, String, String)> =
             Vec::new();
 
-        let files = match std::fs::read_dir(entry.path()) {
+        let files = match std::fs::read_dir(&project_path) {
             Ok(f) => f,
             Err(_) => continue,
         };
@@ -2072,16 +2099,8 @@ fn all_transcripts() -> Vec<(PathBuf, String)> {
     let Some(root) = projects_root() else {
         return Vec::new();
     };
-    let Ok(dirs) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for dir in dirs.flatten() {
-        let path = dir.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let dir_name = dir.file_name().to_string_lossy().to_string();
+    for (path, dir_name) in project_dirs(&root) {
         let Ok(files) = std::fs::read_dir(&path) else {
             continue;
         };
@@ -2235,6 +2254,27 @@ mod search_tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_dirs_skips_a_symlink_to_a_sibling() {
+        let root = std::env::temp_dir().join("mangouste-project-dirs");
+        let outside = std::env::temp_dir().join("mangouste-project-dirs-outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("-home-u-ws-x")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(root.join("-home-u-ws-x"), root.join("-data-ws-x")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("-elsewhere")).unwrap();
+        std::fs::write(root.join("stray.jsonl"), "").unwrap();
+
+        let mut names: Vec<String> = project_dirs(&root).into_iter().map(|(_, n)| n).collect();
+        names.sort();
+        assert_eq!(names, vec!["-elsewhere", "-home-u-ws-x"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

@@ -57,8 +57,14 @@ import {
   type SessionSort,
   type SessionView,
 } from "../lib/sessionOrder";
+import { workspaceGroups, workspacePath } from "../lib/repoRoot";
 import { pinnedFirst } from "../lib/sessionStore";
-import { useVisitedRepos, visitedPlaceholders, withPlaceholders } from "../lib/visitedRepos";
+import {
+  mergeVisits,
+  useVisitedRepos,
+  visitedPlaceholders,
+  withPlaceholders,
+} from "../lib/visitedRepos";
 import { windowLabel, windowName, windowTint } from "../lib/windowScope";
 import { OutputFollow } from "./OutputFollow";
 import { SessionTitleInput } from "./SessionTitleInput";
@@ -558,7 +564,7 @@ export const SessionsPane = memo(function SessionsPane({
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      const scanned = await listSessions();
+      const scanned = workspaceGroups(await listSessions());
       setGroups(scanned);
       onGroups(scanned);
     } catch {
@@ -747,6 +753,13 @@ export const SessionsPane = memo(function SessionsPane({
       );
   }, [shownThreads, metaById, searching, haystacks, terms, activeHits]);
 
+  // Visits in workspace form. Keyed on `groups` too: the aliases arrive with repo
+  // discovery, after the first scan, and the next rescan is what picks them up.
+  const visits = useMemo(
+    () => mergeVisits(visited.visits, workspacePath),
+    [visited.visits, groups],
+  );
+
   const visible = useMemo(() => {
     const keep = (session: SessionMeta) => {
       if (threadedIds.has(session.id)) return false;
@@ -776,7 +789,7 @@ export const SessionsPane = memo(function SessionsPane({
     // Repos you were in that the scan cannot account for — no session there, or
     // none that survived the filters.
     const placeholders = visitedPlaceholders(
-      visited.visits,
+      visits,
       scanned.map((group) => group.cwd),
       { now: Date.now(), includeIdle: showIdle || searching },
     ).filter(
@@ -793,7 +806,7 @@ export const SessionsPane = memo(function SessionsPane({
     terms,
     haystacks,
     activeHits,
-    visited.visits,
+    visits,
     threadedIds,
   ]);
 
@@ -931,15 +944,22 @@ export const SessionsPane = memo(function SessionsPane({
     return { live, needsYou, review, total };
   }, [groups, flags]);
 
+  /** The session last scrolled into view, so a rescan does not do it again. */
+  const revealed = useRef<string | null>(null);
+
   // Keep the attached session visible when it changes out from under the scroll.
+  // Once per session: rescans land every few seconds, and re-revealing on each
+  // one dragged the list back to the attached row while you scrolled away from
+  // it, which a search full of rows above it made impossible to escape.
   useEffect(() => {
-    if (!activeSessionId) return;
+    if (!activeSessionId || revealed.current === activeSessionId) return;
     // Qualified: the repo row above carries `data-selected` too and comes first
     // in document order, so the bare selector scrolled the group header into
     // view and left the session row wherever it already was.
-    bodyRef.current
-      ?.querySelector('.session-row[data-selected="true"]')
-      ?.scrollIntoView({ block: "nearest" });
+    const row = bodyRef.current?.querySelector('.session-row[data-selected="true"]');
+    if (!row) return; // not scanned yet; a later scan retries
+    row.scrollIntoView({ block: "nearest" });
+    revealed.current = activeSessionId;
   }, [activeSessionId, groups]);
 
   const toggleGroup = (dirName: string) =>
@@ -1174,7 +1194,13 @@ export const SessionsPane = memo(function SessionsPane({
       // are, and forgetting the visit would not remove it.
       group.sessions.length === 0 && {
         label: "Forget this Repo",
-        run: () => visited.forget(group.cwd),
+        // Every key that names this tree, physical form included, or the row
+        // comes straight back from the one left behind.
+        run: () => {
+          for (const path of Object.keys(visited.visits)) {
+            if (workspacePath(path) === group.cwd) visited.forget(path);
+          }
+        },
       },
       "separator",
       { label: "Copy Path", run: () => void copyText(group.cwd) },
@@ -1182,7 +1208,7 @@ export const SessionsPane = memo(function SessionsPane({
       "separator",
       ...paneEntries(),
     ],
-    [onSelectRepo, onNewSession, collapsed, paneEntries, visited.forget],
+    [onSelectRepo, onNewSession, collapsed, paneEntries, visited.forget, visited.visits],
   );
 
   const agentRow = (agent: RunningAgent, session: SessionMeta, nested: boolean) => (
@@ -1769,7 +1795,7 @@ export const SessionsPane = memo(function SessionsPane({
           const isActiveRepo = activeCwd === group.cwd;
           // A group the scan produced always has sessions, so an empty one is a
           // repo you were in with nothing to list under it.
-          const visitedMs = group.sessions.length === 0 ? visited.visits[group.cwd] : undefined;
+          const visitedMs = group.sessions.length === 0 ? visits[group.cwd] : undefined;
           const isVisitOnly = visitedMs !== undefined;
           /** Sessions the scan found here that the toggles are holding back. */
           const scannedHere = groups.find((g) => g.cwd === group.cwd)?.sessions ?? [];

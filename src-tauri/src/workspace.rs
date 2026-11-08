@@ -28,6 +28,9 @@ pub struct RepoInfo {
     pub name: String,
     pub path: String,
     pub is_git: bool,
+    /// `path` with symlinks resolved. Git reports this form, so a workspace
+    /// reached through a symlink would otherwise give one repo two names.
+    pub physical: String,
 }
 
 fn modified_ms(metadata: &std::fs::Metadata) -> u64 {
@@ -154,10 +157,12 @@ pub fn discover_repos(root: String) -> Result<Vec<RepoInfo>, String> {
         if name.starts_with('.') {
             continue;
         }
+        let physical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         repos.push(RepoInfo {
             is_git: path.join(".git").exists(),
             name,
             path: path.to_string_lossy().into_owned(),
+            physical: physical.to_string_lossy().into_owned(),
         });
     }
     repos.sort_by_cached_key(|r| r.name.to_lowercase());

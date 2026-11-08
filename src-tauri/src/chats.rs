@@ -543,8 +543,8 @@ fn derive_title(text: &str) -> Option<String> {
 pub(crate) fn transcript_path(session_id: &str) -> Option<PathBuf> {
     let root = crate::sessions::projects_root()?;
     let name = format!("{session_id}.jsonl");
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
-        let candidate = entry.path().join(&name);
+    for (dir, _) in crate::sessions::project_dirs(&root) {
+        let candidate = dir.join(&name);
         if candidate.is_file() {
             return Some(candidate);
         }

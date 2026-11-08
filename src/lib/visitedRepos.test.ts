@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   cleanVisits,
   MAX_VISITED,
+  mergeVisits,
   projectDirName,
   pruneVisits,
   repoLabel,
@@ -145,5 +146,14 @@ describe("withPlaceholders", () => {
   it("hands back the scan untouched when nothing was visited", () => {
     const scanned = [group("/w/alpha", "alpha")];
     expect(withPlaceholders(scanned, [])).toBe(scanned);
+  });
+});
+
+describe("mergeVisits", () => {
+  it("folds a physical path into its workspace name, newest stamp winning", () => {
+    const rename = (path: string) => path.replace(/^\/data\/ws/, "/home/u/ws");
+    expect(
+      mergeVisits({ "/data/ws/app": NOW, "/home/u/ws/app": NOW - HOUR, "/w/b": NOW - 2 * HOUR }, rename),
+    ).toEqual({ "/home/u/ws/app": NOW, "/w/b": NOW - 2 * HOUR });
   });
 });
