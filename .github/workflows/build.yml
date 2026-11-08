@@ -35,8 +35,8 @@ jobs:
             bundle-target: aarch64-unknown-linux-gnu
             test-target: aarch64-unknown-linux-gnu
 
-          - os: macos-14
-            # One universal dmg instead of two: macos-14 is Apple Silicon, and
+          - os: macos-15
+            # One universal dmg instead of two: macos-15 is Apple Silicon, and
             # its Xcode carries both SDK slices, so the x86_64 half is a plain
             # cross-compile. `universal-apple-darwin` is a Tauri pseudo-target
             # and not a rustc one, hence the separate test-target below --
