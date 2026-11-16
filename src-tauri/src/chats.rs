@@ -456,6 +456,32 @@ impl ChatManager {
             .collect()
     }
 
+    /// Withdraw the asks a frame on `chat_id`'s stream has just overtaken.
+    ///
+    /// A `user` frame carrying a result for a tool call that still has an ask
+    /// open is the CLI moving on without an answer; see `release_resolved` for
+    /// when it does that. The stream carries every result, whatever the
+    /// reason for it, which the permission server is not always told.
+    fn withdraw_resolved_asks(&self, chat_id: &str, frame: &Value) {
+        let ids = tool_result_ids(frame);
+        if ids.is_empty() {
+            return;
+        }
+        let Some(permission) = self.permission.lock().clone() else {
+            return;
+        };
+        let released = permission.release_resolved(chat_id, &ids);
+        if released.is_empty() {
+            return;
+        }
+        let Some(app) = self.app.lock().clone() else {
+            return;
+        };
+        for request in &released {
+            crate::announce_withdrawn(&app, &request.id);
+        }
+    }
+
     /// Take a handle on one chat's stdin, releasing the map immediately.
     ///
     /// The write can park: a pasted screenshot is a base64 PNG well past the
@@ -547,6 +573,23 @@ impl ChatManager {
 //   3. An explicit rename appends a `custom-title`, the record kind
 //      `claude --name` writes, which outranks every `ai-title` in every
 //      lister — this app, the CLI picker, the VS Code extension.
+
+/// The tool calls a frame carries results for. Only `user` frames carry any;
+/// every other shape reads as none.
+fn tool_result_ids(frame: &Value) -> Vec<&str> {
+    frame
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+                .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Text of an outgoing user frame, as typed. `None` when there is none — an
 /// image with no caption cannot name a session.
@@ -1768,6 +1811,9 @@ pub fn start(
                         if value.get("type").and_then(|v| v.as_str()) == Some("result") {
                             running.store(false, Ordering::SeqCst);
                         }
+                        // Before the frame is forwarded, so the pane hears the
+                        // card withdrawn no later than it hears why.
+                        manager.withdraw_resolved_asks(&chat_id, &value);
                         manager.emit(
                             &chat_id,
                             EVENT_MESSAGE,
@@ -2305,6 +2351,22 @@ mod tests {
         assert_eq!(user_text_of(&image_only), None);
         let plain = json!({ "type": "user", "message": { "role": "user", "content": "hello" } });
         assert_eq!(user_text_of(&plain).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn tool_result_ids_reads_every_result_a_user_frame_carries() {
+        let frame = json!({ "type": "user", "message": { "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "toolu_1", "is_error": true, "content": "x" },
+            { "type": "text", "text": "note" },
+            { "type": "tool_result", "tool_use_id": "toolu_2", "content": [] },
+            { "type": "tool_result" }
+        ] } });
+        assert_eq!(tool_result_ids(&frame), ["toolu_1", "toolu_2"]);
+
+        // A typed prompt, and a frame with no message at all, answer no call.
+        let plain = json!({ "type": "user", "message": { "role": "user", "content": "hello" } });
+        assert!(tool_result_ids(&plain).is_empty());
+        assert!(tool_result_ids(&json!({ "type": "result" })).is_empty());
     }
 
     #[test]

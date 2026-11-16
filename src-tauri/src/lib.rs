@@ -45,6 +45,16 @@ pub use permission::{run_control_server, run_permission_server};
 
 pub const EVENT_SESSIONS_CHANGED: &str = "sessions://changed";
 
+/// Tell the windows an ask is no longer waiting on anyone.
+///
+/// Two events, because two things were showing it: the card, which stops
+/// offering an answer, and the rail, which held the session at `awaiting` for
+/// as long as the ask was open and has to be told to look again.
+pub(crate) fn announce_withdrawn(app: &AppHandle, request_id: &str) {
+    let _ = app.emit(permission::EVENT_WITHDRAWN, request_id);
+    let _ = app.emit(EVENT_SESSIONS_CHANGED, ());
+}
+
 /// Transcripts are appended to continuously during a turn, so the watcher is
 /// debounced hard — the sidebar only needs to know that *something* changed.
 ///
@@ -294,10 +304,7 @@ pub fn run() {
                         let _ = rescan.emit(EVENT_SESSIONS_CHANGED, ());
                     });
                 },
-                move |request| {
-                    let _ = withdrawn_handle.emit(permission::EVENT_WITHDRAWN, &request.id);
-                    let _ = withdrawn_handle.emit(EVENT_SESSIONS_CHANGED, ());
-                },
+                move |request| announce_withdrawn(&withdrawn_handle, &request.id),
                 // Asks for a chat this process does not hold belong to a
                 // previous run's survivors; the bridge denies those rather than
                 // parking them on a prompt no window will show.

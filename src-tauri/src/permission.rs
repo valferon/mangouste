@@ -156,6 +156,66 @@ impl PermissionState {
         }
     }
 
+    /// Drop the asks whose tool call the CLI has already answered for itself.
+    ///
+    /// `tool_use_ids` are the calls a chat's stream just carried results for.
+    /// A result for a call that is still gated here means the CLI stopped
+    /// waiting without saying so, and nothing else would ever notice: the
+    /// hangup watcher only fires when the server is told. The ask then sits in
+    /// `pending` for the life of the chat, the rail pins the session at
+    /// `awaiting` while it works, and the card stays up for a question nothing
+    /// is waiting on.
+    ///
+    /// That is how the CLI's idle watchdog ends a silent MCP call
+    /// (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, 30 minutes for a stdio server): it
+    /// fails the tool and sends no `notifications/cancelled`, measured on CLI
+    /// 2.1.322. `Heartbeat` keeps an ask from tripping it, so this is the
+    /// backstop for what the heartbeat does not cover: a client that sends no
+    /// progress token, an idle limit shorter than the heartbeat, and any other
+    /// way of answering a gated call without a cancel.
+    ///
+    /// An answered ask is already out of `pending` when its tool's result
+    /// arrives, so this only ever finds the abandoned ones. Returns what it
+    /// released, for the caller to withdraw.
+    pub fn release_resolved(&self, chat_id: &str, tool_use_ids: &[&str]) -> Vec<PermissionRequest> {
+        if tool_use_ids.is_empty() {
+            return Vec::new();
+        }
+        let released: Vec<(PermissionRequest, Sender<PermissionDecision>)> = {
+            let mut pending = self.pending.lock();
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, (request, _, _))| {
+                    request.chat_id.as_deref() == Some(chat_id)
+                        && request
+                            .tool_use_id
+                            .as_deref()
+                            .is_some_and(|id| tool_use_ids.contains(&id))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .map(|(request, sender, _)| (request, sender))
+                .collect()
+        };
+        released
+            .into_iter()
+            .map(|(request, sender)| {
+                // Wakes the bridge thread, which answers the server and hangs
+                // up. That answer is for a call the CLI has already resolved
+                // for itself, so nothing on its side is waiting to read it.
+                let _ = sender.send(PermissionDecision {
+                    id: request.id.clone(),
+                    behavior: "deny".into(),
+                    message: Some("the CLI stopped waiting on this ask".into()),
+                    updated_input: None,
+                });
+                request
+            })
+            .collect()
+    }
+
     /// Outstanding asks for one chat, for a window that has just attached to it
     /// and needs to render prompts raised while nothing was watching.
     pub fn pending_for(&self, chat_id: &str) -> Vec<PermissionRequest> {
@@ -528,6 +588,9 @@ fn uuid_like() -> String {
 /// the CLI timed that call out after 30 minutes, but every later ask sat unread
 /// in the pipe, so no card ever reached a window and the turn hung on the tool.
 /// Reading stays on this thread so `notifications/cancelled` is always seen.
+///
+/// That 30 minutes is the CLI's idle watchdog, and an open ask now outlives it:
+/// see `Heartbeat`.
 pub fn run_permission_server(socket_path: String, chat_id: Option<String>) {
     serve(socket_path, chat_id, true)
 }
@@ -545,8 +608,7 @@ pub fn run_control_server() {
 fn serve(socket_path: String, chat_id: Option<String>, with_approve: bool) {
     let stdin = std::io::stdin();
     let stdout = Arc::new(Mutex::new(std::io::stdout()));
-    // Keyed by the JSON-RPC id's text form, since ids may be numbers or strings.
-    let in_flight: Arc<Mutex<HashMap<String, UnixStream>>> = Arc::default();
+    let in_flight: Arc<InFlight> = Arc::default();
 
     for line in stdin.lock().lines().map_while(Result::ok) {
         if line.trim().is_empty() {
@@ -618,19 +680,40 @@ fn serve(socket_path: String, chat_id: Option<String>, with_approve: bool) {
                     });
                     continue;
                 }
+                // The id's text form, since ids may be numbers or strings.
                 let key = id.as_ref().map(|id| id.to_string());
                 let socket_path = socket_path.clone();
                 let chat_id = chat_id.clone();
                 let stdout = Arc::clone(&stdout);
                 let in_flight = Arc::clone(&in_flight);
+                // Registered here, on the thread that reads cancels, so a
+                // cancel can never be read ahead of the call it names.
+                if let Some(key) = &key {
+                    in_flight.begin(key);
+                }
+                // Absent from a client that is not listening for progress, and
+                // then there is nothing to report against: the ask simply runs
+                // into that client's own limit, as it always did.
+                let progress_token = message
+                    .get("params")
+                    .and_then(|p| p.get("_meta"))
+                    .and_then(|m| m.get("progressToken"))
+                    .cloned();
                 std::thread::spawn(move || {
+                    let heartbeat = progress_token
+                        .map(|token| Heartbeat::start(Arc::clone(&stdout), token, ASK_HEARTBEAT));
                     let verdict = ask_app(&socket_path, chat_id.as_deref(), &arguments, |stream| {
-                        if let (Some(key), Ok(clone)) = (&key, stream.try_clone()) {
-                            in_flight.lock().insert(key.clone(), clone);
+                        if let Some(key) = &key {
+                            in_flight.connected(key, stream);
                         }
                     });
                     if let Some(key) = &key {
-                        in_flight.lock().remove(key);
+                        in_flight.finish(key);
+                    }
+                    // Before the response, never after: the protocol has
+                    // progress stop once the call it reports on is answered.
+                    if let Some(heartbeat) = heartbeat {
+                        heartbeat.stop();
                     }
                     let result = serde_json::json!({
                         "content": [{ "type": "text", "text": verdict.to_string() }],
@@ -639,16 +722,19 @@ fn serve(socket_path: String, chat_id: Option<String>, with_approve: bool) {
                 });
                 continue;
             }
-            // The CLI gave up on an ask (its tool timeout, or the user typed
-            // over it). Hanging up is what tells the daemon, which withdraws the
-            // card rather than leaving a prompt that can no longer be answered.
+            // The CLI gave up on an ask and said so (the user typed over it, or
+            // the turn was interrupted). Hanging up is what tells the daemon,
+            // which withdraws the card rather than leaving a prompt that can no
+            // longer be answered. When the CLI gives up without saying so, the
+            // daemon finds out from the chat's stream instead: see
+            // `PermissionState::release_resolved`.
             "notifications/cancelled" => {
                 let key = message
                     .get("params")
                     .and_then(|p| p.get("requestId"))
                     .map(|id| id.to_string());
-                if let Some(stream) = key.and_then(|key| in_flight.lock().remove(&key)) {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                if let Some(key) = key {
+                    in_flight.cancel(&key);
                 }
                 continue;
             }
@@ -663,6 +749,73 @@ fn serve(socket_path: String, chat_id: Option<String>, with_approve: bool) {
     }
 }
 
+/// Where one open `approve` call stands with the daemon.
+enum AskSlot {
+    /// Dispatched; its thread has not reached the daemon yet.
+    Starting,
+    /// Waiting on the daemon over this stream.
+    Open(UnixStream),
+    /// Cancelled before it reached the daemon: hang up as soon as it does.
+    Cancelled,
+}
+
+/// The server's open `approve` calls, keyed by JSON-RPC id.
+///
+/// A cancel is read on the stdin thread while the ask it names connects on a
+/// thread of its own, so the cancel can be first. With only the connected
+/// streams on record it then found nothing to hang up and was dropped, and
+/// the ask it should have ended waited on the daemon until the chat died.
+/// Every call is on record from the moment it is read, so a cancel always
+/// finds it, connected or not.
+#[derive(Default)]
+struct InFlight {
+    slots: Mutex<HashMap<String, AskSlot>>,
+}
+
+impl InFlight {
+    /// Record a call as it is read. Only on the stdin thread.
+    fn begin(&self, key: &str) {
+        self.slots.lock().insert(key.to_string(), AskSlot::Starting);
+    }
+
+    /// The ask has reached the daemon over `stream`. Hung up on the spot if
+    /// the cancel got there first, which the daemon reads as a withdrawal.
+    fn connected(&self, key: &str, stream: &UnixStream) {
+        let mut slots = self.slots.lock();
+        match slots.get(key) {
+            Some(AskSlot::Starting) => {
+                if let Ok(clone) = stream.try_clone() {
+                    slots.insert(key.to_string(), AskSlot::Open(clone));
+                }
+            }
+            Some(AskSlot::Cancelled) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            Some(AskSlot::Open(_)) | None => {}
+        }
+    }
+
+    /// The CLI cancelled a request. Anything that is not an open ask (a
+    /// control call, an ask already answered) is left unrecorded.
+    fn cancel(&self, key: &str) {
+        let mut slots = self.slots.lock();
+        match slots.get(key) {
+            Some(AskSlot::Open(stream)) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            Some(AskSlot::Starting) => {
+                slots.insert(key.to_string(), AskSlot::Cancelled);
+            }
+            Some(AskSlot::Cancelled) | None => {}
+        }
+    }
+
+    /// The call has its verdict, whichever way it ended.
+    fn finish(&self, key: &str) {
+        self.slots.lock().remove(key);
+    }
+}
+
 /// One JSON-RPC reply, whole-line under the lock so concurrent asks never
 /// interleave on stdout. `false` once the CLI has gone away.
 fn write_response(
@@ -670,9 +823,79 @@ fn write_response(
     id: Option<serde_json::Value>,
     result: serde_json::Value,
 ) -> bool {
-    let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
-    let mut stdout = stdout.lock();
-    writeln!(stdout, "{response}").is_ok() && stdout.flush().is_ok()
+    write_message(
+        stdout,
+        &serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+    )
+}
+
+/// One JSON-RPC message as one line. Generic over the writer so the heartbeat
+/// can be tested against a buffer; in the server it is always stdout.
+fn write_message<W: Write>(out: &Mutex<W>, message: &serde_json::Value) -> bool {
+    let mut out = out.lock();
+    writeln!(out, "{message}").is_ok() && out.flush().is_ok()
+}
+
+/// How often an open ask tells the CLI it is still alive.
+///
+/// The CLI compares the age of the last progress against its idle limit, so an
+/// ask survives any limit longer than this interval, and the default limit is
+/// ninety of them. The cost is one short line.
+const ASK_HEARTBEAT: Duration = Duration::from_secs(20);
+
+/// Progress notifications for one open ask, until it is stopped.
+///
+/// The CLI fails an MCP call that has sent "no response or progress" for its
+/// idle limit: `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, 30 minutes by default for a
+/// stdio server. An ask is silent by nature, since it is waiting on a person,
+/// so a question left for half an hour came back to the model as a tool error
+/// and the turn carried on without its answer. Both halves of the bridge say
+/// an ask waits for a human; this is what makes the CLI agree.
+///
+/// Measured on CLI 2.1.322 with the limit set to 5s: a silent `approve` was
+/// failed at the watchdog's first 30s tick, and one sending progress on its
+/// `_meta.progressToken` every 5s was still open at 75s and its late `allow`
+/// ran the tool. Read from that build rather than measured: the CLI's separate
+/// cap on a whole call (`MCP_TOOL_TIMEOUT`, 1e8 ms by default) is not reset by
+/// progress, so an ask still ends there, a little under 28 hours in.
+struct Heartbeat {
+    /// Dropped to stop: the thread's wait ends at once, with nothing to send.
+    stop: Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Heartbeat {
+    fn start<W: Write + Send + 'static>(
+        out: Arc<Mutex<W>>,
+        token: serde_json::Value,
+        every: Duration,
+    ) -> Self {
+        let (stop, stopped) = channel::<()>();
+        let thread = std::thread::spawn(move || {
+            // `progress` must increase from one notification to the next.
+            let mut beats: u64 = 0;
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every)
+            {
+                beats += 1;
+                let beat = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": { "progressToken": token, "progress": beats },
+                });
+                // The CLI has gone away; the ask ends with its socket.
+                if !write_message(&out, &beat) {
+                    break;
+                }
+            }
+        });
+        Self { stop, thread }
+    }
+
+    /// Stop, and wait until the last beat is fully written or never started.
+    fn stop(self) {
+        drop(self.stop);
+        let _ = self.thread.join();
+    }
 }
 
 /// Forward one ask to the daemon and block for the answer.
@@ -830,6 +1053,160 @@ mod tests {
                 updated_input: None,
             })
             .is_err());
+    }
+
+    fn ask_for(id: &str, chat_id: &str, tool_use_id: Option<&str>) -> PermissionRequest {
+        PermissionRequest {
+            chat_id: Some(chat_id.into()),
+            tool_use_id: tool_use_id.map(str::to_string),
+            ..ask(id)
+        }
+    }
+
+    /// The CLI answering a gated tool call itself is the end of the ask: the
+    /// bridge thread is released and the session stops reading as blocked.
+    #[test]
+    fn a_tool_result_releases_the_ask_that_gated_it() {
+        let state = PermissionState::default();
+        let (sender, receiver) = channel();
+        state.pending.lock().insert(
+            "a".into(),
+            (
+                ask_for("a", "chat", Some("toolu_1")),
+                sender,
+                Instant::now() - AWAITING_SETTLE,
+            ),
+        );
+        assert!(state.awaiting_chats().contains("chat"));
+
+        let released = state.release_resolved("chat", &["toolu_0", "toolu_1"]);
+
+        assert_eq!(
+            released.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["a"]
+        );
+        assert_eq!(receiver.recv().unwrap().behavior, "deny");
+        assert!(state.awaiting_chats().is_empty());
+        assert!(state.pending_for("chat").is_empty());
+    }
+
+    /// Only the ask for that tool call, in that chat. Tool-use ids are the
+    /// CLI's, so another chat's ask or another call's ask is not this one, and
+    /// an ask that named no call cannot be matched to a result at all.
+    #[test]
+    fn a_tool_result_releases_no_other_ask() {
+        let state = PermissionState::default();
+        let mut receivers = Vec::new();
+        for request in [
+            ask_for("other-chat", "elsewhere", Some("toolu_1")),
+            ask_for("other-call", "chat", Some("toolu_2")),
+            ask_for("no-call", "chat", None),
+        ] {
+            let (sender, receiver) = channel();
+            receivers.push(receiver);
+            state
+                .pending
+                .lock()
+                .insert(request.id.clone(), (request, sender, Instant::now()));
+        }
+
+        assert!(state.release_resolved("chat", &["toolu_1"]).is_empty());
+        assert!(state.release_resolved("chat", &[]).is_empty());
+
+        assert_eq!(state.pending_for("chat").len(), 2);
+        assert_eq!(state.pending_for("elsewhere").len(), 1);
+        assert!(receivers.iter().all(|r| r.try_recv().is_err()));
+    }
+
+    fn lines_of(out: &Mutex<Vec<u8>>) -> Vec<serde_json::Value> {
+        String::from_utf8(out.lock().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Whether the other end of `peer` hangs up within `wait`.
+    fn hangs_up_within(peer: &UnixStream, wait: Duration) -> bool {
+        use std::io::Read;
+        peer.set_read_timeout(Some(wait)).unwrap();
+        let mut byte = [0u8; 1];
+        let mut peer = peer;
+        matches!(peer.read(&mut byte), Ok(0))
+    }
+
+    /// The ordinary order: the ask is waiting on the daemon when the CLI
+    /// cancels it, and the cancel hangs up.
+    #[test]
+    fn a_cancel_hangs_up_an_ask_that_is_waiting() {
+        let in_flight = InFlight::default();
+        let (ask, daemon) = UnixStream::pair().unwrap();
+        in_flight.begin("1");
+        in_flight.connected("1", &ask);
+        assert!(!hangs_up_within(&daemon, Duration::from_millis(50)));
+
+        in_flight.cancel("1");
+
+        assert!(hangs_up_within(&daemon, Duration::from_secs(2)));
+    }
+
+    /// The cancel is read on one thread and the ask connects on another, so
+    /// the cancel can be first. It used to find nothing to hang up and was
+    /// dropped, leaving an ask nothing would ever release.
+    #[test]
+    fn a_cancel_that_beats_the_connection_hangs_up_on_arrival() {
+        let in_flight = InFlight::default();
+        let (ask, daemon) = UnixStream::pair().unwrap();
+        in_flight.begin("1");
+
+        in_flight.cancel("1");
+        in_flight.connected("1", &ask);
+
+        assert!(hangs_up_within(&daemon, Duration::from_secs(2)));
+    }
+
+    /// A cancel for anything that is not an open ask (a control call, an ask
+    /// already answered) is not remembered: nothing would ever clear it.
+    #[test]
+    fn a_cancel_for_no_open_ask_leaves_nothing_behind() {
+        let in_flight = InFlight::default();
+        in_flight.cancel("9");
+        in_flight.begin("1");
+        in_flight.finish("1");
+        in_flight.cancel("1");
+
+        assert!(in_flight.slots.lock().is_empty());
+    }
+
+    /// While an ask is open the server keeps telling the CLI it is alive, on
+    /// the token the call came with, and says nothing more once it is stopped:
+    /// the protocol has progress end when the call's response is sent.
+    #[test]
+    fn heartbeat_reports_progress_until_it_is_stopped() {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let heartbeat = Heartbeat::start(
+            Arc::clone(&out),
+            serde_json::json!(7),
+            Duration::from_millis(10),
+        );
+        // Waited for, not slept for: a starved runner still gets its beats.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lines_of(&out).len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        heartbeat.stop();
+
+        let beats = lines_of(&out);
+        assert!(beats.len() >= 2, "expected several beats, got {beats:?}");
+        for (index, beat) in beats.iter().enumerate() {
+            assert_eq!(beat["method"], "notifications/progress");
+            assert_eq!(beat["params"]["progressToken"], 7);
+            assert_eq!(beat["params"]["progress"], index as u64 + 1);
+            assert!(beat.get("id").is_none());
+        }
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(lines_of(&out).len(), beats.len());
     }
 
     /// The upgrade story rests on this one property.
