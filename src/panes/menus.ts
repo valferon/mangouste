@@ -227,7 +227,7 @@ export interface TabMenuContext {
   onRename: (tabId: string, sessionId: string, label: string) => void;
   onSave: (path: string) => void;
   onNewSession: (cwd: string) => void;
-  /** Put this session beside the one that was in front before the right-click. */
+  /** Put this session or file beside the tab that was in front before the right-click. */
   onOpenToSide: (tabId: string) => void;
   /** Whether the tab is one half of the side-by-side pair. */
   inSplit: (tabId: string) => boolean;
@@ -262,13 +262,13 @@ export function tabMenu(tab: Tab, ctx: TabMenuContext): MenuEntry[] {
       label: "Rename Session…",
       run: () => ctx.onRename(tab.id, sessionId, label),
     },
-    chat &&
+    (chat || file) &&
       !ctx.inSplit(tab.id) && {
         label: "Open to the Side",
         accelerator: CHORD.splitSession,
         run: () => ctx.onOpenToSide(tab.id),
       },
-    chat && ctx.inSplit(tab.id) && { label: "Unsplit Sessions", run: ctx.onUnsplit },
+    (chat || file) && ctx.inSplit(tab.id) && { label: "Unsplit", run: ctx.onUnsplit },
     "separator",
     sessionId && { label: "Copy Session Id", run: () => void copyText(sessionId) },
     chat && { label: "Copy Working Directory", run: () => void copyText(chat.cwd) },

@@ -22,12 +22,13 @@
 //! asks out to whichever windows are attached — with none attached, the ask
 //! simply waits, which is what a session parked in `awaiting` should do.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::control::{read_request_line, RequestError};
 
@@ -37,6 +38,13 @@ use serde::{Deserialize, Serialize};
 pub const EVENT_REQUEST: &str = "permission://request";
 /// An ask the CLI stopped waiting on, carrying its request id.
 pub const EVENT_WITHDRAWN: &str = "permission://withdrawn";
+
+/// How long an ask must stay open before the session rail calls it `awaiting`.
+///
+/// A tool on the pane's "always allow" list is answered by the window within
+/// milliseconds of the ask landing. Counting those would flash the row and fire
+/// an `awaiting` notification for a prompt nobody was ever shown.
+pub const AWAITING_SETTLE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,11 +74,15 @@ pub struct PermissionDecision {
     pub updated_input: Option<serde_json::Value>,
 }
 
+/// An open ask, the channel its answer goes back on, and when it landed.
+type Pending = (PermissionRequest, Sender<PermissionDecision>, Instant);
+
 #[derive(Default)]
 pub struct PermissionState {
     /// The ask is kept next to its channel so a window that attaches later can
     /// be handed prompts raised while nothing was watching.
-    pending: Mutex<HashMap<String, (PermissionRequest, Sender<PermissionDecision>)>>,
+    /// The `Instant` is when the ask landed, for `AWAITING_SETTLE`.
+    pending: Mutex<HashMap<String, Pending>>,
     socket_path: Mutex<Option<String>>,
 }
 
@@ -82,11 +94,14 @@ impl PermissionState {
     /// Answer a pending prompt. The waiting bridge thread unblocks and replies
     /// to the MCP server, which returns the verdict to the CLI.
     pub fn respond(&self, decision: PermissionDecision) -> Result<(), String> {
-        let sender = self
+        // Removed here rather than by the bridge thread once it wakes, so the
+        // rail rescan the caller triggers after answering already sees the
+        // session unblocked. The bridge's own removal is then a no-op, and so is
+        // the hangup watcher's: an answered ask is gone from `pending`.
+        let (_, sender, _) = self
             .pending
             .lock()
-            .get(&decision.id)
-            .map(|(_, sender)| sender.clone())
+            .remove(&decision.id)
             .ok_or("no such pending permission request")?;
         sender.send(decision).map_err(|e| e.to_string())
     }
@@ -96,7 +111,22 @@ impl PermissionState {
         self.pending
             .lock()
             .get(id)
-            .and_then(|(request, _)| request.chat_id.clone())
+            .and_then(|(request, _, _)| request.chat_id.clone())
+    }
+
+    /// Chats with an ask that has been open for at least `AWAITING_SETTLE`.
+    ///
+    /// A permission prompt never reaches the transcript: the tool call it gates
+    /// sits there unanswered, which reads exactly like a tool still running. So
+    /// the session scan asks this instead, or a session blocked on you shows as
+    /// `active` for as long as you leave it.
+    pub fn awaiting_chats(&self) -> HashSet<String> {
+        self.pending
+            .lock()
+            .values()
+            .filter(|(_, _, asked_at)| asked_at.elapsed() >= AWAITING_SETTLE)
+            .filter_map(|(request, _, _)| request.chat_id.clone())
+            .collect()
     }
 
     /// Deny and drop every pending ask for one chat.
@@ -109,11 +139,11 @@ impl PermissionState {
             let mut pending = self.pending.lock();
             let ids: Vec<String> = pending
                 .iter()
-                .filter(|(_, (request, _))| request.chat_id.as_deref() == Some(chat_id))
+                .filter(|(_, (request, _, _))| request.chat_id.as_deref() == Some(chat_id))
                 .map(|(id, _)| id.clone())
                 .collect();
             ids.into_iter()
-                .filter_map(|id| pending.remove(&id).map(|(_, sender)| (id, sender)))
+                .filter_map(|id| pending.remove(&id).map(|(_, sender, _)| (id, sender)))
                 .collect()
         };
         for (id, sender) in cancelled {
@@ -132,8 +162,8 @@ impl PermissionState {
         self.pending
             .lock()
             .values()
-            .filter(|(request, _)| request.chat_id.as_deref() == Some(chat_id))
-            .map(|(request, _)| request.clone())
+            .filter(|(request, _, _)| request.chat_id.as_deref() == Some(chat_id))
+            .map(|(request, _, _)| request.clone())
             .collect()
     }
 }
@@ -387,7 +417,7 @@ fn handle_ask<F, G, H>(
     state
         .pending
         .lock()
-        .insert(id.clone(), (request.clone(), sender));
+        .insert(id.clone(), (request.clone(), sender, Instant::now()));
     // Checked again now the ask is registered. A kill drops the chat and then
     // sweeps `pending`; one landing between the check above and the insert
     // swept before this ask was there to be found, and nothing else would
@@ -457,7 +487,7 @@ fn watch_for_hangup(
         use std::io::Read;
         let mut byte = [0u8; 1];
         let _ = peer.read(&mut byte);
-        let Some((request, sender)) = state.pending.lock().remove(&id) else {
+        let Some((request, sender, _)) = state.pending.lock().remove(&id) else {
             return;
         };
         let _ = sender.send(PermissionDecision {
@@ -707,7 +737,10 @@ mod tests {
         let state = Arc::new(PermissionState::default());
         let (bridge, server) = UnixStream::pair().unwrap();
         let (sender, receiver) = channel();
-        state.pending.lock().insert("a".into(), (ask("a"), sender));
+        state
+            .pending
+            .lock()
+            .insert("a".into(), (ask("a"), sender, Instant::now()));
         let (told, heard) = channel();
         watch_for_hangup(
             &state,
@@ -742,6 +775,60 @@ mod tests {
 
         assert!(heard
             .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+    }
+
+    /// An ask only blocks the session once it has outlived an auto-allow.
+    #[test]
+    fn awaiting_chats_waits_out_the_settle_window() {
+        let state = PermissionState::default();
+        let (fresh, _fresh_rx) = channel();
+        let (old, _old_rx) = channel();
+        let mut settled = ask("b");
+        settled.chat_id = Some("other".into());
+        state
+            .pending
+            .lock()
+            .insert("a".into(), (ask("a"), fresh, Instant::now()));
+        state
+            .pending
+            .lock()
+            .insert("b".into(), (settled, old, Instant::now() - AWAITING_SETTLE));
+
+        let awaiting = state.awaiting_chats();
+        assert!(awaiting.contains("other"));
+        assert!(!awaiting.contains("chat"));
+    }
+
+    /// Answering takes the ask out of `pending` at once, so a rescan fired
+    /// right after the answer cannot still read the session as blocked.
+    #[test]
+    fn respond_clears_the_ask_immediately() {
+        let state = PermissionState::default();
+        let (sender, receiver) = channel();
+        state.pending.lock().insert(
+            "a".into(),
+            (ask("a"), sender, Instant::now() - AWAITING_SETTLE),
+        );
+
+        state
+            .respond(PermissionDecision {
+                id: "a".into(),
+                behavior: "allow".into(),
+                message: None,
+                updated_input: None,
+            })
+            .unwrap();
+
+        assert!(state.awaiting_chats().is_empty());
+        assert_eq!(receiver.recv().unwrap().behavior, "allow");
+        assert!(state
+            .respond(PermissionDecision {
+                id: "a".into(),
+                behavior: "allow".into(),
+                message: None,
+                updated_input: None,
+            })
             .is_err());
     }
 

@@ -640,19 +640,30 @@ export const SessionsPane = memo(function SessionsPane({
     };
   }, [refresh]);
 
-  // The session you are watching cannot be pending your review. Marked passive:
-  // "its pane is open" is weaker evidence than a deliberate open, so it must not
-  // clear an explicit "mark unread".
-  useEffect(() => {
-    if (!activeSessionId) return;
+  // Opening a session marks it read. Marked passive: "its pane is open" is
+  // weaker evidence than a deliberate open, so it must not clear an explicit
+  // "mark unread".
+  //
+  // Only the open counts. New activity on a session that was already open stays
+  // unread until you click its row: being the open pane is not proof you saw a
+  // turn end, and jumping to the next finished session used to lose it for good.
+  const watched = useMemo(() => {
+    if (!activeSessionId) return null;
     for (const group of groups) {
       const open = group.sessions.find((session) => session.id === activeSessionId);
-      if (open) {
-        flags.markSeen(open, { passive: true });
-        return;
-      }
+      if (open) return open;
     }
-  }, [activeSessionId, groups, flags]);
+    return null;
+  }, [activeSessionId, groups]);
+  const watchedRef = useRef(watched);
+  watchedRef.current = watched;
+  const flagsRef = useRef(flags);
+  flagsRef.current = flags;
+  const openId = watched?.id ?? null;
+  useEffect(() => {
+    const session = watchedRef.current;
+    if (session?.id === openId && session) flagsRef.current.markSeen(session, { passive: true });
+  }, [openId]);
 
   const terms = useMemo(() => queryTerms(query), [query]);
   const searching = terms.length > 0;

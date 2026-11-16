@@ -31,9 +31,15 @@ export function relativePath(root: string, path: string): string {
  * viewer reads from disk with no cwd of its own: handed the bare relative form
  * it asked for a path relative to wherever the app was launched. An absolute
  * path only has its dots folded. A `..` past the root stays at the root.
+ *
+ * A leading `~` is the home directory when `home` is known. Without it the `~`
+ * is an ordinary segment, which opens nothing rather than the wrong file.
  */
-export function resolvePath(base: string, path: string): string {
-  const joined = path.startsWith("/") || !base ? path : `${base.replace(/\/+$/, "")}/${path}`;
+export function resolvePath(base: string, path: string, home?: string | null): string {
+  const expanded =
+    home && (path === "~" || path.startsWith("~/")) ? `${home.replace(/\/+$/, "")}${path.slice(1)}` : path;
+  const joined =
+    expanded.startsWith("/") || !base ? expanded : `${base.replace(/\/+$/, "")}/${expanded}`;
   const kept: string[] = [];
   for (const part of joined.split("/")) {
     if (part === "" || part === ".") continue;
@@ -54,4 +60,17 @@ export function ancestorsWithin(root: string, path: string): string[] {
     at = parentDir(at);
   }
   return dirs;
+}
+
+/**
+ * Whether inline code reads as a file reference worth making clickable.
+ *
+ * At least two segments, so a bare `README.md` or a commit hash stays text.
+ * Relative, absolute and `~/` forms all count, with an optional `:line`.
+ * Anything with a space (`cat /x/y`) is a command, not a path.
+ */
+const PATH_LIKE = /^(?:~\/|\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+(?::\d+)?$/;
+
+export function isPathLike(text: string): boolean {
+  return PATH_LIKE.test(text);
 }

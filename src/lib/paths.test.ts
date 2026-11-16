@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ancestorsWithin, baseName, parentDir, relativePath, resolvePath } from "./paths";
+import { ancestorsWithin, baseName, isPathLike, parentDir, relativePath, resolvePath } from "./paths";
 
 describe("baseName", () => {
   it("takes the last segment", () => {
@@ -62,6 +62,21 @@ describe("relativePath", () => {
 });
 
 describe("resolvePath", () => {
+  it("expands a leading ~ against the home directory", () => {
+    expect(resolvePath("/repo", "~/cost-patrol/r.md", "/home/val")).toBe("/home/val/cost-patrol/r.md");
+    expect(resolvePath("/repo", "~", "/home/val/")).toBe("/home/val");
+  });
+
+  it("treats ~ as relative when the home directory is unknown", () => {
+    expect(resolvePath("/repo", "~/x.md")).toBe("/repo/~/x.md");
+    expect(resolvePath("/repo", "~/x.md", null)).toBe("/repo/~/x.md");
+  });
+
+  it("leaves a ~ that is not the first segment alone", () => {
+    expect(resolvePath("/repo", "a/~/x.md", "/home/val")).toBe("/repo/a/~/x.md");
+    expect(resolvePath("/repo", "~user/x.md", "/home/val")).toBe("/repo/~user/x.md");
+  });
+
   it("joins a relative path onto the base", () => {
     expect(resolvePath("/repo", "src/lib/ipc.ts")).toBe("/repo/src/lib/ipc.ts");
     expect(resolvePath("/repo/", "README.md")).toBe("/repo/README.md");
@@ -91,5 +106,24 @@ describe("ancestorsWithin", () => {
     expect(ancestorsWithin("/repo", "/repo/README.md")).toEqual([]);
     expect(ancestorsWithin("/repo", "/elsewhere/x.ts")).toEqual([]);
     expect(ancestorsWithin("/repo", "/repository/x.ts")).toEqual([]);
+  });
+});
+
+describe("isPathLike", () => {
+  it("accepts relative, absolute and home paths", () => {
+    expect(isPathLike("src/lib/ipc.ts")).toBe(true);
+    expect(isPathLike("./a/b.md")).toBe(true);
+    expect(isPathLike("../a/b.md")).toBe(true);
+    expect(isPathLike("/home/val/cost-patrol/reports/2026-11-12.md")).toBe(true);
+    expect(isPathLike("~/cost-patrol/reports/2026-11-12.md")).toBe(true);
+    expect(isPathLike("src/lib/ipc.ts:42")).toBe(true);
+  });
+
+  it("rejects things that are not a file reference", () => {
+    expect(isPathLike("README.md")).toBe(false);
+    expect(isPathLike("~")).toBe(false);
+    expect(isPathLike("~user/x.md")).toBe(false);
+    expect(isPathLike("cat /home/val/x.md")).toBe(false);
+    expect(isPathLike("170d667")).toBe(false);
   });
 });

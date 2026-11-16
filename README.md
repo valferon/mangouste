@@ -299,6 +299,7 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src/lib/sessionControl.ts` | What those tool calls may do, checked before App does it |
 | `src-tauri/src/stats.rs` | Corpus-wide tokens and cost, resumed by byte offset |
 | `src-tauri/src/usage.rs` | Anthropic usage windows, opt-in |
+| `src-tauri/src/account.rs` | Which `CLAUDE_CONFIG_DIR` the readers and every `claude` child use |
 
 ### Chat transport
 
@@ -711,6 +712,56 @@ The rest follows from the tab holding a program instead of a pane:
   works the same way, and says so when there is no transcript to write to yet.
 - **Entries written before this existed still restore.** A stored tab with no
   surface is a chat tab, which is the only surface there used to be.
+
+## Which account
+
+The CLI keeps an account in one config directory: credentials, `.claude.json`,
+sessions, history, and by default the transcripts. `CLAUDE_CONFIG_DIR`
+points it at another one. Two accounts are two directories: `main` is
+`~/.claude`, and every directory under `~/.claude-accounts/` is listed by its
+name, with the signed-in address read out of its `.claude.json`.
+
+Switching and managing are two places. The account button in the Usage header
+picks the one in use, from a menu of every account. Settings ▸ **accounts**
+manages them: add one, sign it in, sign it in again, remove it. It does not
+switch, and only marks which one is in use. Adding does what `claude-acct add`
+does: the directory, symlinks to main's instructions, settings, rules, agents,
+commands, skills, hooks, plugins, scripts and `projects`, and a seed
+`.claude.json` carrying the user-scope MCP servers and nothing about who is
+signed in. Sign-in runs `claude auth login` under that directory with no stdin;
+the browser does the rest, and the URL is offered as a link should it not open.
+A flow that wants a pasted code ends instead of hanging, and a terminal does that
+one. Remove deletes the directory, never `main` and never the one in use;
+symlinks are unlinked, not followed.
+
+The choice reaches three places, through one module so they cannot disagree.
+Every `claude` this app spawns (a chat pane, the Haiku helpers that retitle
+and expand searches, the plugin CLI, and the login shell behind each terminal
+tab) gets that `CLAUDE_CONFIG_DIR`, or none at all for `main`. The usage
+window reads that account's credentials. The Sessions rail scans that account's
+`projects`, and a watcher is put on the new root at the switch so the rail keeps
+updating.
+
+A running process cannot change account: the environment is read once, at
+spawn. So each chat records the account it was spawned under, and the next
+message sent from an idle pane on another account respawns it first, resuming
+the same session id under the account now in effect, with a notice in the
+transcript saying so. That is what lets a session that ran into one account's
+limit carry on under another. A turn in flight is left alone, and a message
+sent during it queues behind it on the old account. When the two accounts do not
+share `projects`, the transcript and its sidecar directory are copied into the
+new account's `projects` before the resume, since the CLI only resumes what it
+finds there; with them shared (the `claude-acct` layout) nothing is copied.
+Terminal tabs keep the shell they opened with.
+
+The choice is the process's, not a window's, and it is kept in a file
+(`~/.config/mangouste/account` on Linux) rather than in a webview's storage: the
+rail scan and the session watcher run before any frontend is up to say
+otherwise. With no file, the account the process was launched under is the one
+in effect, so `CLAUDE_CONFIG_DIR=… mangouste` keeps meaning what it did; with
+neither, `main`. A saved name whose directory is gone is ignored rather than
+honoured, because pointing the CLI at a missing config directory makes it
+create a fresh, signed-out one there.
 
 ## How much a session tells you
 

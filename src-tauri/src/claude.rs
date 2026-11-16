@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::{State, Window};
+use tauri::{Emitter, State, Window};
 
 use crate::chats::{self, ChatManager, ChatStatus, StartOptions};
 use crate::control::{ControlReply, ControlState};
@@ -162,7 +162,11 @@ pub fn permission_respond(
             crate::windows::window_name(&owner)
         ));
     }
-    permission.respond(decision)
+    permission.respond(decision)?;
+    // The rail holds the row at `awaiting` while the ask is open; tell it the
+    // ask is gone rather than leave the row stale until the next poll.
+    let _ = window.emit(crate::EVENT_SESSIONS_CHANGED, ());
+    Ok(())
 }
 
 /// Answer a control call a session made through the MCP server.

@@ -176,7 +176,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: CHORD.newWindow, what: "Second window on the same sessions" },
       { keys: CHORD.closeTab, what: "Close the tab in front" },
       { keys: CHORD.closeTabAlt, what: "Close a tab, on the tab itself" },
-      { keys: CHORD.splitSession, what: "Put another session beside the one in front" },
+      { keys: CHORD.splitSession, what: "Put another session beside the one in front, or the file in front beside the last session" },
       { keys: CHORD.settings, what: "Settings" },
       { keys: CHORD.toggleSidebar, what: "Show or hide the left sidebar" },
       { keys: CHORD.explorer, what: "Explorer" },

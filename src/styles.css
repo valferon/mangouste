@@ -342,11 +342,23 @@ body {
    stored size is what wins and the tab bodies inside re-fit rather than
    pushing the panel off its edge. */
 .center-content {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+/* A tab dragged to open beside the one in front. Over the panes, never under
+   the pointer's way: the drop has to reach the centre pane itself. */
+.side-drop-preview {
+  position: absolute;
+  inset: 0 0 0 50%;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  z-index: 5;
 }
 
 /* Two sessions side by side. The divider sits between them by `order`, and

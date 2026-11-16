@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { fetchUsage, gitStatus } from "../lib/ipc";
+import { accountSet, fetchUsage, gitStatus, onAccountChanged } from "../lib/ipc";
 import type { ClaudeUsage, ProjectGroup } from "../lib/types";
+import { accountLabel, useAccounts } from "../lib/accounts";
 import { copyText } from "../lib/editing";
 import { KEYS, readString, writeString } from "../lib/persist";
 import { useMenu, type MenuEntry } from "../lib/menu";
@@ -19,6 +20,8 @@ interface StatusPanelProps {
   groups: ProjectGroup[];
   cwd: string;
   stats: ChatStats;
+  /** Opens Settings on its Accounts section, from the switcher's menu. */
+  onManageAccounts?: () => void;
 }
 
 /** Usage reads an OAuth token, so it stays opt-in and off by default. */
@@ -75,7 +78,7 @@ function UsageBar({
  * Everything except the usage windows is derived locally from data already in
  * the app; only the windows require a network call.
  */
-export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: StatusPanelProps) {
+export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onManageAccounts }: StatusPanelProps) {
   const menu = useMenu();
   const [usageEnabled, setUsageEnabled] = useState(
     () => readString(USAGE_ENABLED_KEY) === "true",
@@ -84,6 +87,33 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
   const [usageError, setUsageError] = useState<string | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const flags = useFlags();
+  // Whose quota the bars are. Refetched on a switch, so the header and the
+  // numbers under it never name two different accounts.
+  const { accounts, current: account, setAccounts } = useAccounts();
+  const [switchError, setSwitchError] = useState<string | null>(null);
+
+  /**
+   * The quick switcher. Managing accounts (adding, signing in, removing) is
+   * Settings' job; this only picks one, and says where the rest lives.
+   */
+  const accountEntries = useCallback(
+    (): MenuEntry[] => [
+      ...(accounts?.accounts ?? []).map(
+        (entry): MenuEntry => ({
+          label: accountLabel(entry),
+          checked: entry.name === accounts?.current,
+          run: () => {
+            if (entry.name === accounts?.current) return;
+            setSwitchError(null);
+            accountSet(entry.name).then(setAccounts, (e: unknown) => setSwitchError(String(e)));
+          },
+        }),
+      ),
+      onManageAccounts && "separator",
+      onManageAccounts && { label: "Manage Accounts…", run: onManageAccounts },
+    ],
+    [accounts, setAccounts, onManageAccounts],
+  );
 
   const refreshUsage = useCallback(async () => {
     if (!usageEnabled) return;
@@ -105,7 +135,16 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
     }
     void refreshUsage();
     const timer = window.setInterval(() => void refreshUsage(), USAGE_REFRESH_MS);
-    return () => window.clearInterval(timer);
+    const unlisten = onAccountChanged(() => {
+      // The numbers on screen are the previous account's. A failed fetch keeps
+      // the last good ones, which after a switch would be someone else's.
+      setUsage(null);
+      void refreshUsage();
+    });
+    return () => {
+      window.clearInterval(timer);
+      void unlisten.then((off) => off());
+    };
   }, [usageEnabled, refreshUsage]);
 
   useEffect(() => {
@@ -171,6 +210,22 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
       <div className="pane-header">
         <span>Usage</span>
         <div className="actions">
+          {accounts && (
+            <button
+              className="toggle-button account-switch"
+              title={
+                account
+                  ? `Account: ${accountLabel(account)}. New sessions, and the next message in an open one, use it.`
+                  : "Claude account"
+              }
+              onClick={(event) => {
+                const at = event.currentTarget.getBoundingClientRect();
+                menu.openMenu({ items: accountEntries(), x: at.left, y: at.bottom + 2 });
+              }}
+            >
+              {account?.name ?? "account"} ▾
+            </button>
+          )}
           <button
             className="toggle-button"
             data-active={usageEnabled}
@@ -209,6 +264,7 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats }: Sta
         usage?.modelWindows?.map((w) => (
           <UsageBar key={w.model} percent={w.percent} label={`7d ${w.model.toLowerCase()}`} />
         ))}
+      {switchError && <div className="empty-note">Could not switch: {switchError}</div>}
       {usageEnabled && usageError && <div className="empty-note">{usageError}</div>}
       {usageEnabled && !usage && !usageError && <div className="empty-note">Loading…</div>}
 

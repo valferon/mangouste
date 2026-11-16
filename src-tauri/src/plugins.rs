@@ -1,7 +1,7 @@
 //! Claude Code plugins, for the Settings panel.
 //!
 //! Everything goes through the `claude plugin` CLI with `--json` rather than
-//! through the files under `~/.claude/plugins`. Those files are the CLI's own
+//! through the files under the account's `plugins` dir. Those files are the CLI's own
 //! state, written under its own locks and migrated between its versions; a
 //! second writer here would be a second copy of rules that are not ours. The
 //! CLI also does the parts that are not file edits at all: cloning
@@ -55,7 +55,8 @@ fn run_cli(args: &[String], cwd: Option<&str>, timeout_ms: u64) -> Result<CliOut
         .or_else(dirs::home_dir)
         .ok_or("no directory to run claude in")?;
     let mut command = Command::new(claude_binary());
-    crate::env::with_child_path(&mut command)
+    crate::env::with_child_path(&mut command);
+    crate::account::apply(&mut command)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())

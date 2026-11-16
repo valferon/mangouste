@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { previewFor } from "../lib/binary";
 import { highlightCode } from "../lib/highlight";
 import { clipboardSet, openExternal, readFileBytes } from "../lib/ipc";
-import { resolvePath } from "../lib/paths";
+import { isPathLike, resolvePath } from "../lib/paths";
 import { isMac } from "../lib/platform";
 import { useMenu } from "../lib/menu";
 
@@ -70,9 +70,6 @@ function LocalImage({ path, alt }: { path: string; alt: string }) {
   return src ? <img src={src} alt={alt} title={path} /> : null;
 }
 
-/** Inline code that looks like a path gets a click target. */
-const PATH_LIKE = /^(?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)+(?::\d+)?$/;
-
 function CodeBlock({ language, code }: { language: string | null; code: string }) {
   const menu = useMenu();
   const [copied, setCopied] = useState(false);
@@ -135,12 +132,16 @@ export const Markdown = memo(function Markdown({ children, onOpenFile, baseDir }
         remarkPlugins={[remarkGfm]}
         components={{
           code({ className, children: content, ...props }) {
-            const text = String(content).replace(/\n$/, "");
+            const raw = String(content);
+            const text = raw.replace(/\n$/, "");
             const fenced = /language-(\w+)/.exec(className ?? "");
-            // react-markdown v10 gives fenced blocks a language class; anything
-            // without one and without a newline is inline code.
-            if (!fenced && !text.includes("\n")) {
-              const isPath = PATH_LIKE.test(text);
+            // react-markdown v10 gives fenced blocks a language class and always
+            // ends their text with a newline; inline code never has one. The
+            // check runs on the raw text: after the strip, a one-line fence with
+            // no language looked inline and became a chip inside a bare `<pre>`,
+            // which never wraps.
+            if (!fenced && !raw.includes("\n")) {
+              const isPath = isPathLike(text);
               return (
                 <code
                   {...props}

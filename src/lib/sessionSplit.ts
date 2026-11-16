@@ -1,15 +1,28 @@
 /**
- * Two sessions side by side in the centre pane.
+ * Two tabs side by side in the centre pane: two sessions, or a session and a
+ * file.
  *
- * The split is a pair of tab ids, not a second strip: both tabs stay in the one
- * session row, and the pair is on screen whenever either of them is the tab in
- * front. Picking some other session from the strip while the pair is up swaps
- * it in on the side that had focus, the way an editor group takes the file you
- * open into it. Picking a file or a view leaves the pair alone, so coming back
- * to either session brings both back.
+ * The split is a pair of tab ids, not a second strip: both tabs stay in their
+ * own rows, and the pair is on screen whenever either of them is the tab in
+ * front. Picking some other tab from the strip while the pair is up swaps it in
+ * on the side holding the same kind of tab, the way an editor group takes the
+ * file you open into it: a session replaces a session, a file replaces a file.
+ * When both sides are that kind, the side that had focus takes it. A tab with
+ * no side of its kind (a file picked while two sessions are up, any view) is
+ * shown on its own and leaves the pair alone, so coming back to either side
+ * brings both back.
  *
  * Pure, so the rules can be tested without the workbench around them.
  */
+
+/** What a side of the pair can hold. */
+export type SplitKind = "chat" | "file";
+
+/**
+ * The kind of a tab the pair could show right now, or null for one it cannot:
+ * a view, a tab from another repo, a tab that is gone.
+ */
+export type SplitKindOf = (id: string) => SplitKind | null;
 
 export interface SessionSplit {
   left: string;
@@ -50,18 +63,39 @@ export function splitShown(
 /**
  * Follow the tab in front moving from `from` to `to`.
  *
- * A move from one side of a showing pair to a session outside it puts that
- * session where `from` was. Anything else leaves the pair as it is.
+ * A move from one side of a showing pair to a tab outside it puts that tab on
+ * the side holding its own kind, or on `from`'s side when both do. Anything
+ * else leaves the pair as it is.
  */
 export function followActive(
   split: SessionSplit | null,
   from: string,
   to: string,
-  showable: (id: string) => boolean,
+  kindOf: SplitKindOf,
 ): SessionSplit | null {
-  if (!splitShown(split, from, showable)) return split;
-  if (inSplit(split, to) || !showable(to)) return split;
-  return split.left === from ? { ...split, left: to } : { ...split, right: to };
+  if (!splitShown(split, from, (id) => kindOf(id) !== null)) return split;
+  if (inSplit(split, to)) return split;
+  const kind = kindOf(to);
+  if (kind === null) return split;
+  const leftFits = kindOf(split.left) === kind;
+  const rightFits = kindOf(split.right) === kind;
+  if (!leftFits && !rightFits) return split;
+  const intoLeft = leftFits && rightFits ? split.left === from : leftFits;
+  return intoLeft ? { ...split, left: to } : { ...split, right: to };
+}
+
+/**
+ * The pair for "Open to the Side" of `tab` beside `partner`, the tab that was
+ * in front before it.
+ *
+ * A session always keeps the left: reading code beside the session that is
+ * writing it is the layout you asked for, whichever of the two you started
+ * from. Two tabs of one kind keep the order they were opened in.
+ */
+export function pairBeside(partner: string, tab: string, kindOf: SplitKindOf): SessionSplit {
+  return kindOf(partner) === "file" && kindOf(tab) === "chat"
+    ? makeSplit(tab, partner)
+    : makeSplit(partner, tab);
 }
 
 /** Drop the pair once either of its tabs has been closed. */

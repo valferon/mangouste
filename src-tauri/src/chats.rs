@@ -155,6 +155,11 @@ pub struct ChatStatus {
     /// Present once reaped. `Some(None)` means signalled rather than exited.
     #[serde(default)]
     pub exit_code: Option<Option<i32>>,
+    /// The account the process was spawned under. Its environment is fixed at
+    /// spawn, so after a switch this is how a pane knows to respawn before it
+    /// sends anything more.
+    #[serde(default)]
+    pub account: String,
 }
 
 struct Chat {
@@ -172,6 +177,8 @@ struct Chat {
     session_id: Arc<Mutex<Option<String>>>,
     pid: u32,
     permission_mode: Option<String>,
+    /// The account in this process's environment, from `account::apply_as`.
+    account: String,
     alive: Arc<AtomicBool>,
     /// Set (under the `child` mutex) once the reader thread has reaped the
     /// child. After that the pid may be recycled, so signalling it is unsafe.
@@ -205,11 +212,26 @@ impl Chat {
             permission_mode: self.permission_mode.clone(),
             pending_permissions: pending,
             exit_code: *self.exit_code.lock(),
+            account: self.account.clone(),
         }
     }
 }
 
 /* ---------- manager ---------- */
+
+/// The session uuid a resumed chat carries after its last `|`, if it is one.
+///
+/// A "New session" chat ends in `|new-N` instead, which is not a uuid and must
+/// not be mistaken for one.
+fn session_in_chat_id(chat_id: &str) -> Option<&str> {
+    let (_, tail) = chat_id.rsplit_once('|')?;
+    let uuid_shaped = tail.len() == 36
+        && tail.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    uuid_shaped.then_some(tail)
+}
 
 /// Whether a chat is the one holding `session_id`.
 ///
@@ -369,6 +391,31 @@ impl ChatManager {
             }
         }
         Ok(())
+    }
+
+    /// Session ids held by the live chats among `chat_ids`.
+    ///
+    /// The reported uuid first, then the one a resumed chat carries in its id
+    /// (the same two ways in as `holds_session`). A "New session" chat that has
+    /// not announced its uuid yet maps to nothing, which is right: it has no
+    /// transcript row to mark.
+    pub fn sessions_of(&self, chat_ids: &HashSet<String>) -> HashSet<String> {
+        if chat_ids.is_empty() {
+            return HashSet::new();
+        }
+        self.chats
+            .lock()
+            .iter()
+            .filter(|(chat_id, chat)| {
+                chat_ids.contains(chat_id.as_str()) && chat.alive.load(Ordering::SeqCst)
+            })
+            .filter_map(|(chat_id, chat)| {
+                chat.session_id
+                    .lock()
+                    .clone()
+                    .or_else(|| session_in_chat_id(chat_id).map(str::to_string))
+            })
+            .collect()
     }
 
     /// Which window holds the live chat for this session, if any.
@@ -826,7 +873,10 @@ pub fn expand_search_terms(query: String) -> Result<Vec<String>, String> {
          concrete technical nouns implied by the query, and likely error or \
          command strings. One term per line, nothing else."
     );
-    let child = crate::env::with_child_path(&mut Command::new(claude_binary()))
+    let mut command = Command::new(claude_binary());
+    crate::env::with_child_path(&mut command);
+    crate::account::apply(&mut command);
+    let child = command
         .args(["-p", "--model", "haiku"])
         .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT_SEARCH)
         .arg(&ask)
@@ -1577,8 +1627,18 @@ pub fn start(
         let _ = std::fs::write(debug_log_path(&options.chat_id), "");
     }
 
+    // Read once: the name recorded on the chat must be the one in its
+    // environment, even if a switch lands between the two.
+    let account = crate::account::current_name();
+    // A session resumed on an account other than the one it was written on
+    // needs its transcript where this account's CLI looks for it; without
+    // that the check below finds nothing and the resume starts it fresh.
+    if let Some(session) = options.resume.as_deref() {
+        crate::account::carry_transcript(session, &account);
+    }
     let mut command = Command::new(claude_binary());
     crate::env::with_child_path(&mut command);
+    crate::account::apply_as(&mut command, &account);
     command
         .args(build_args(
             &options,
@@ -1919,6 +1979,7 @@ pub fn start(
         session_id,
         pid,
         permission_mode: options.permission_mode.clone(),
+        account,
         alive,
         reaped,
         running,
@@ -1935,6 +1996,18 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_in_chat_id_reads_only_a_uuid_tail() {
+        let uuid = "4a403a9e-a4af-4dad-90f4-80fe6a22a0b6";
+        assert_eq!(session_in_chat_id(&format!("main|repo|{uuid}")), Some(uuid));
+        assert_eq!(session_in_chat_id("main|repo|new-3"), None);
+        assert_eq!(session_in_chat_id(uuid), None);
+        assert_eq!(
+            session_in_chat_id("main|4a403a9e0a4af04dad090f4080fe6a22a0b6"),
+            None
+        );
+    }
 
     fn options() -> StartOptions {
         StartOptions {

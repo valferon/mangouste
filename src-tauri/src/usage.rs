@@ -1,7 +1,7 @@
 //! Claude subscription usage — the same data the `/usage` command shows.
 //!
-//! Reads the user's own OAuth access token from wherever the CLI put it — a
-//! `~/.claude/.credentials.json` file, or the login keychain on macOS — and
+//! Reads the user's own OAuth access token from wherever the CLI put it — the
+//! account's `.credentials.json` file, or the login keychain on macOS — and
 //! calls Anthropic's usage endpoint with it. The token is read at call time,
 //! used only as a request header, and never logged, cached, or returned to the
 //! frontend.
@@ -90,15 +90,17 @@ fn keychain_credentials() -> Option<String> {
 ///
 /// The keychain leads on macOS because that is the only place the CLI writes;
 /// the file is still tried after it, since an older CLI or a
-/// `CLAUDE_CODE_USE_KEYCHAIN=0` install leaves one there.
+/// `CLAUDE_CODE_USE_KEYCHAIN=0` install leaves one there. Only for `main`,
+/// though: the keychain item is matched by service name alone, and that name
+/// does not say which config dir wrote it, so for any other account the one
+/// place that is certainly that account's is its own credentials file.
 fn read_credentials() -> Result<String, String> {
-    if let Some(raw) = keychain_credentials() {
-        return Ok(raw);
+    if crate::account::is_main() {
+        if let Some(raw) = keychain_credentials() {
+            return Ok(raw);
+        }
     }
-    let path = dirs::home_dir()
-        .ok_or("no home directory")?
-        .join(".claude")
-        .join(".credentials.json");
+    let path = crate::account::credentials_file().ok_or("no home directory")?;
     std::fs::read_to_string(&path).map_err(|e| {
         if cfg!(target_os = "macos") {
             format!(

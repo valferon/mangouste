@@ -2,6 +2,9 @@ import { useState } from "react";
 import type { SessionSurface } from "../lib/sessionSurface";
 import { SYSTEM, themesOfKind, type Theme } from "../lib/theme";
 import { PluginsPanel } from "./PluginsPanel";
+import { AccountsPanel } from "./AccountsPanel";
+
+export type SettingsSection = "general" | "accounts" | "plugins";
 
 interface SettingsProps {
   theme: Theme;
@@ -24,6 +27,8 @@ interface SettingsProps {
   onWorkspaceRoot: (root: string) => void;
   /** The repo in front, for the Plugins panel's project and local scopes. */
   repoPath: string | null;
+  /** The section to open on; the Usage header's "Manage Accounts…" asks for one. */
+  initialSection?: SettingsSection;
   onClose: () => void;
 }
 
@@ -49,9 +54,10 @@ export function Settings({
   workspaceRoot,
   onWorkspaceRoot,
   repoPath,
+  initialSection = "general",
   onClose,
 }: SettingsProps) {
-  const [section, setSection] = useState<"general" | "plugins">("general");
+  const [section, setSection] = useState<SettingsSection>(initialSection);
   // Stamping is the App's job: it already applies `theme` in an effect, so
   // painting here too would write the preference twice per change.
   const setTheme = onTheme;
@@ -72,6 +78,9 @@ export function Settings({
             <button data-active={section === "general"} onClick={() => setSection("general")}>
               general
             </button>
+            <button data-active={section === "accounts"} onClick={() => setSection("accounts")}>
+              accounts
+            </button>
             <button data-active={section === "plugins"} onClick={() => setSection("plugins")}>
               plugins
             </button>
@@ -84,6 +93,8 @@ export function Settings({
         </div>
 
         {section === "plugins" && <PluginsPanel cwd={repoPath} />}
+
+        {section === "accounts" && <AccountsPanel />}
 
         {section === "general" && (
           <>

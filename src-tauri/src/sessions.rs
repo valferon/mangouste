@@ -1,4 +1,5 @@
-//! Reads the Claude Code session store at `~/.claude/projects/<escaped-cwd>/<uuid>.jsonl`.
+//! Reads the Claude Code session store at `<config dir>/projects/<escaped-cwd>/<uuid>.jsonl`,
+//! where the config dir is the account's (`~/.claude` by default; see `account.rs`).
 //!
 //! Session files grow to megabytes, so nothing here reads a whole file: the
 //! head supplies stable facts (`cwd`, `gitBranch`, `version`) and the tail
@@ -12,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 /// Bytes sampled from each end of a session file.
 const HEAD_BYTES: u64 = 32 * 1024;
@@ -297,7 +298,7 @@ pub struct SessionCache {
 }
 
 pub fn projects_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    crate::account::projects_root()
 }
 
 /// The project dirs under `root`, each paired with its dir name.
@@ -1407,6 +1408,21 @@ fn apply_downgrade_grace(
     computed
 }
 
+/// Sessions whose live chat is parked on a permission prompt.
+///
+/// Read from the daemon's own pending asks rather than the transcript: the CLI
+/// writes nothing while it waits on `--permission-prompt-tool`, so the tail
+/// shows a dangling `tool_use` and `classify` calls it `active`.
+fn sessions_asking_permission(app: &AppHandle) -> std::collections::HashSet<String> {
+    let (Some(permission), Some(chats)) = (
+        app.try_state::<std::sync::Arc<crate::permission::PermissionState>>(),
+        app.try_state::<std::sync::Arc<crate::chats::ChatManager>>(),
+    ) else {
+        return Default::default();
+    };
+    chats.sessions_of(&permission.awaiting_chats())
+}
+
 /// Scan every project directory and return groups sorted alphabetically by label.
 ///
 /// `async` so the scan — stat, sample, and sidechain probes across every
@@ -1429,6 +1445,7 @@ pub fn list_sessions(
     // announced inline: the cwd a transition wants is only known once the whole
     // group has been read, and the helper group below is dropped whole.
     let mut transitions: Vec<crate::alerts::Transition> = Vec::new();
+    let asking = sessions_asking_permission(&app);
 
     for (project_path, dir_name) in project_dirs(&root) {
         let mut sessions = Vec::new();
@@ -1507,13 +1524,20 @@ pub fn list_sessions(
                 } else {
                     probe_background(&cached.inputs.background_tasks)
                 };
-                let computed = classify(
-                    &cached.inputs,
-                    last_activity_ms,
-                    probe.newest_mtime_ms,
-                    &background,
-                    now,
-                );
+                // An open permission prompt is invisible to the transcript, so
+                // it outranks whatever the tail says: a gated tool call reads as
+                // a tool still running.
+                let computed = if asking.contains(&cached.meta.id) {
+                    "awaiting"
+                } else {
+                    classify(
+                        &cached.inputs,
+                        last_activity_ms,
+                        probe.newest_mtime_ms,
+                        &background,
+                        now,
+                    )
+                };
                 cached.meta.status =
                     apply_downgrade_grace(previous_status, computed, cached.mtime, now);
                 // The edge, read where the grace has already settled it — so a

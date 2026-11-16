@@ -497,6 +497,8 @@ export interface BranchList {
 
 export interface ChatStatus {
   chatId: string;
+  /** The account the process was spawned under; empty from an older backend. */
+  account?: string;
   /** Monotonic spawn id, used to discard events from a superseded process. */
   instance: number;
   /** Label of the window that owns this chat: `main`, or `window-2` and up. */
@@ -627,6 +629,21 @@ export interface ModelWindow {
   model: string;
   percent: number;
   resetsAt: string | null;
+}
+
+/** One Claude Code account: a config directory the CLI can be pointed at. */
+export interface Account {
+  /** `main` (`~/.claude`), or a directory name under `~/.claude-accounts`. */
+  name: string;
+  dir: string;
+  /** The signed-in address from that account's `.claude.json`, if any. */
+  email: string | null;
+}
+
+export interface Accounts {
+  accounts: Account[];
+  /** The name of the account in effect; always one of `accounts`. */
+  current: string;
 }
 
 export interface ClaudeUsage {

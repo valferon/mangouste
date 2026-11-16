@@ -601,6 +601,12 @@ const BinaryView = memo(function BinaryView({ path }: { path: string }) {
   );
 });
 
+/**
+ * How often a file beside a session re-reads itself. A tool edit is on screen
+ * within this, and an unchanged file costs one read that changes nothing.
+ */
+const FOLLOW_POLL_MS = 1500;
+
 interface FileViewProps {
   path: string;
   /**
@@ -611,6 +617,22 @@ interface FileViewProps {
    * every open editor would save on one Ctrl+S.
    */
   visible?: boolean;
+  /**
+   * Whether this pane is the one in front, which owns the keyboard.
+   *
+   * Differs from `visible` only beside a session in the split: the file is on
+   * screen, but Ctrl+S or Ctrl+F typed into the session's composer is not
+   * meant for it. Defaults to `visible`.
+   */
+  front?: boolean;
+  /**
+   * Re-read the file while it is on screen, not only on window focus.
+   *
+   * Set beside a session in the split, which is there to watch the session
+   * edit this file: the window never loses focus while you do that, so the
+   * focus reload alone would leave the buffer stale until you click away.
+   */
+  follow?: boolean;
   /** Reports unsaved changes upward, so the tab can show a dirty mark. */
   onDirtyChange?: (path: string, dirty: boolean) => void;
   /**
@@ -696,6 +718,8 @@ type EditorState =
 export const FileView = memo(function FileView({
   path,
   visible = true,
+  front = visible,
+  follow = false,
   onDirtyChange,
   onRegisterSave,
   onRegisterFormat,
@@ -907,7 +931,7 @@ export const FileView = memo(function FileView({
   // Ctrl+S from anywhere in the window, not only from inside the textarea, so
   // the shortcut works with the cursor parked on the gutter or the toolbar.
   useEffect(() => {
-    if (!visible) return;
+    if (!front) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "s" || !(event.ctrlKey || event.metaKey) || event.altKey) return;
       event.preventDefault();
@@ -915,7 +939,7 @@ export const FileView = memo(function FileView({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [visible]);
+  }, [front]);
 
   /** Read inside the focus handler below, which must see the live buffer. */
   const savedRef = useRef(saved);
@@ -1115,7 +1139,7 @@ export const FileView = memo(function FileView({
   // composer or a terminal beside the editor has its own use for the keys, and
   // whoever is typing there did not mean this file.
   useEffect(() => {
-    if (!visible) return;
+    if (!front) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!matchChord(CHORD.find, event)) return;
       const active = document.activeElement;
@@ -1137,7 +1161,7 @@ export const FileView = memo(function FileView({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [visible]);
+  }, [front]);
 
   /*
    * The find layer's content: the buffer with every match wrapped.
@@ -1164,7 +1188,7 @@ export const FileView = memo(function FileView({
 
   // Reload when the window regains focus and nothing local would be lost:
   // claude edits these files, and a stale buffer that only says so at save time
-  // is worse than one that quietly caught up.
+  // is worse than one that quietly caught up. With `follow`, also on a timer.
   useEffect(() => {
     if (!visible || dirty) return;
     const signal = { cancelled: false };
@@ -1186,11 +1210,13 @@ export const FileView = memo(function FileView({
         .catch(() => {});
     };
     window.addEventListener("focus", onFocus);
+    const timer = follow ? window.setInterval(onFocus, FOLLOW_POLL_MS) : undefined;
     return () => {
       signal.cancelled = true;
       window.removeEventListener("focus", onFocus);
+      window.clearInterval(timer);
     };
-  }, [dirty, path, visible]);
+  }, [dirty, follow, path, visible]);
 
   /**
    * Typing invalidates the note the status line is showing.
@@ -1403,7 +1429,7 @@ export const FileView = memo(function FileView({
   }, [path]);
 
   /*
-   * Only the pane on screen describes itself, and it stops when it leaves.
+   * Only the pane in front describes itself, and it stops when it leaves.
    *
    * Editors stay mounted when hidden — an unmount would throw away an unsaved
    * draft — so without the gate every open file would be publishing over the
@@ -1411,10 +1437,10 @@ export const FileView = memo(function FileView({
    * changing places both fire, in whichever order React runs them.
    */
   useEffect(() => {
-    if (!visible) return;
+    if (!front) return;
     reportFacts();
     return () => clearEditorFacts(path);
-  }, [visible, path, reportFacts]);
+  }, [front, path, reportFacts]);
   // Typing must not wait on the tokeniser: the deferred copy lags behind during
   // a burst of keystrokes and catches up once it stops, so the caret never does.
   const tokens = useMemo(

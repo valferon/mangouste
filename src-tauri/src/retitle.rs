@@ -168,7 +168,10 @@ fn clean_title(reply: &str) -> Option<String> {
 fn ask_haiku(digest: &str) -> Result<String, String> {
     let dir = helper_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let child = crate::env::with_child_path(&mut Command::new(claude_binary()))
+    let mut command = Command::new(claude_binary());
+    crate::env::with_child_path(&mut command);
+    crate::account::apply(&mut command);
+    let child = command
         .args([
             "-p",
             "--model",

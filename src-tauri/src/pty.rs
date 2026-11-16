@@ -224,6 +224,9 @@ pub fn pty_open(
     let mut command = CommandBuilder::new(login_shell());
     command.arg("-l");
     command.cwd(&cwd);
+    // A `claude` typed into this shell, or run in a session tab, lands on the
+    // account the app is on. The shell's own rc files may still override it.
+    crate::account::apply_pty(&mut command);
     // Keep colour and mouse reporting working inside the webview terminal.
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");

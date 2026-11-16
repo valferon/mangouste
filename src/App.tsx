@@ -8,7 +8,7 @@ import { EditorFacts } from "./panes/EditorFacts";
 import { GitPane } from "./panes/GitPane";
 import { buildEntries, QuickOpen } from "./panes/QuickOpen";
 import { SearchPane } from "./panes/SearchPane";
-import { Settings } from "./panes/Settings";
+import { Settings, type SettingsSection } from "./panes/Settings";
 import { StatusPanel, type ChatStats } from "./panes/StatusPanel";
 import { SessionsPane } from "./panes/SessionsPane";
 import {
@@ -160,10 +160,12 @@ import {
   followActive,
   inSplit,
   makeSplit,
+  pairBeside,
   pruneSplit,
   resizeSplitShare,
   splitShown,
   type SessionSplit,
+  type SplitKindOf,
 } from "./lib/sessionSplit";
 import {
   claudeLaunch,
@@ -394,6 +396,12 @@ function Workbench() {
   const [sessionGroups, setSessionGroups] = useState<ProjectGroup[]>([]);
   const [quickOpen, setQuickOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  /** Settings on its Accounts section, for the Usage header's switcher. Stable: StatusPanel is memoised. */
+  const manageAccounts = useCallback(() => {
+    setSettingsSection("accounts");
+    setSettingsOpen(true);
+  }, []);
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [permissionMode, setPermissionMode] = useState(
     () => readString(PERMISSION_MODE_KEY, "acceptEdits"),
@@ -1018,6 +1026,12 @@ function Workbench() {
     });
   }, [workspaceRoot]);
 
+  /** For `~/` paths clicked in a preview; null until the backend answers. */
+  const [home, setHome] = useState<string | null>(null);
+  useEffect(() => {
+    void homeDir().then(setHome).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!workspaceRoot) return;
     writeString(WORKSPACE_KEY, workspaceRoot);
@@ -1203,14 +1217,13 @@ function Workbench() {
       handler = (status: string) =>
         setTabStatus((current) => {
           const previous = current[tabId];
-          // A turn that ended out of sight stays flagged. `pendingReview` counts
-          // as live here so a second "finished" report cannot clear it.
+          // Every turn end is flagged, the open tab's included: being the open
+          // tab is not proof you saw it. Switching to the tab or clicking its
+          // sidebar row (`markTabsRead`) clears it. `pendingReview` counts as
+          // live here so a second "finished" report cannot clear it.
           const wasLive =
             previous === "active" || previous === "awaiting" || previous === "pendingReview";
-          const next =
-            status === "finished" && wasLive && tabId !== activeTabRef.current
-              ? "pendingReview"
-              : status;
+          const next = status === "finished" && wasLive ? "pendingReview" : status;
           return next === previous ? current : { ...current, [tabId]: next };
         });
       handlers.set(tabId, handler);
@@ -1227,6 +1240,27 @@ function Workbench() {
         : current,
     );
   }, [activeTab]);
+
+  /**
+   * Clear the tab dot of every tab holding `sessionId`.
+   *
+   * A turn that ends on the tab already open stays flagged until you click its
+   * row in the sidebar. Activating a tab still clears it (effect above), but
+   * that never fires for the tab you are already on, so this is the only way
+   * that one gets read.
+   */
+  const markTabsRead = useCallback((sessionId: string) => {
+    setTabStatus((current) => {
+      const read = tabsRef.current.filter(
+        (tab) =>
+          tab.kind === "chat" &&
+          tab.sessionId === sessionId &&
+          current[tab.id] === "pendingReview",
+      );
+      if (read.length === 0) return current;
+      return { ...current, ...Object.fromEntries(read.map((tab) => [tab.id, "finished"])) };
+    });
+  }, []);
 
   /**
    * Every chat pane in the window, not just the active repo's.
@@ -1401,16 +1435,24 @@ function Workbench() {
     [newSessionTab],
   );
 
-  /* ---------- side-by-side sessions ---------- */
+  /* ---------- side-by-side sessions and files ---------- */
 
-  /** Two session tabs sharing the centre pane. See `lib/sessionSplit`. */
+  /** Two tabs sharing the centre pane. See `lib/sessionSplit`. */
   const [sessionSplit, setSessionSplit] = useState<SessionSplit | null>(null);
-  /** A session tab the strip is showing: the only kind the pair may hold. */
-  const splittable = useCallback(
-    (id: string) =>
-      tabs.some((tab) => tab.id === id && tab.kind === "chat" && tabInRepo(tab, activeRepo)),
+  /**
+   * What the pair could hold of a tab the strip is showing: a session or a
+   * file. Views (history, diffs, changes, the dashboard) take the whole pane.
+   */
+  const splitKindOf = useCallback<SplitKindOf>(
+    (id) => {
+      const tab = tabs.find((candidate) => candidate.id === id);
+      if (!tab || !tabInRepo(tab, activeRepo)) return null;
+      return tab.kind === "chat" || tab.kind === "file" ? tab.kind : null;
+    },
     [tabs, activeRepo],
   );
+  const splittable = useCallback((id: string) => splitKindOf(id) !== null, [splitKindOf]);
+  const isSessionTab = useCallback((id: string) => splitKindOf(id) === "chat", [splitKindOf]);
   const splitOnScreen = splitShown(sessionSplit, activeTab, splittable);
 
   // A tab closed out from under the pair takes the pair with it.
@@ -1428,20 +1470,47 @@ function Workbench() {
     const from = previousActiveRef.current;
     previousActiveRef.current = activeTab;
     if (from === activeTab) return;
-    setSessionSplit((current) => followActive(current, from, activeTab, splittable));
-  }, [activeTab, splittable]);
+    setSessionSplit((current) => followActive(current, from, activeTab, splitKindOf));
+  }, [activeTab, splitKindOf]);
+
+  /**
+   * A tab's "Open to the Side": a file beside the session most recently in
+   * front, a session beside whichever session or file was in front before it.
+   *
+   * Read from the history rather than `activeTab`, because the right-click that
+   * opened the menu (or the drag that dropped it) may already have put this tab
+   * in front.
+   */
+  const openToSide = useCallback(
+    (tabId: string) => {
+      const kind = splitKindOf(tabId);
+      if (kind === null) return;
+      const canPartner = kind === "file" ? isSessionTab : splittable;
+      const front = tabHistoryRef.current.find((id) => id !== tabId && canPartner(id));
+      if (!front) return;
+      setSessionSplit(pairBeside(front, tabId, splitKindOf));
+      setActiveTab(tabId);
+    },
+    [splitKindOf, splittable, isSessionTab],
+  );
 
   /**
    * Put a session beside the one in front: `other` when named, else the one
-   * most recently in front before it, else a new session.
+   * most recently in front before it, else a new session. With a file in
+   * front, the file goes beside the last session instead.
    */
   const splitSessionRight = useCallback(
     (other?: string) => {
       const front = activeTab;
-      if (!activeRepo || !splittable(front)) return;
+      if (!activeRepo) return;
+      if (other === undefined && splitKindOf(front) === "file") {
+        openToSide(front);
+        return;
+      }
+      if (!isSessionTab(front)) return;
       const partner =
         other ??
-        tabHistoryRef.current.find((id) => id !== front && splittable(id) && !inSplit(sessionSplit, id));
+        tabHistoryRef.current.find((id) => id !== front && isSessionTab(id) && !inSplit(sessionSplit, id));
       // `openNewChatTab` moves focus to the new tab, and the pair has to be in
       // place before that move is followed, or it would be read as a swap.
       const right = partner && partner !== front ? partner : null;
@@ -1455,26 +1524,58 @@ function Workbench() {
       setSessionSplit(makeSplit(front, fresh.id));
       setActiveTab(fresh.id);
     },
-    [activeTab, activeRepo, splittable, sessionSplit, newSessionTab],
+    [activeTab, activeRepo, splitKindOf, isSessionTab, openToSide, sessionSplit, newSessionTab],
   );
 
   const unsplitSessions = useCallback(() => setSessionSplit(null), []);
 
+  /** Which side of the pair on screen a tab is, or null when it is not in it. */
+  const splitSide = (id: string): "left" | "right" | null =>
+    !splitOnScreen ? null : id === sessionSplit.left ? "left" : id === sessionSplit.right ? "right" : null;
+
   /**
-   * A tab's "Open to the Side": beside whichever session was in front before.
-   *
-   * Read from the history rather than `activeTab`, because the right-click that
-   * opened the menu has already put this tab in front.
+   * Drop targets for "Open to the Side" by dragging: the centre pane takes any
+   * session or file, the session row only files (sessions dropped there are
+   * reordering, which the tabs themselves handle).
    */
-  const openToSide = useCallback(
-    (tabId: string) => {
-      const front = tabHistoryRef.current.find((id) => id !== tabId && splittable(id));
-      if (!front || !splittable(tabId)) return;
-      setSessionSplit(makeSplit(front, tabId));
-      setActiveTab(tabId);
-    },
-    [splittable],
-  );
+  const sideDropTarget = (accepts: "any" | "file") => {
+    const accepted = () => {
+      const dragging = dragTabRef.current;
+      if (!dragging || inSplit(splitOnScreen ? sessionSplit : null, dragging)) return null;
+      const kind = splitKindOf(dragging);
+      return kind !== null && (accepts === "any" || kind === accepts) ? dragging : null;
+    };
+    return {
+      onDragOver: (event: React.DragEvent<HTMLDivElement>) => {
+        if (!accepted()) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setSideDrop(true);
+      },
+      onDragLeave: (event: React.DragEvent<HTMLDivElement>) => {
+        // Leaving for a child is not leaving.
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setSideDrop(false);
+      },
+      onDrop: (event: React.DragEvent<HTMLDivElement>) => {
+        const dragging = accepted();
+        if (!dragging) return;
+        event.preventDefault();
+        openToSide(dragging);
+        endDrag();
+      },
+    };
+  };
+
+  /** The box a side of the pair sits in; `null` is a tab with the pane to itself. */
+  const splitSlotStyle = (side: "left" | "right" | null): React.CSSProperties => ({
+    flex: side
+      ? `${side === "left" ? sessionSplit!.share : 1 - sessionSplit!.share} 1 0`
+      : 1,
+    order: side === "right" ? 2 : 0,
+    minWidth: 0,
+    minHeight: 0,
+  });
 
   const centerContentRef = useRef<HTMLDivElement>(null);
   const dragSessionSplit = useCallback((delta: number) => {
@@ -1708,8 +1809,8 @@ function Workbench() {
   const openFileHere = useCallback(
     // A relative path is the repo's: inline code in a README preview names
     // files that way. Panes with a better base (a chat's cwd) resolve first.
-    (path: string) => openFile(resolvePath(activeRepo, path), activeRepo),
-    [openFile, activeRepo],
+    (path: string) => openFile(resolvePath(activeRepo, path, home), activeRepo),
+    [openFile, activeRepo, home],
   );
   /** Open a file and land on the match the search pane was showing. */
   const openMatch = useCallback(
@@ -1765,10 +1866,17 @@ function Workbench() {
     return event.clientX < box.left + box.width / 2 ? "before" : "after";
   };
 
+  /**
+   * A tab dragged to the centre pane's right half, or a file dragged onto the
+   * session row, is about to open to the side. The flag paints the preview.
+   */
+  const [sideDrop, setSideDrop] = useState(false);
+
   const endDrag = useCallback(() => {
     dragTabRef.current = null;
     setDragTab(null);
     setDropHint(null);
+    setSideDrop(false);
   }, []);
 
   /** Close without asking. Everything the close guard below decides to allow. */
@@ -2139,8 +2247,11 @@ function Workbench() {
      panes are not re-rendered by fresh inline arrows on every App render. */
   const handleSelectRepo = useCallback((path: string) => void selectRepo(path), [selectRepo]);
   const handleResume = useCallback(
-    (session: SessionMeta, anchor?: number) => void resumeSessionFromSidebar(session, anchor),
-    [resumeSessionFromSidebar],
+    (session: SessionMeta, anchor?: number) => {
+      markTabsRead(session.id);
+      void resumeSessionFromSidebar(session, anchor);
+    },
+    [markTabsRead, resumeSessionFromSidebar],
   );
   const handleNewSession = useCallback(
     (cwd: string) => void startNewSession(cwd),
@@ -2768,7 +2879,10 @@ function Workbench() {
         id: ID.settings,
         label: "Settings…",
         chord: CHORD.settings,
-        run: () => setSettingsOpen((open) => !open),
+        run: () => {
+          setSettingsSection("general");
+          setSettingsOpen((open) => !open);
+        },
       },
       { id: ID.exit, label: "Exit", run: () => void closeWindow() },
 
@@ -2880,12 +2994,13 @@ function Workbench() {
         chord: CHORD.splitSession,
         // Ctrl+\ is SIGQUIT to a shell.
         shellFirst: true,
-        disabled: !activeChat || splitOnScreen,
+        // With a file in front this puts the file beside the last session.
+        disabled: (!activeChat && currentTab?.kind !== "file") || splitOnScreen,
         run: () => splitSessionRight(),
       },
       {
         id: ID.unsplitSessions,
-        label: "Unsplit Sessions",
+        label: "Unsplit",
         disabled: !splitOnScreen,
         run: unsplitSessions,
       },
@@ -3055,9 +3170,14 @@ function Workbench() {
           setDropHint((current) => (current?.id === tab.id ? null : current))
         }
         onDrop={(event) => {
-          event.preventDefault();
           const dragging = dragTabRef.current;
-          if (dragging) moveTab(dragging, tab.id, dropSide(event));
+          const from = tabsRef.current.find((candidate) => candidate.id === dragging);
+          // A file dropped on a session tab is not a reorder: it bubbles to the
+          // session row, which opens it to the side.
+          if (!dragging || !from || tabRow(from) !== tabRow(tab)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          moveTab(dragging, tab.id, dropSide(event));
           endDrag();
         }}
         onDragEnd={endDrag}
@@ -3216,7 +3336,10 @@ function Workbench() {
             <button
               className="activity-item"
               aria-label="Settings"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => {
+                setSettingsSection("general");
+                setSettingsOpen(true);
+              }}
               title={`Settings (${formatChord(CHORD.settings)})`}
             >
               <SettingsIcon />
@@ -3333,6 +3456,7 @@ function Workbench() {
             <div
               className="tab-strip"
               data-row="session"
+              {...sideDropTarget("file")}
               onContextMenu={(event) =>
                 menu.openContextMenu(event, [
                   activeRepo && {
@@ -3393,6 +3517,7 @@ function Workbench() {
             <div
               className="center-content"
               ref={centerContentRef}
+              {...sideDropTarget("any")}
               // Side by side only while the pair is up. The two panes and the
               // divider are put in order with `order` rather than by moving
               // them, because moving a pane remounts it.
@@ -3401,13 +3526,7 @@ function Workbench() {
               {/* Every chat tab stays mounted: hiding is not unmounting, so a turn
                   keeps streaming while you read another session. */}
               {chatTabs.map((tab) => {
-                const side = splitOnScreen
-                  ? tab.id === sessionSplit.left
-                    ? "left"
-                    : tab.id === sessionSplit.right
-                      ? "right"
-                      : null
-                  : null;
+                const side = splitSide(tab.id);
                 const shown = tab.id === activeTab || side !== null;
                 return (
                 <div
@@ -3420,12 +3539,7 @@ function Workbench() {
                   onMouseDownCapture={side && tab.id !== activeTab ? () => setActiveTab(tab.id) : undefined}
                   style={{
                     display: shown ? "flex" : "none",
-                    flex: side
-                      ? `${side === "left" ? sessionSplit!.share : 1 - sessionSplit!.share} 1 0`
-                      : 1,
-                    order: side === "right" ? 2 : 0,
-                    minWidth: 0,
-                    minHeight: 0,
+                    ...splitSlotStyle(side),
                     // Nothing may paint past a terminal's box: an xterm grid
                     // measured against a stale size would otherwise spill over
                     // whatever is below it, which is the same reason the panel
@@ -3501,23 +3615,34 @@ function Workbench() {
                   <Resizer orientation="vertical" onDelta={dragSessionSplit} />
                 </div>
               )}
+              {/* Where a dragged tab will land: always the right half, the
+                  side "Open to the Side" puts a file on. */}
+              {sideDrop && <div className="side-drop-preview" aria-hidden />}
 
               {/* File tabs stay mounted for the same reason chat tabs do: unmounting
                   one would throw away an unsaved draft on a tab switch, silently.
-                  `visible` is what keeps their Ctrl+S handlers from all firing. */}
-              {fileTabs.map((tab) => (
+                  `front` is what keeps their Ctrl+S handlers from all firing,
+                  including the one beside a session in the pair. */}
+              {fileTabs.map((tab) => {
+                const side = splitSide(tab.id);
+                return (
                 <div
                   key={tab.id}
+                  className="session-slot"
+                  data-split={side ?? undefined}
+                  data-active={side !== null && tab.id === activeTab}
+                  onMouseDownCapture={side && tab.id !== activeTab ? () => setActiveTab(tab.id) : undefined}
                   style={{
-                    display: tab.id === activeTab ? "flex" : "none",
-                    flex: 1,
-                    minHeight: 0,
+                    display: tab.id === activeTab || side !== null ? "flex" : "none",
+                    ...splitSlotStyle(side),
                   }}
                 >
                   <PaneBoundary label={tab.path}>
                     <FileView
                       path={tab.path}
-                      visible={tab.id === activeTab}
+                      visible={tab.id === activeTab || side !== null}
+                      front={tab.id === activeTab}
+                      follow={side !== null}
                       reveal={reveal?.path === tab.path ? reveal : undefined}
                       onDirtyChange={handleFileDirty}
                       onRegisterSave={registerFileSave}
@@ -3527,7 +3652,8 @@ function Workbench() {
                     />
                   </PaneBoundary>
                 </div>
-              ))}
+                );
+              })}
               {/* Mounted like the file tabs, and hidden the same way: a page of
                   history is a repo-wide `git log`, and `visible` is what stops
                   a hidden one from re-running it. */}
@@ -3631,7 +3757,12 @@ function Workbench() {
 
         <div className="sidebar" style={{ width: rightWidth, flex: `0 0 ${rightWidth}px` }}>
           <PaneBoundary label="status">
-            <StatusPanel groups={sessionGroups} cwd={activeRepo} stats={chatStats} />
+            <StatusPanel
+              groups={sessionGroups}
+              cwd={activeRepo}
+              stats={chatStats}
+              onManageAccounts={manageAccounts}
+            />
           </PaneBoundary>
           <PaneBoundary label="sessions">
           <SessionsPane
@@ -3671,6 +3802,7 @@ function Workbench() {
           workspaceRoot={workspaceRoot}
           onWorkspaceRoot={setWorkspaceRoot}
           repoPath={activeRepo || null}
+          initialSection={settingsSection}
           onClose={() => setSettingsOpen(false)}
         />
       )}

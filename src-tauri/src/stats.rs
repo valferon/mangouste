@@ -640,7 +640,7 @@ fn collect_transcripts() -> Vec<Transcript> {
 /// costs context on every startup and earns nothing is worth seeing.
 fn configured_mcp_servers() -> HashSet<String> {
     let mut names = HashSet::new();
-    let Some(path) = dirs::home_dir().map(|home| home.join(".claude.json")) else {
+    let Some(path) = crate::account::state_file() else {
         return names;
     };
     let Ok(text) = fs::read_to_string(path) else {

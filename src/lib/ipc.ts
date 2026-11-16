@@ -14,6 +14,7 @@ import type {
 } from "./plugins";
 import type { ProbeProcess } from "./processTree";
 import type {
+  Accounts,
   Blame,
   BranchList,
   ChatStatus,
@@ -676,6 +677,42 @@ export const fetchRelease = (tag?: string) =>
 
 /** Reads the local OAuth token and calls Anthropic's usage endpoint. Opt-in. */
 export const fetchUsage = () => invoke<ClaudeUsage>("fetch_usage");
+
+/* ---------- accounts ---------- */
+
+/** Every account on disk, and which one new sessions and the readers use. */
+export const accountList = () => invoke<Accounts>("account_list");
+
+/**
+ * Switch the account. Applies to sessions started from here on, the usage
+ * window and the dashboard; children already running keep theirs.
+ */
+export const accountSet = (name: string) => invoke<Accounts>("account_set", { name });
+
+/** Create an account under `~/.claude-accounts`. It starts signed out. */
+export const accountAdd = (name: string) => invoke<Accounts>("account_add", { name });
+
+/** Delete an account's directory. Refused for `main` and the one in use. */
+export const accountRemove = (name: string) => invoke<Accounts>("account_remove", { name });
+
+/** Run `claude auth login` under that account; output arrives on `onAccountLogin`. */
+export const accountLogin = (name: string) => invoke<void>("account_login", { name });
+
+export const accountLoginCancel = (name: string) => invoke<void>("account_login_cancel", { name });
+
+export interface AccountLoginEvent {
+  name: string;
+  line: string | null;
+  /** Set once, on the last event: whether the login exited cleanly. */
+  done: boolean | null;
+}
+
+export const onAccountLogin = (handler: (event: AccountLoginEvent) => void): Promise<UnlistenFn> =>
+  listen<AccountLoginEvent>("account://login", (event) => handler(event.payload));
+
+/** The account changed, in this window or another; readers refetch. */
+export const onAccountChanged = (handler: (name: string) => void): Promise<UnlistenFn> =>
+  listen<string>("account://changed", (event) => handler(event.payload));
 
 /* ---------- tool permissions ---------- */
 

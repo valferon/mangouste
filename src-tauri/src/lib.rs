@@ -1,3 +1,4 @@
+mod account;
 mod alerts;
 mod changes;
 mod chats;
@@ -65,15 +66,35 @@ fn is_transcript_change(kind: &EventKind) -> bool {
     }
 }
 
-/// Watch `~/.claude/projects` and ping the frontend when any transcript changes.
-///
-/// The debouncer is leaked deliberately: it must outlive setup and live for the
-/// whole process, and there is nothing to drop it from.
+/// Watch the account's `projects` dir and ping the frontend when any
+/// transcript changes.
 fn watch_sessions(app: AppHandle) {
     let Some(root) = sessions::projects_root() else {
         return;
     };
+    watch_projects_root(app, root);
+}
+
+/// Put a watcher on `root`, unless one is there already.
+///
+/// Called at startup for the account in effect, and again on every account
+/// switch: the new account's transcripts may live elsewhere, and a root with
+/// no watcher is a rail that never updates. Switching back must not stack a
+/// second watcher on the first root, hence the set. A root watched through a
+/// symlink and again through its target would be two entries and two
+/// watchers; the cost is a duplicate "changed" ping, which the rail debounces.
+///
+/// The debouncer is leaked deliberately: it must outlive setup and live for the
+/// whole process, and there is nothing to drop it from.
+pub(crate) fn watch_projects_root(app: AppHandle, root: std::path::PathBuf) {
     if !root.is_dir() {
+        return;
+    }
+    if !account::watched_roots()
+        .lock()
+        .unwrap()
+        .insert(root.clone())
+    {
         return;
     }
 
@@ -264,9 +285,18 @@ pub fn run() {
                         Some(owner) => handle.emit_to(owner.as_str(), permission::EVENT_REQUEST, request),
                         None => handle.emit(permission::EVENT_REQUEST, request),
                     };
+                    // The rail reads open asks into `awaiting`, but only once
+                    // they outlive an auto-allow; rescan when that has passed,
+                    // instead of leaving it to the 15s poll.
+                    let rescan = handle.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(permission::AWAITING_SETTLE);
+                        let _ = rescan.emit(EVENT_SESSIONS_CHANGED, ());
+                    });
                 },
                 move |request| {
                     let _ = withdrawn_handle.emit(permission::EVENT_WITHDRAWN, &request.id);
+                    let _ = withdrawn_handle.emit(EVENT_SESSIONS_CHANGED, ());
                 },
                 // Asks for a chat this process does not hold belong to a
                 // previous run's survivors; the bridge denies those rather than
@@ -451,6 +481,13 @@ pub fn run() {
             update::fetch_release,
             // usage
             usage::fetch_usage,
+            // accounts
+            account::account_list,
+            account::account_set,
+            account::account_add,
+            account::account_remove,
+            account::account_login,
+            account::account_login_cancel,
             // dashboard statistics
             stats::stats_summary,
             // tool permissions

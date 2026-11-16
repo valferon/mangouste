@@ -3,13 +3,17 @@ import {
   followActive,
   makeSplit,
   MIN_SPLIT_SHARE,
+  pairBeside,
   pruneSplit,
   resizeSplitShare,
   splitShown,
+  type SplitKindOf,
 } from "./sessionSplit";
 
 const sessions = new Set(["a", "b", "c"]);
+const files = new Set(["f", "g"]);
 const showable = (id: string) => sessions.has(id);
+const kindOf: SplitKindOf = (id) => (sessions.has(id) ? "chat" : files.has(id) ? "file" : null);
 
 describe("splitShown", () => {
   it("shows the pair with either side in front", () => {
@@ -33,27 +37,52 @@ describe("splitShown", () => {
 
 describe("followActive", () => {
   it("swaps a picked session in on the side that had focus", () => {
-    expect(followActive(makeSplit("a", "b"), "b", "c", showable)).toEqual(makeSplit("a", "c"));
-    expect(followActive(makeSplit("a", "b"), "a", "c", showable)).toEqual(makeSplit("c", "b"));
+    expect(followActive(makeSplit("a", "b"), "b", "c", kindOf)).toEqual(makeSplit("a", "c"));
+    expect(followActive(makeSplit("a", "b"), "a", "c", kindOf)).toEqual(makeSplit("c", "b"));
   });
 
   it("leaves the pair alone when focus moves within it", () => {
     const split = makeSplit("a", "b");
-    expect(followActive(split, "a", "b", showable)).toBe(split);
+    expect(followActive(split, "a", "b", kindOf)).toBe(split);
   });
 
-  it("leaves the pair alone for a file or view tab", () => {
+  it("leaves the pair alone for a view tab", () => {
     const split = makeSplit("a", "b");
-    expect(followActive(split, "a", "file:x", showable)).toBe(split);
+    expect(followActive(split, "a", "file:x", kindOf)).toBe(split);
   });
 
   it("leaves a pair that was not showing alone", () => {
     const split = makeSplit("a", "b");
-    expect(followActive(split, "file:x", "c", showable)).toBe(split);
+    expect(followActive(split, "file:x", "c", kindOf)).toBe(split);
+  });
+
+  it("swaps a picked file in for the file side", () => {
+    expect(followActive(makeSplit("a", "f"), "a", "g", kindOf)).toEqual(makeSplit("a", "g"));
+    expect(followActive(makeSplit("a", "f"), "f", "g", kindOf)).toEqual(makeSplit("a", "g"));
+  });
+
+  it("swaps a picked session in for the session side, even from the file", () => {
+    expect(followActive(makeSplit("a", "f"), "f", "c", kindOf)).toEqual(makeSplit("c", "f"));
+  });
+
+  it("leaves two sessions alone for a picked file", () => {
+    const split = makeSplit("a", "b");
+    expect(followActive(split, "a", "f", kindOf)).toBe(split);
   });
 
   it("passes null through", () => {
-    expect(followActive(null, "a", "b", showable)).toBeNull();
+    expect(followActive(null, "a", "b", kindOf)).toBeNull();
+  });
+});
+
+describe("pairBeside", () => {
+  it("keeps the session on the left", () => {
+    expect(pairBeside("a", "f", kindOf)).toEqual(makeSplit("a", "f"));
+    expect(pairBeside("f", "a", kindOf)).toEqual(makeSplit("a", "f"));
+  });
+
+  it("keeps two sessions in the order they were opened", () => {
+    expect(pairBeside("a", "b", kindOf)).toEqual(makeSplit("a", "b"));
   });
 });
 

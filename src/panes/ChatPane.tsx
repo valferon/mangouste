@@ -20,11 +20,13 @@ import {
   claudeDetach,
   claudeKill,
   claudeRestart,
+  accountList,
   onClaudeDebug,
   onClaudeExit,
   onClaudeMessage,
   onClaudeStderr,
   onClaudeToolActivity,
+  homeDir,
   readSessionTranscript,
   readSessionWindow,
   searchFiles,
@@ -1906,9 +1908,13 @@ export const ChatPane = memo(function ChatPane({
   // Claude names files relative to where it runs (`src/lib/ipc.ts`), and the
   // opener reads from disk with no cwd of its own, so every link is made
   // absolute against this session's directory before it leaves the pane.
+  const [home, setHome] = useState<string | null>(null);
+  useEffect(() => {
+    void homeDir().then(setHome).catch(() => {});
+  }, []);
   const onOpenFile = useCallback(
-    (path: string) => onOpenAbsolute(resolvePath(cwd, path)),
-    [cwd, onOpenAbsolute],
+    (path: string) => onOpenAbsolute(resolvePath(cwd, path, home)),
+    [cwd, home, onOpenAbsolute],
   );
   const [items, setItems] = useState<ChatItem[]>([]);
   const [toolResults, setToolResults] = useState<Record<string, { text: string; isError: boolean }>>(
@@ -2129,6 +2135,17 @@ export const ChatPane = memo(function ChatPane({
   const resumeRef = useRef(resume);
   const resumeFileRef = useRef(resumeFile);
   const forkRef = useRef(fork);
+  /**
+   * The account the live process was spawned under, from the backend.
+   *
+   * A child's `CLAUDE_CONFIG_DIR` is fixed at spawn, so a session that hit one
+   * account's limit stays on it after a switch. The next message checks this
+   * against the account in effect and respawns onto it first. Null from an
+   * older backend that does not report it, which leaves the check off.
+   */
+  const spawnedAccountRef = useRef<string | null>(null);
+  /** A move to another account is in flight; a second send waits it out. */
+  const followingAccountRef = useRef(false);
   /** Read at spawn time, so a pane warming up honours a request made while cold. */
   const anchorRef = useRef(anchor);
   /** Mirror of `anchored`, for the effects that must not depend on it. */
@@ -2416,6 +2433,7 @@ export const ChatPane = memo(function ChatPane({
         // A newer start() already owns this pane; leave its bindings alone.
         if (generation !== startGenerationRef.current) return status.instance;
         instanceRef.current = status.instance;
+        spawnedAccountRef.current = status.account || null;
         // Attaching can hand back an instance a previous teardown retired —
         // it is live again, and must not be filtered by isCurrent forever.
         retiredRef.current.delete(status.instance);
@@ -3208,6 +3226,33 @@ export const ChatPane = memo(function ChatPane({
     [chatId, appendItem, setSticky],
   );
 
+  /**
+   * Respawn onto the account in effect when the live process is on another.
+   *
+   * Asks the backend rather than trusting a cached event: a switch made a
+   * moment ago in the Usage header must already count for this message. The
+   * restart resumes the same session id, and the backend copies the transcript
+   * across first when the two accounts do not share `projects`.
+   */
+  const followAccount = useCallback(async () => {
+    const spawned = spawnedAccountRef.current;
+    if (!spawned) return;
+    let current: string;
+    try {
+      current = (await accountList()).current;
+    } catch {
+      return;
+    }
+    if (current === spawned) return;
+    await spawn("restart");
+    appendItem({
+      kind: "notice",
+      key: nextKey(),
+      text: `moved to account ${current}: this session was running on ${spawned}.`,
+      tone: "info",
+    });
+  }, [spawn, appendItem]);
+
   const send = useCallback(async () => {
     const text = draft.trim();
     // An image with no caption is still a message worth sending.
@@ -3233,11 +3278,23 @@ export const ChatPane = memo(function ChatPane({
       return;
     }
 
+    // Idle only: a turn in flight is still the old account's, and a message
+    // sent now queues behind it in that same process.
+    if (!runningRef.current) {
+      if (followingAccountRef.current) return;
+      followingAccountRef.current = true;
+      try {
+        await followAccount();
+      } finally {
+        followingAccountRef.current = false;
+      }
+    }
+
     setDraft("");
     setCaret(0);
     setAttachments([]);
     await dispatchTurn(text, attachments);
-  }, [draft, attachments, alive, chatId, appendItem, setSticky, dispatchTurn]);
+  }, [draft, attachments, alive, chatId, appendItem, setSticky, dispatchTurn, followAccount]);
 
   /*
    * A turn sent from outside the composer: a session's scheduled follow-up
