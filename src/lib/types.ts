@@ -895,6 +895,13 @@ export interface ControlUsageResult {
 export interface ControlSettingsResult {
   effective: Record<string, unknown>;
   sources?: Record<string, unknown>;
+  /**
+   * What the session runs at right now, resolved for its model. The settings
+   * above only feed into this: a session effort set over the control channel
+   * shows here and in no settings layer. `effort` is null for an effort the
+   * CLI has no level name for.
+   */
+  applied?: { model?: string; effort?: string | null };
 }
 
 export interface BinaryVersionResult {

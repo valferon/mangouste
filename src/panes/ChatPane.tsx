@@ -38,6 +38,7 @@ import {
   controlReloadPlugins,
   controlSetModel,
   controlSetPermissionMode,
+  controlSettings,
   resolveControlResponse,
 } from "../lib/control";
 import {
@@ -84,9 +85,16 @@ import {
   tailsActivity,
   type FeedbackLevel,
 } from "../lib/feedback";
-import { EFFORT_LEVELS, effortArgs, liveEffortSetting, type EffortLevel } from "../lib/effort";
+import {
+  EFFORT_LEVELS,
+  effortArgs,
+  effortOutcome,
+  liveEffortSetting,
+  type EffortLevel,
+} from "../lib/effort";
 import { hiddenLabel, previewDiff } from "../lib/editPreview";
 import { recallThinking, rememberThinking } from "../lib/thinkingStore";
+import { isMetaRecord } from "../lib/transcriptRecords";
 import {
   chatTimesShown,
   chatTimesVersion,
@@ -1267,6 +1275,8 @@ function hydrate(
       }
       return; // Tool-result echo, not something the human typed.
     }
+    // Written for the model: a command's caveat, a skill's body, a reminder.
+    if (isMetaRecord(record)) return;
     const text = blocks.filter(isText).map((b) => b.text).join("");
     if (text.trim()) items.push({ kind: "user", key: historyKey(), atMs, text });
   };
@@ -1949,6 +1959,27 @@ export const ChatPane = memo(function ChatPane({
   const [cutOff, setCutOff] = useState(false);
   const [alive, setAlive] = useState(false);
   /**
+   * `alive`, for code that outlives the render it started in.
+   *
+   * A strip pick waits on the CLI's answer, and the process can exit or the
+   * pane unmount before it comes. The `alive` in that closure is from the
+   * click, so a fallback respawn gated on it brings back a session that has
+   * just ended. Written where the state is set, not during render: an exit
+   * rejects the pending requests in the same task, before React renders again.
+   */
+  const aliveRef = useRef(false);
+  const markAlive = useCallback((value: boolean) => {
+    aliveRef.current = value;
+    setAlive(value);
+  }, []);
+  // A pane that is gone answers for nothing, a respawn least of all.
+  useEffect(
+    () => () => {
+      aliveRef.current = false;
+    },
+    [],
+  );
+  /**
    * Whether this pane has earned its process.
    *
    * A cold-restored pane spawns nothing and reads no transcript until it is
@@ -1997,11 +2028,8 @@ export const ChatPane = memo(function ChatPane({
   const [effort, setEffort] = useState<EffortLevel>(defaultEffort);
   const effortRef = useRef(defaultEffort);
   const [spawnedEffort, setSpawnedEffort] = useState<EffortLevel>(defaultEffort);
-  /**
-   * The level the process was launched with, which is what clearing the live
-   * setting falls back to — not the last live pick `spawnedEffort` tracks.
-   */
-  const launchedEffortRef = useRef(defaultEffort);
+  /** Counts effort picks, so an answer to a pick since replaced says nothing. */
+  const effortPickRef = useRef(0);
   const [sessionId, setSessionId] = useState<string | null>(resume);
   const [costUsd, setCostUsd] = useState<number | null>(null);
   const [model, setModel] = useState<string | null>(null);
@@ -2186,7 +2214,6 @@ export const ChatPane = memo(function ChatPane({
     setSpawnedModelAlias(defaultModelAlias);
     setLevel(defaultFeedback);
     effortRef.current = defaultEffort;
-    launchedEffortRef.current = defaultEffort;
     setEffort(defaultEffort);
     setSpawnedEffort(defaultEffort);
   }, [defaultPermissionMode, defaultModelAlias, defaultFeedback, defaultEffort]);
@@ -2412,7 +2439,6 @@ export const ChatPane = memo(function ChatPane({
     const spawnModelAlias = modelAliasRef.current;
     setSpawnedModelAlias(spawnModelAlias);
     const spawnEffort = effortRef.current;
-    launchedEffortRef.current = spawnEffort;
     setSpawnedEffort(spawnEffort);
     const options = {
       chatId,
@@ -2437,7 +2463,7 @@ export const ChatPane = memo(function ChatPane({
         // Attaching can hand back an instance a previous teardown retired —
         // it is live again, and must not be filtered by isCurrent forever.
         retiredRef.current.delete(status.instance);
-        setAlive(status.alive);
+        markAlive(status.alive);
         setPhase(status.running ? "receiving" : "ready");
         if (status.running) setTurnStartedAt(Date.now());
         // A turn already in flight in the backend is still running. Without this
@@ -2479,7 +2505,7 @@ export const ChatPane = memo(function ChatPane({
       })
       .catch((e) => {
         if (generation !== startGenerationRef.current) return null;
-        setAlive(false);
+        markAlive(false);
         setPhase("failed to start");
         onSystemMessageRef.current(`Failed to start claude: ${e}`);
         return null;
@@ -2491,7 +2517,7 @@ export const ChatPane = memo(function ChatPane({
     // live process — the mode arms the next restart, and the resume write-back
     // (null -> uuid, from this pane's own onSessionId) is already attached.
     },
-    [chatId, cwd, appendItem, loadHistory],
+    [chatId, cwd, appendItem, loadHistory, markAlive],
   );
 
   const start = useCallback(() => spawn("attach"), [spawn]);
@@ -2974,7 +3000,7 @@ export const ChatPane = memo(function ChatPane({
       }),
       onClaudeExit((event) => {
         if (event.chatId !== chatId || !isCurrent(event.instance)) return;
-        setAlive(false);
+        markAlive(false);
         setRunning(false);
         setPhase("exited");
         setPendingTool(null);
@@ -2992,7 +3018,7 @@ export const ChatPane = memo(function ChatPane({
     return () => {
       for (const subscription of subscriptions) void subscription.then((fn) => fn());
     };
-  }, [chatId, handleFrame, appendItem, isCurrent, setSticky]);
+  }, [chatId, handleFrame, appendItem, isCurrent, setSticky, markAlive]);
 
   /* ---------- scrolling ---------- */
 
@@ -3244,7 +3270,12 @@ export const ChatPane = memo(function ChatPane({
       return;
     }
     if (current === spawned) return;
+    // The tab can close during that round trip, and a pane that is gone must
+    // not start a process nobody will see.
+    if (!aliveRef.current) return;
     await spawn("restart");
+    // A spawn that failed has already said so; "moved" would be untrue.
+    if (!aliveRef.current) return;
     appendItem({
       kind: "notice",
       key: nextKey(),
@@ -3288,11 +3319,16 @@ export const ChatPane = memo(function ChatPane({
       } finally {
         followingAccountRef.current = false;
       }
+      // Nothing to send to: the move failed, or the pane closed meanwhile. The
+      // draft stays where it is.
+      if (!aliveRef.current) return;
     }
 
-    setDraft("");
+    // Only what was sent is cleared. A move to another account can take a
+    // while, and whatever was typed during it is still the person's.
+    setDraft((current) => (current === draft ? "" : current));
     setCaret(0);
-    setAttachments([]);
+    setAttachments((current) => (current === attachments ? [] : current));
     await dispatchTurn(text, attachments);
   }, [draft, attachments, alive, chatId, appendItem, setSticky, dispatchTurn, followAccount]);
 
@@ -3468,10 +3504,14 @@ export const ChatPane = memo(function ChatPane({
    * resumes the same session id. A turn in flight is interrupted first rather
    * than killed mid-write, and asked to carry on once the new process is up —
    * the pick is what the person wanted, the turn is what they were waiting on.
+   *
+   * Liveness is read now, not from the render the pick was made in: this runs
+   * after an await, and a process that exited meanwhile is not one to bring
+   * back. The pick stays armed for whoever starts the session next.
    */
   const restartToApply = useCallback(
     async (what: string) => {
-      if (!alive) return;
+      if (!aliveRef.current) return;
       const wasRunning = runningRef.current;
       if (wasRunning) await interrupt();
       await spawn("restart");
@@ -3482,7 +3522,7 @@ export const ChatPane = memo(function ChatPane({
       );
       if (wasRunning) await dispatchTurn(RESUME_AFTER_RESTART, []);
     },
-    [alive, interrupt, spawn, emitNotice, dispatchTurn],
+    [interrupt, spawn, emitNotice, dispatchTurn],
   );
 
   /*
@@ -3551,12 +3591,18 @@ export const ChatPane = memo(function ChatPane({
   );
 
   /**
-   * Set the thinking effort: live over `apply_flag_settings` when the level
-   * lives in the settings layer, by respawn when it does not (`max`, or back to
-   * `default` from a process launched with a level).
+   * Set the thinking effort on the live process, over `apply_flag_settings`.
+   *
+   * Every level goes that way, `max` and `default` included, so a switch never
+   * costs the turn in flight. That turn keeps the effort it started with and
+   * the pick takes over from the next one, which the notice says rather than
+   * leaving "applied" to mean two things. What the session is set to is read
+   * back rather than assumed, and the strip follows the answer. Only a patch
+   * the CLI refuses or never answers falls back to a respawn, which applies the
+   * pick at launch.
    */
   const pickEffort = useCallback(
-    (next: EffortLevel) => {
+    async (next: EffortLevel) => {
       effortRef.current = next;
       setEffort(next);
       onEffort(next);
@@ -3564,21 +3610,48 @@ export const ChatPane = memo(function ChatPane({
         emitNotice(`effort armed: ${next} — applies when this session starts.`);
         return;
       }
-      const setting = liveEffortSetting(launchedEffortRef.current, next);
-      if (setting === undefined) {
-        void restartToApply(`effort ${next}`);
+      // Read before anything is awaited: it is the turn running when the patch
+      // lands that keeps its level, not whichever is running when it is answered.
+      const midTurn = runningRef.current;
+      const pick = (effortPickRef.current += 1);
+      const generation = startGenerationRef.current;
+      // A newer pick owns the strip, a process spawned since took the armed
+      // level at launch, and one that exited takes it at the next start. In
+      // each case this pick's answer describes nothing live.
+      const superseded = () =>
+        pick !== effortPickRef.current ||
+        generation !== startGenerationRef.current ||
+        !aliveRef.current;
+      try {
+        await controlApplyFlagSettings(chatId, { effortLevel: liveEffortSetting(next) });
+      } catch (e) {
+        logDebug(chatId, "control", `apply_flag_settings failed: ${String(e)}`);
+        if (!superseded()) void restartToApply(`effort ${next}`);
         return;
       }
-      void controlApplyFlagSettings(chatId, { effortLevel: setting })
-        .then(() => {
-          logDebug(chatId, "control", `apply_flag_settings · effortLevel ${next}`);
-          setSpawnedEffort(next);
-          emitNotice(`effort: ${next} — applied to the running session.`);
-        })
-        .catch((e) => {
-          logDebug(chatId, "control", `apply_flag_settings failed: ${String(e)}`);
-          void restartToApply(`effort ${next}`);
-        });
+      logDebug(chatId, "control", `apply_flag_settings · effortLevel ${next}`);
+      // A read that fails is not a switch that failed: the patch was taken.
+      const reported = await controlSettings(chatId)
+        .then((settings) => settings.applied?.effort)
+        .catch(() => undefined);
+      if (superseded()) return;
+      const outcome = effortOutcome(next, reported);
+      if (outcome.kind === "held") {
+        setSpawnedEffort(outcome.running);
+        emitNotice(
+          `effort: ${next} was not taken, the session runs at ${outcome.running}. A maxEffortLevel setting, CLAUDE_CODE_EFFORT_LEVEL or a model without that level can hold it there.`,
+          "warn",
+        );
+        return;
+      }
+      setSpawnedEffort(next);
+      // "default" names no level, so say which one it came to.
+      const resolved = next === "default" && outcome.running ? ` (${outcome.running})` : "";
+      emitNotice(
+        midTurn
+          ? `effort: ${next}${resolved} — applies from the next turn, the one in flight keeps its level.`
+          : `effort: ${next}${resolved} — applied to the running session.`,
+      );
     },
     [alive, chatId, emitNotice, onEffort, restartToApply],
   );
@@ -3951,7 +4024,7 @@ export const ChatPane = memo(function ChatPane({
               effort !== spawnedEffort
                 ? `Pending — running at "${spawnedEffort}".`
                 : alive
-                  ? "Thinking effort (applies to the running session)"
+                  ? "Thinking effort (applies from the next turn)"
                   : "Thinking effort (applies on next start)"
             }
           >
@@ -3960,7 +4033,7 @@ export const ChatPane = memo(function ChatPane({
                 key={option}
                 className="toggle-button"
                 data-active={option === effort}
-                onClick={() => pickEffort(option)}
+                onClick={() => void pickEffort(option)}
               >
                 {option}
               </button>
