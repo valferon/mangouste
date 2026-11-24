@@ -29,5 +29,20 @@ fn main() {
         }
     }
 
+    disable_webkit_dmabuf_renderer();
     mangouste_lib::run()
+}
+
+/// WebKitGTK's DMA-BUF renderer leaks one `sync_file` descriptor per frame on
+/// the NVIDIA driver (webkit2gtk 2.52.6-0ubuntu0.26.04.2). The web process
+/// reaches its 1024 open-file limit within minutes, the driver then fails
+/// fence waits with EMFILE, and the stalled GPU freezes the whole desktop, not
+/// only this window. Falling back to the shared-memory renderer stops the leak.
+/// Set before Tauri starts so the web process inherits it; a value already in
+/// the environment wins, so `WEBKIT_DISABLE_DMABUF_RENDERER=0` re-enables it.
+fn disable_webkit_dmabuf_renderer() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
 }
