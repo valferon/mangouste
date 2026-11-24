@@ -331,9 +331,10 @@ export function BranchStatus({
   const rows = useMemo(() => {
     if (!branches) return [];
     const query = filter.trim().toLowerCase();
+    const worktree = (name: string) => branches.worktrees?.[name] ?? null;
     const all = [
-      ...branches.local.map((name) => ({ name, remote: false })),
-      ...branches.remote.map((name) => ({ name, remote: true })),
+      ...branches.local.map((name) => ({ name, remote: false, worktree: worktree(name) })),
+      ...branches.remote.map((name) => ({ name, remote: true, worktree: worktree(name) })),
     ];
     return query ? all.filter((row) => row.name.toLowerCase().includes(query)) : all;
   }, [branches, filter]);
@@ -475,7 +476,7 @@ export function BranchStatus({
             filter={filter}
             creatable={creatable}
             onFilter={setFilter}
-            onPick={(name) => void move("switch", name)}
+            onPick={(row) => void move("switch", row.name)}
             onCreate={(name) => void move("create", name)}
             onClose={() => setPicking(false)}
           />
@@ -518,6 +519,8 @@ export function BranchStatus({
 interface BranchRow {
   name: string;
   remote: boolean;
+  /** Path of the other worktree that has this branch out, if one does. */
+  worktree: string | null;
 }
 
 interface BranchPickerProps {
@@ -529,7 +532,7 @@ interface BranchPickerProps {
   filter: string;
   creatable: boolean;
   onFilter: (value: string) => void;
-  onPick: (name: string) => void;
+  onPick: (row: BranchRow) => void;
   onCreate: (name: string) => void;
   onClose: () => void;
 }
@@ -568,7 +571,7 @@ function BranchPicker({
 
   /** Enter takes the first match, or creates what was typed when there is none. */
   const submit = () => {
-    if (rows.length > 0) return onPick(rows[0].name);
+    if (rows.length > 0) return onPick(rows[0]);
     if (creatable) onCreate(filter.trim());
   };
 
@@ -613,12 +616,18 @@ function BranchPicker({
               data-selected={row.name === current}
               role="button"
               tabIndex={0}
-              onClick={() => onPick(row.name)}
-              onKeyDown={(event) => activate(event, () => onPick(row.name))}
+              title={
+                row.worktree
+                  ? `Also out in another worktree: ${row.worktree}`
+                  : undefined
+              }
+              onClick={() => onPick(row)}
+              onKeyDown={(event) => activate(event, () => onPick(row))}
             >
               <BranchIcon />
               <span className="label">{row.name}</span>
               {row.remote && <span className="badge">remote</span>}
+              {row.worktree && <span className="badge">worktree</span>}
             </div>
           ))}
           {rows.length === 0 && !creatable && (

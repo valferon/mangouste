@@ -1203,6 +1203,31 @@ pub struct BranchList {
     pub local: Vec<String>,
     /// Remote-tracking branches, with the remote prefix kept (`origin/main`).
     pub remote: Vec<String>,
+    /// Branches checked out in another worktree, keyed by the name as listed
+    /// (local, or remote-tracking whose local branch is out there), to that
+    /// worktree's path. The picker badges them; a switch still goes through.
+    pub worktrees: std::collections::HashMap<String, String>,
+}
+
+/// Local branch to worktree path, from `git worktree list --porcelain`.
+///
+/// Every worktree, this one included: the caller drops the current branch,
+/// which is the one this worktree has out.
+fn parse_worktrees(porcelain: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut path: Option<&str> = None;
+    for line in porcelain.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = Some(p);
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            if let Some(p) = path {
+                out.insert(b.to_string(), p.to_string());
+            }
+        } else if line.is_empty() {
+            path = None;
+        }
+    }
+    out
 }
 
 #[tauri::command(async)]
@@ -1228,10 +1253,40 @@ pub fn git_branch_list(cwd: String) -> Result<BranchList, String> {
             .collect()
     };
 
+    let local = lines(local);
+    let remote = lines(remote);
+
+    // Best effort: a git too old for `worktree` just means no badges.
+    let mut checked_out = git(&cwd, &["worktree", "list", "--porcelain"])
+        .map(|s| parse_worktrees(&s))
+        .unwrap_or_default();
+    if let Some(current) = &current {
+        checked_out.remove(current);
+    }
+    let mut worktrees = checked_out.clone();
+    if !checked_out.is_empty() {
+        let remotes = git(&cwd, &["remote"]).unwrap_or_default();
+        let remotes: Vec<&str> = remotes
+            .lines()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .collect();
+        for name in &remote {
+            let local_name = remotes
+                .iter()
+                .find_map(|r| name.strip_prefix(&format!("{r}/")))
+                .filter(|rest| !rest.is_empty());
+            if let Some(path) = local_name.and_then(|l| checked_out.get(l)) {
+                worktrees.insert(name.clone(), path.clone());
+            }
+        }
+    }
+
     Ok(BranchList {
         current,
-        local: lines(local),
-        remote: lines(remote),
+        local,
+        remote,
+        worktrees,
     })
 }
 
@@ -1268,6 +1323,11 @@ fn local_name_for_remote(cwd: &str, branch: &str) -> Option<String> {
 /// Switch branches. Fails rather than discarding anything when the worktree
 /// has changes that would be overwritten — git's own refusal is the guard.
 ///
+/// A branch another worktree has out is switched to anyway
+/// (`--ignore-other-worktrees`): picking it was the ask, and git's "already
+/// used by worktree" refusal only got in the way. Both trees then share the
+/// branch, so a commit in one moves the other's HEAD too.
+///
 /// `switch` rather than `checkout` on purpose: `checkout <name>` also accepts
 /// paths, so a branch name that happens to match a file would silently discard
 /// that file's changes instead of moving HEAD. `switch` only ever takes a branch.
@@ -1280,7 +1340,8 @@ pub fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
     // `--track` creates a *new* local `x` tracking it rather than switching to
     // it — a silent wrong answer instead of an error.
     if is_local_branch(&cwd, &branch) {
-        return git(&cwd, &["switch", "--", &branch]).map(|s| s.trim().to_string());
+        return git(&cwd, &["switch", "--ignore-other-worktrees", "--", &branch])
+            .map(|s| s.trim().to_string());
     }
 
     // A remote-tracking name whose local branch already exists: switch to the
@@ -1288,7 +1349,8 @@ pub fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
     // plainly means "work on main".
     if let Some(local) = local_name_for_remote(&cwd, &branch) {
         if is_local_branch(&cwd, &local) {
-            return git(&cwd, &["switch", "--", &local]).map(|s| s.trim().to_string());
+            return git(&cwd, &["switch", "--ignore-other-worktrees", "--", &local])
+                .map(|s| s.trim().to_string());
         }
     }
 
@@ -1554,6 +1616,55 @@ mod tracking_tests {
         std::fs::write(dir.join("f.txt"), text).expect("write");
         run(dir, &["add", "f.txt"]);
         run(dir, &["commit", "--quiet", "-m", text]);
+    }
+
+    /// A branch out in another worktree is listed with that worktree's path,
+    /// and switching to it here still works. The branch this worktree has out
+    /// is not listed: it is the current one.
+    #[test]
+    fn branches_out_in_other_worktrees_carry_their_path() {
+        let dir = repo("branch-in-worktree");
+        commit(&dir, "base");
+        run(&dir, &["branch", "side"]);
+        run(&dir, &["branch", "free"]);
+        let other = scratch("branch-in-worktree-other");
+        std::fs::remove_dir_all(&other).expect("clear");
+        run(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                other.to_str().unwrap(),
+                "side",
+            ],
+        );
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let list = git_branch_list(cwd.clone()).expect("list");
+        let at = list.worktrees.get("side").expect("side is in a worktree");
+        assert_eq!(
+            std::fs::canonicalize(at).unwrap(),
+            std::fs::canonicalize(&other).unwrap()
+        );
+        assert!(
+            !list.worktrees.contains_key("main"),
+            "current branch is not elsewhere"
+        );
+        assert!(!list.worktrees.contains_key("free"));
+
+        git_checkout(cwd.clone(), "side".into()).expect("switches anyway");
+        let head = git(&cwd, &["branch", "--show-current"]).expect("head");
+        assert_eq!(head.trim(), "side");
+    }
+
+    #[test]
+    fn worktree_porcelain_parses_branches_and_skips_detached() {
+        let text = "worktree /a\nHEAD 1\nbranch refs/heads/main\n\nworktree /b\nHEAD 2\ndetached\n\nworktree /c d\nHEAD 3\nbranch refs/heads/feat/x\n";
+        let map = parse_worktrees(text);
+        assert_eq!(map.get("main").map(String::as_str), Some("/a"));
+        assert_eq!(map.get("feat/x").map(String::as_str), Some("/c d"));
+        assert_eq!(map.len(), 2);
     }
 
     /// git reports a conflict on stdout and leaves stderr empty. Read from

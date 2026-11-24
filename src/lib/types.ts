@@ -493,6 +493,11 @@ export interface BranchList {
   local: string[];
   /** Remote-tracking branches, remote prefix kept (`origin/main`). */
   remote: string[];
+  /**
+   * Branches out in another worktree, by listed name, to that worktree's path.
+   * Badged in the picker; switching to one still goes through.
+   */
+  worktrees: Record<string, string>;
 }
 
 export interface ChatStatus {
