@@ -1606,9 +1606,15 @@ mod tracking_tests {
     }
 
     /// An empty repo on a known branch name, whatever the host's default is.
+    ///
+    /// The identity goes in the repo's own config too: `run` sets it in the
+    /// environment, but the code under test (`git_merge`) spawns git without
+    /// it, and a CI runner has no global identity to fall back on.
     fn repo(name: &str) -> PathBuf {
         let dir = scratch(name);
         run(&dir, &["init", "--quiet", "--initial-branch=main", "."]);
+        run(&dir, &["config", "user.name", "t"]);
+        run(&dir, &["config", "user.email", "t@t"]);
         dir
     }
 
