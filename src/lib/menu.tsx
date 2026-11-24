@@ -461,7 +461,12 @@ function Panel({ entries, level, path, x, y, flipTo, onHover, onPick }: PanelPro
         role="menu"
         // A right-click inside a menu is not a request for another menu: claim
         // it here or the document-level default would replace this one.
-        onContextMenu={(event) => event.preventDefault()}
+        onContextMenu={(event) => {
+          // Claimed, not only prevented: `suppress` prevents every one, so the
+          // default below tells a handled right-click by this set alone.
+          claimed.add(event.nativeEvent);
+          event.preventDefault();
+        }}
         style={{
           left: placed?.x ?? x,
           top: placed?.y ?? y,

@@ -13,7 +13,7 @@
  * commits in a test.
  */
 
-import type { Commit } from "./types";
+import type { Commit, LogFilter } from "./types";
 
 /** Size of the colour palette the pane defines as `--graph-1 … --graph-8`. */
 export const GRAPH_COLORS = 8;
@@ -140,3 +140,27 @@ export function layoutGraph(commits: Commit[]): GraphRow[] {
 
   return rows;
 }
+
+/**
+ * Whether a log filter leaves the commits it returns unconnected.
+ *
+ * A message, author or path filter drops commits out of the middle of the
+ * history, and `git log` still prints each survivor's real parents, which are
+ * mostly commits the filter left out. Laid out as a graph, every row then opens
+ * a lane of its own for a parent that never arrives: a staircase of dangling
+ * lines to the lane cap, on a list that has no lines to draw. A branch or a
+ * range narrows the walk without holes in it, so those keep their graph.
+ */
+export function breaksAncestry(filter: Pick<LogFilter, "author" | "text" | "path">): boolean {
+  return [filter.author, filter.text, filter.path].some((value) => (value ?? "").trim() !== "");
+}
+
+/**
+ * One node per commit and no edges, for a list that is not a connected history.
+ *
+ * Same shape as `layoutGraph`'s rows, so the pane draws either the same way.
+ */
+export function layoutList(commits: Commit[]): GraphRow[] {
+  return commits.map((commit) => ({ sha: commit.sha, lane: 0, color: 0, edges: [], lanes: 1 }));
+}
+

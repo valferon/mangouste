@@ -98,8 +98,14 @@ export function parseSlash(text: string): ParsedSlash | null {
 /** The native command this name resolves to, or null to let the CLI have it. */
 export function toNative(name: string): NativeCommand | null {
   const lower = name.toLowerCase();
-  if (lower in NATIVE) return lower as NativeCommand;
-  return ALIASES[lower] ?? null;
+  // Own keys only. `in` and a bare index both walk the prototype chain, which
+  // made `/constructor` a native command: an empty panel, and a command of
+  // that name never reached the CLI or the menu.
+  // (`hasOwnProperty.call`, not `Object.hasOwn`: the older webviews this still
+  // runs in do not have the latter.)
+  const own = (table: object) => Object.prototype.hasOwnProperty.call(table, lower);
+  if (own(NATIVE)) return lower as NativeCommand;
+  return own(ALIASES) ? ALIASES[lower] : null;
 }
 
 /* ---------- composer autocomplete ---------- */
@@ -211,7 +217,11 @@ export function applyCompletion(
   replacement: string,
 ): { draft: string; caret: number } {
   const head = draft.slice(0, trigger.start);
-  const tail = draft.slice(caret);
+  // A command's query is the whole draft, wherever the caret sits in it, so
+  // the pick replaces the whole draft. Cut at the caret, the rest stayed
+  // behind as an argument: `/model` picked from after `/mo` became
+  // `/model del`. A mention's query stops at the caret, and so does its pick.
+  const tail = trigger.kind === "command" ? "" : draft.slice(caret);
   const next = `${head}${replacement}${tail}`;
   return { draft: next, caret: head.length + replacement.length };
 }

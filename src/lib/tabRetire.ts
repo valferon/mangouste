@@ -73,6 +73,14 @@ export interface RetireSnapshot {
   sessions: ReadonlyMap<string, SessionMeta>;
   /** Never retired, whatever its watermark says — you are looking at it. */
   activeTab: string;
+  /**
+   * Other tabs drawn right now, which are being looked at just the same.
+   *
+   * The pair puts two tabs in the centre pane and only one of them is the
+   * active one. The other is as much in front of you: retiring it closed a
+   * session on screen, with its process and whatever sat in its composer.
+   */
+  onScreen?: readonly string[];
   /** The overlay's pin test: a pin is a standing "keep this". */
   isPinned: (id: string) => boolean;
   /**
@@ -100,6 +108,7 @@ export interface RetireSnapshot {
  */
 export function retirableTabs(snapshot: RetireSnapshot): string[] {
   const { tabs, sessions, activeTab, isPinned, isArchived, now } = snapshot;
+  const onScreen = new Set(snapshot.onScreen ?? []);
   const afterMs = snapshot.afterMs ?? RETIRE_AFTER_MS;
   const stale: { id: string; at: number }[] = [];
 
@@ -108,7 +117,7 @@ export function retirableTabs(snapshot: RetireSnapshot): string[] {
     // is a view with no session behind it, and the dashboard belongs to no repo
     // at all — none of them have a conversational watermark to age against.
     if (tab.kind !== "chat") continue;
-    if (tab.id === activeTab) continue;
+    if (tab.id === activeTab || onScreen.has(tab.id)) continue;
     // A tab with no session id is a "New session" the repo seed just minted.
     // It has no history to lose and closing it would only make the seed mint
     // another one on the next repo switch.

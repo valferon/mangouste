@@ -8,11 +8,13 @@ mod env;
 mod fileops;
 mod format;
 mod git;
+mod labels;
 mod permission;
 mod plugins;
 mod primary;
 mod pty;
 mod recap;
+mod renew;
 mod retitle;
 mod search;
 mod sessions;
@@ -493,6 +495,7 @@ pub fn run() {
             account::account_set,
             account::account_add,
             account::account_remove,
+            account::account_rename,
             account::account_login,
             account::account_login_cancel,
             // dashboard statistics

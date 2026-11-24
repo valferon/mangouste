@@ -92,7 +92,16 @@ fn run_git(mut command: Command, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
     if !output.status.success() {
-        return Err(explain(&String::from_utf8_lossy(&output.stderr)));
+        // Not every failure is said on stderr. A merge that stops on a conflict
+        // exits 1 with `CONFLICT (content): …` on stdout and nothing on stderr,
+        // and an empty error is one the pane does not draw at all.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let said = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            stderr
+        };
+        return Err(explain(&said));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -239,9 +248,12 @@ pub fn git_log(
         (None, None) => {}
     }
 
-    // Last, and after `--`, so a path beginning with a dash stays a path.
+    // Last, and after `--`, so a path beginning with a dash stays a path. The
+    // separator goes in with or without one: it is also what tells git that a
+    // branch named like a file or folder in the worktree (`docs`, `test`) is
+    // the branch, where it otherwise refuses the name as ambiguous.
+    args.push("--".into());
     if let Some(path) = filled(&filter.path) {
-        args.push("--".into());
         args.push(path.to_string());
     }
 
@@ -1542,6 +1554,48 @@ mod tracking_tests {
         std::fs::write(dir.join("f.txt"), text).expect("write");
         run(dir, &["add", "f.txt"]);
         run(dir, &["commit", "--quiet", "-m", text]);
+    }
+
+    /// git reports a conflict on stdout and leaves stderr empty. Read from
+    /// stderr alone, the failure was an empty string, which the pane does not
+    /// draw: the merge stopped half way and nothing said so.
+    #[test]
+    fn a_conflicting_merge_fails_with_gits_own_words() {
+        let dir = repo("merge-conflict");
+        commit(&dir, "base");
+        run(&dir, &["checkout", "--quiet", "-b", "side"]);
+        commit(&dir, "theirs");
+        run(&dir, &["checkout", "--quiet", "main"]);
+        commit(&dir, "ours");
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let error = git_merge(cwd, "side".into()).expect_err("a conflict is a failure");
+        assert!(error.contains("CONFLICT"), "said: {error:?}");
+    }
+
+    /// A branch that shares its name with a file or folder in the worktree is
+    /// ambiguous to `git log` unless the revision is closed off with `--`.
+    #[test]
+    fn a_branch_named_like_a_folder_can_be_logged() {
+        let dir = repo("branch-named-like-a-folder");
+        std::fs::create_dir_all(dir.join("docs")).expect("mkdir");
+        std::fs::write(dir.join("docs").join("x.md"), "x\n").expect("write");
+        run(&dir, &["add", "docs"]);
+        run(&dir, &["commit", "--quiet", "-m", "one"]);
+        run(&dir, &["branch", "docs"]);
+
+        let cwd = dir.to_string_lossy().into_owned();
+        let filter = |path: Option<&str>| LogFilter {
+            branch: Some("docs".into()),
+            path: path.map(str::to_string),
+            ..Default::default()
+        };
+        let commits = git_log(cwd.clone(), None, None, None, Some(filter(None))).expect("log");
+        assert_eq!(commits.len(), 1);
+        // With a path as well, the one `--` still separates the two.
+        let commits =
+            git_log(cwd, None, None, None, Some(filter(Some("docs/x.md")))).expect("log by path");
+        assert_eq!(commits.len(), 1);
     }
 
     fn tracking(dir: &Path) -> RepoStatus {

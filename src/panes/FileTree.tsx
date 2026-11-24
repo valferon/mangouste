@@ -492,11 +492,14 @@ export const FileTree = memo(function FileTree({
         return;
       }
       // The row has to be visible to be typed into, and the directory it lands
-      // in may still be closed.
-      reveal([dir]);
+      // in may still be closed. So may any folder above it: the header buttons
+      // target the folder of the selected file, which Collapse All has just
+      // shut, and a draft drawn under a closed folder is an input nobody can
+      // see, reach or blur.
+      reveal([...ancestorsWithin(root, dir), dir]);
       setDraft({ kind, dir, target: null, value: "" });
     },
-    [blockedByEdits, reveal],
+    [blockedByEdits, reveal, root],
   );
 
   const commitDraft = useCallback(() => {

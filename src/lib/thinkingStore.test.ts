@@ -57,6 +57,23 @@ describe("keeping thinking the transcript throws away", () => {
     expect(recallThinking(signature("bbb"))).toBe("B");
   });
 
+  /**
+   * The size bound drops from the front until the total fits. A single block
+   * over the whole budget can never fit, so it drained the list down to nothing,
+   * itself included, and wrote the empty list out.
+   */
+  it("does not empty the cache for one block larger than the whole budget", async () => {
+    const { rememberThinking, recallThinking } = await load();
+    rememberThinking(signature("one"), "first thought");
+    rememberThinking(signature("two"), "second thought");
+    rememberThinking(signature("huge"), "x".repeat(300 * 1024));
+    expect(recallThinking(signature("one"))).toBe("first thought");
+    expect(recallThinking(signature("two"))).toBe("second thought");
+    // Not kept: it would have cost every other entry and still not fitted.
+    expect(recallThinking(signature("huge"))).toBeNull();
+    expect(JSON.parse(store._map.get(KEY) ?? "[]")).toHaveLength(2);
+  });
+
   it("misses rather than guesses for a block it never saw", async () => {
     const { recallThinking } = await load();
     expect(recallThinking(signature("unseen"))).toBeNull();

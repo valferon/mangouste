@@ -638,6 +638,8 @@ export interface Account {
   dir: string;
   /** The signed-in address from that account's `.claude.json`, if any. */
   email: string | null;
+  /** What the person calls it, if they have said. Shown in place of `name`. */
+  label: string | null;
 }
 
 export interface Accounts {

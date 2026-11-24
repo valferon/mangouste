@@ -38,16 +38,31 @@ resolve_url() {
 	case "${1:-}" in
 		v*) api="https://api.github.com/repos/$REPO/releases/tags/$1" ;;
 	esac
-	curl -fsSL "$api" |
+	# Fetched whole, then searched. As one pipeline, a release with no universal
+	# image made `grep` fail it under `pipefail`, and `set -e` ended the script on
+	# the assignment below: no image, and no word about why. A failed fetch still
+	# stops here, with curl's own message on stderr.
+	local body
+	body="$(curl -fsSL "$api")" || return 1
+	printf '%s\n' "$body" |
 		grep -o '"browser_download_url": *"[^"]*_universal\.dmg"' |
 		head -1 |
-		sed 's/.*"\(https[^"]*\)"/\1/'
+		sed 's/.*"\(https[^"]*\)"/\1/' || true
 }
 
+# `--force` and a tag in either order: read by position, `--force v0.1.7`
+# installed the latest release and `v0.1.7 --force` did not force.
 force=""
-[ "${1:-}" = "--force" ] && force=1
+tag=""
+for arg in "$@"; do
+	case "$arg" in
+		--force) force=1 ;;
+		v*) tag="$arg" ;;
+	esac
+done
 
-url="$(resolve_url "$@")"
+url="$(resolve_url "$tag")" ||
+	die "could not read the release from GitHub; check https://github.com/$REPO/releases"
 [ -n "$url" ] || die "no universal .dmg in that release; check https://github.com/$REPO/releases"
 
 work="$(mktemp -d)"

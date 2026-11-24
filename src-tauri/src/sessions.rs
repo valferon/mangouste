@@ -1190,7 +1190,12 @@ fn new_uuid() -> Option<String> {
 /// carrying a uuid so `--resume` reads it as any other interrupt. Returns
 /// whether anything was written.
 pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
-    let tail = parsed_lines(&read_last_lines(path, 8, Some(TAIL_BYTES)).unwrap_or_default());
+    // Not under the scan's tail cap. The newest record is the one this chains
+    // onto, and it can be larger than the sample on its own: a pasted image, a
+    // big tool result. Capped, the walk found no whole line there, and the
+    // marker was written with no parent and none of the session's fields. Once
+    // per kill, so walking back as far as it takes costs nothing that matters.
+    let tail = parsed_lines(&read_last_lines(path, 8, None).unwrap_or_default());
     // Already cut off — by ESC, or by a second kill for the same chat. A repeat
     // marker would add a turn to the transcript and say nothing new.
     let already = tail
@@ -1201,15 +1206,21 @@ pub(crate) fn append_interrupt_marker(path: &Path, session_id: &str) -> bool {
     if already {
         return false;
     }
+    // Nothing to chain onto means nothing was cut off, and a marker with no
+    // parent is a conversation of its own: resumed from, it would be the whole
+    // of what the model is shown.
+    let Some(parent) = tail
+        .iter()
+        .rev()
+        .find_map(|record| str_field(record, "uuid"))
+    else {
+        return false;
+    };
     let Some(uuid) = new_uuid() else {
         return false;
     };
-    let newest = tail
-        .iter()
-        .rev()
-        .find(|record| record.get("uuid").is_some());
     let mut record = serde_json::json!({
-        "parentUuid": newest.and_then(|record| str_field(record, "uuid")),
+        "parentUuid": parent,
         "isSidechain": false,
         "type": "user",
         "message": {
@@ -2874,6 +2885,76 @@ mod status_tests {
         assert!(!is_interrupt_marker(
             &serde_json::json!({"content": "interrupt the turn"})
         ));
+    }
+
+    /// The newest record can be larger than the tail sample: a pasted image, a
+    /// big tool result. Sampled under that cap, the walk found no whole line,
+    /// and the marker went in as a root of its own with no parent, which is a
+    /// one-record conversation to anything that follows the chain on resume.
+    #[test]
+    fn the_interrupt_marker_chains_onto_a_record_larger_than_the_tail_sample() {
+        let dir = std::env::temp_dir().join("mangouste-interrupt-large-record");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("2f8c1d40-0000-4000-8000-000000000003.jsonl");
+        let big = "x".repeat(TAIL_BYTES as usize + 4096);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"type":"assistant","uuid":"11111111-1111-4111-8111-111111111111","cwd":"/home/val/repo","gitBranch":"main","version":"2.1.227","timestamp":"2026-09-09T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"reading it"}]}}"#,
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "22222222-2222-4222-8222-222222222222",
+                    "cwd": "/home/val/repo",
+                    "timestamp": "2026-09-09T10:00:05.000Z",
+                    "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": big}
+                    ]},
+                }),
+            ),
+        )
+        .expect("write transcript");
+
+        let session = "2f8c1d40-0000-4000-8000-000000000003";
+        assert!(append_interrupt_marker(&path, session));
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let marker: serde_json::Value =
+            serde_json::from_str(text.lines().last().expect("a line")).expect("whole JSON");
+        assert!(marker.get("message").is_some_and(is_interrupt_marker));
+        assert_eq!(
+            str_field(&marker, "parentUuid").as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(str_field(&marker, "cwd").as_deref(), Some("/home/val/repo"));
+        // And still only once.
+        assert!(!append_interrupt_marker(&path, session));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// With nothing to chain onto there is nothing to cut off: a marker written
+    /// anyway would be a conversation of its own.
+    #[test]
+    fn no_interrupt_marker_goes_into_a_transcript_with_no_record_to_chain_onto() {
+        let dir = std::env::temp_dir().join("mangouste-interrupt-rootless");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("2f8c1d40-0000-4000-8000-000000000004.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"queue-operation\",\"operation\":\"enqueue\"}\n",
+        )
+        .expect("write transcript");
+        assert!(!append_interrupt_marker(
+            &path,
+            "2f8c1d40-0000-4000-8000-000000000004"
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .expect("read back")
+                .lines()
+                .count(),
+            1
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     /// A CLI killed mid-record leaves no trailing newline; the marker must

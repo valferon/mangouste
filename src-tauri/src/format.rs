@@ -196,6 +196,19 @@ fn strip_stdin_header(text: &str) -> &str {
     rest.strip_prefix('\n').unwrap_or(rest)
 }
 
+/// What a formatter printed, as the text to put back in the buffer.
+///
+/// The header is rustfmt's alone. Stripped from everyone's output, it took the
+/// first line off any file that happens to begin with one saying `stdin:`,
+/// which is a perfectly good YAML key.
+fn printed_text(bin: &str, output: String) -> String {
+    if bin == "rustfmt" {
+        strip_stdin_header(&output).to_string()
+    } else {
+        output
+    }
+}
+
 /* ---------- the one formatter that is not a process ---------- */
 
 /// Extensions the built-in re-indenter answers for, once nothing else has.
@@ -536,7 +549,7 @@ pub fn format_text(path: String, text: String) -> Result<Formatted, String> {
             Err(message) if message.starts_with("failed to run ") => continue,
             Err(message) => return Err(message),
         };
-        let formatted = strip_stdin_header(&formatted).to_string();
+        let formatted = printed_text(candidate.bin, formatted);
         return Ok(Formatted {
             changed: formatted != text,
             text: formatted,
@@ -651,6 +664,18 @@ mod tests {
         );
         assert_eq!(strip_stdin_header("fn main() {}\n"), "fn main() {}\n");
         assert_eq!(strip_stdin_header("stdin: 1\n"), "stdin: 1\n");
+    }
+
+    /// Only rustfmt prints that header. From any other formatter a first line
+    /// of `stdin:` is the file's own, and dropping it loses a line of the file.
+    #[test]
+    fn only_rustfmt_output_loses_a_stdin_header() {
+        let yaml = "stdin:\n  open: true\n";
+        assert_eq!(printed_text("prettier", yaml.to_string()), yaml);
+        assert_eq!(
+            printed_text("rustfmt", "stdin:\n\nfn main() {}\n".to_string()),
+            "fn main() {}\n"
+        );
     }
 
     /// The three answers a formatter can give, stood in for by `sh`: one that

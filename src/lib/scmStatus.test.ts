@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scmStatus } from "./scmStatus";
+import { indexPaths, scmStatus } from "./scmStatus";
 
 describe("scmStatus", () => {
   it("turns the untracked pair into a word, not two question marks", () => {
@@ -34,3 +34,25 @@ describe("scmStatus", () => {
     expect(scmStatus("M").letter).toBe("M");
   });
 });
+
+describe("indexPaths", () => {
+  it("is the path on the row for anything but a rename", () => {
+    expect(indexPaths([{ path: "a.ts", originalPath: null }, { path: "b.ts", originalPath: null }])).toEqual([
+      "a.ts",
+      "b.ts",
+    ]);
+  });
+
+  /**
+   * A staged rename is one row and two index entries. Unstaged by the path on
+   * the row alone, the old name stayed staged as a deletion: "Unstage All"
+   * left a row behind, and the next commit deleted the file and nothing else.
+   */
+  it("names both sides of a rename", () => {
+    expect(indexPaths([{ path: "docs/y.md", originalPath: "docs/x.md" }])).toEqual([
+      "docs/x.md",
+      "docs/y.md",
+    ]);
+  });
+});
+

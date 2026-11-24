@@ -217,7 +217,10 @@ in the platform rather than a shim:
   not in `~/.claude/.credentials.json`, so `usage.rs` reads it with `security
   find-generic-password -s "Claude Code-credentials"` and falls back to the file.
   The first read raises the system's own access prompt; answering *Always Allow*
-  is what makes it silent from then on.
+  is what makes it silent from then on. An account other than `main` has an item
+  of its own, `Claude Code-credentials-<8 hex>`: the CLI appends the start of the
+  SHA-256 of its config directory whenever `CLAUDE_CONFIG_DIR` is set, and
+  `usage.rs` asks for the same name.
 
 Selecting text still does not publish to PRIMARY there, because PRIMARY is an
 X11 selection with no macOS equivalent — `primary.rs` compiles to inert stubs
@@ -299,6 +302,8 @@ Rust owns every process and filesystem interaction; the webview is pure UI.
 | `src/lib/sessionControl.ts` | What those tool calls may do, checked before App does it |
 | `src-tauri/src/stats.rs` | Corpus-wide tokens and cost, resumed by byte offset |
 | `src-tauri/src/usage.rs` | Anthropic usage windows, opt-in |
+| `src-tauri/src/renew.rs` | Has the CLI renew an account's lapsed token, so a switch needs no sign-in |
+| `src-tauri/src/labels.rs` | What each account is called on screen, apart from its directory |
 | `src-tauri/src/account.rs` | Which `CLAUDE_CONFIG_DIR` the readers and every `claude` child use |
 
 ### Chat transport
@@ -718,13 +723,23 @@ The rest follows from the tab holding a program instead of a pane:
 The CLI keeps an account in one config directory: credentials, `.claude.json`,
 sessions, history, and by default the transcripts. `CLAUDE_CONFIG_DIR`
 points it at another one. Two accounts are two directories: `main` is
-`~/.claude`, and every directory under `~/.claude-accounts/` is listed by its
-name, with the signed-in address read out of its `.claude.json`.
+`~/.claude`, and every directory under `~/.claude-accounts/` is another.
+
+An account is shown by the label it was given, else the address it is signed
+in as (read out of its `.claude.json`), else its directory name. The label is
+not the directory. The directory is an identity: the CLI's config dir, the
+macOS keychain item (named by a hash of its path) and every running child are
+tied to it, and `main` could not be renamed at all. So **rename** in Settings
+writes `account-labels.json` beside the choice (`~/.config/mangouste/` on Linux), and the
+directory stays as it was made. Adding takes any name: the directory gets a
+plain version of it (`Ops team` becomes `ops-team`, numbered if that is taken)
+and what was typed is kept as the label. Two accounts may not answer to the
+same name, and that is checked before the directory is made.
 
 Switching and managing are two places. The account button in the Usage header
 picks the one in use, from a menu of every account. Settings ▸ **accounts**
-manages them: add one, sign it in, sign it in again, remove it. It does not
-switch, and only marks which one is in use. Adding does what `claude-acct add`
+manages them: add one, name it, sign it in, sign it in again, remove it. It
+does not switch, and only marks which one is in use. Adding does what `claude-acct add`
 does: the directory, symlinks to main's instructions, settings, rules, agents,
 commands, skills, hooks, plugins, scripts and `projects`, and a seed
 `.claude.json` carrying the user-scope MCP servers and nothing about who is
@@ -741,6 +756,25 @@ tab) gets that `CLAUDE_CONFIG_DIR`, or none at all for `main`. The usage
 window reads that account's credentials. The Sessions rail scans that account's
 `projects`, and a watcher is put on the new root at the switch so the rail keeps
 updating.
+
+A switch does not need a sign-in. An access token lasts eight hours and the
+login behind it weeks, so the account that was not in use is nearly always
+found with a lapsed token and a login that is fine. The CLI trades one for the
+other when it next starts, and the usage window has it do so at once rather
+than report the account as expired: `renew.rs` starts the CLI under the account
+with nothing on stdin (`--print --input-format stream-json --safe-mode
+--no-session-persistence`), which renews the token during startup and exits
+with no turn, no transcript and no tokens spent, in about a second. The app
+never refreshes a token itself. The refresh token is single-use, the CLI guards
+its own refreshes with a lock, and a second party racing it would leave one of
+the two signed out. For the same reason a renewal that overruns is asked to
+stop (SIGTERM, then a grace) rather than killed: a CLI stopped between the
+server's answer and its write to disk has spent the old token and lost the new
+one. Only when there is nothing left to renew with (no sign-in stored, or a
+login past its own end date, the `loginExpiresAt` of `claude auth status`) does
+the usage window say the account needs signing in, with a button that opens
+Settings ▸ accounts. A renewal that merely did not work this time, which is
+nearly always a machine with no network yet, says so and offers no button.
 
 A running process cannot change account: the environment is read once, at
 spawn. So each chat records the account it was spawned under, and the next

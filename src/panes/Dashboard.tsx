@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { onSessionsChanged, statsSummary } from "../lib/ipc";
+import { onAccountChanged, onSessionsChanged, statsSummary } from "../lib/ipc";
 import { daysInRange, rangeLabel, RANGES, type Range } from "../lib/dayRange";
 import { ArchiveIcon, PinIcon, RefreshIcon, RepoIcon, StatusGlyph } from "../lib/icons";
 import { copyText } from "../lib/editing";
@@ -293,6 +293,9 @@ export const Dashboard = memo(function Dashboard({
   const inFlight = useRef(false);
   const lastRefresh = useRef(0);
 
+  /** A refresh asked for while one was running, to run when it is done. */
+  const again = useRef(false);
+
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -310,6 +313,10 @@ export const Dashboard = memo(function Dashboard({
       inFlight.current = false;
       setLoading(false);
     }
+    if (again.current) {
+      again.current = false;
+      void refresh();
+    }
   }, []);
 
   useEffect(() => {
@@ -320,8 +327,18 @@ export const Dashboard = memo(function Dashboard({
       if (Date.now() - lastRefresh.current < REFRESH_THROTTLE_MS) return;
       void refresh();
     });
+    // Another account is another corpus, so nothing on screen is about it. Not
+    // throttled, and not dropped behind a scan already running, which may have
+    // been reading the account that was just left: the one `sessions://changed`
+    // a switch sends was lost to the throttle whenever the dashboard had
+    // refreshed in the last twenty seconds, and the old totals stayed up.
+    const unlistenAccount = onAccountChanged(() => {
+      again.current = inFlight.current;
+      void refresh();
+    });
     return () => {
       void unlisten.then((off) => off());
+      void unlistenAccount.then((off) => off());
     };
   }, [refresh]);
 

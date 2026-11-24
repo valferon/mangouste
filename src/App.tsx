@@ -84,6 +84,7 @@ import {
   readPrompts,
   removePrompt,
   writePrompts,
+  attemptKey,
   claimMinute,
   readFired,
   writeFired,
@@ -139,6 +140,7 @@ import {
   cleanStoredTabs,
   restoreTab,
   storedTabId,
+  closingOrder,
   successorTab,
   tabInRepo,
   tabRow,
@@ -1454,6 +1456,16 @@ function Workbench() {
   const splittable = useCallback((id: string) => splitKindOf(id) !== null, [splitKindOf]);
   const isSessionTab = useCallback((id: string) => splitKindOf(id) === "chat", [splitKindOf]);
   const splitOnScreen = splitShown(sessionSplit, activeTab, splittable);
+  /**
+   * Mirror of the pair on screen, for the retirement sweep: both of its tabs
+   * are in front of you, and only one of them is `activeTab`.
+   */
+  const pairLeft = splitOnScreen ? sessionSplit.left : null;
+  const pairRight = splitOnScreen ? sessionSplit.right : null;
+  const onScreenRef = useRef<readonly string[]>([]);
+  useEffect(() => {
+    onScreenRef.current = pairLeft !== null && pairRight !== null ? [pairLeft, pairRight] : [];
+  }, [pairLeft, pairRight]);
 
   // A tab closed out from under the pair takes the pair with it.
   useEffect(() => {
@@ -2022,7 +2034,7 @@ function Workbench() {
   /** Close what was open over a deleted path, and anything under it. */
   const handlePathDeleted = useCallback(
     (path: string) => {
-      for (const tab of tabsRef.current) {
+      for (const tab of closingOrder(tabsRef.current, activeTabRef.current)) {
         if (tab.kind === "file" && isUnder(tab.path, path)) forceCloseTab(tab.id);
       }
       setSelectedFile((current) => (current && isUnder(current, path) ? null : current));
@@ -2068,6 +2080,7 @@ function Workbench() {
       tabs: tabsRef.current,
       sessions: sessionsById(sessionGroups),
       activeTab: activeTabRef.current,
+      onScreen: onScreenRef.current,
       isPinned: flags.isPinned,
       isArchived: flags.isArchived,
       now: Date.now(),
@@ -2336,9 +2349,19 @@ function Workbench() {
    * otherwise reopens it in a tab behind whatever is in front. Either way it is
    * a turn of its own, so a half-typed message in that composer stays put.
    * Returns where it went, or why it could not.
+   *
+   * Not into a session another window is running. A tab here would be refused
+   * its start (one owner per session), after this had already answered "sent":
+   * the turn went nowhere, and a one-off was then deleted as done. Refused
+   * instead, so the prompt stays listed and the line says which window has it.
    */
   const runInSession = useCallback(
-    (sessionId: string, text: string, project: string | null, focus: boolean) => {
+    async (sessionId: string, text: string, project: string | null, focus: boolean) => {
+      // No answer is not a reason to refuse: carry on as before ownership.
+      const owner = await sessionOwner(sessionId).catch(() => null);
+      if (owner && owner !== windowLabel()) {
+        return { ok: false as const, error: `that session is open in ${windowName(owner)}` };
+      }
       const open = tabsRef.current.find(
         (tab): tab is ChatTab => tab.kind === "chat" && tab.sessionId === sessionId,
       );
@@ -2374,7 +2397,7 @@ function Workbench() {
     async (prompt: QuickPrompt) => {
       const deliver = (tabId: string, submit: boolean) => deliverPrompt(tabId, prompt.text, submit);
       if (prompt.session) {
-        const ran = runInSession(prompt.session, prompt.text, prompt.project, true);
+        const ran = await runInSession(prompt.session, prompt.text, prompt.project, true);
         if (!ran.ok) setSystemMessage(`“${prompt.label}” not sent: ${ran.error}.`);
         return;
       }
@@ -2427,7 +2450,7 @@ function Workbench() {
   const runScheduled = useCallback(
     async (prompt: QuickPrompt): Promise<boolean> => {
       if (prompt.session) {
-        const ran = runInSession(prompt.session, prompt.text, prompt.project, false);
+        const ran = await runInSession(prompt.session, prompt.text, prompt.project, false);
         setSystemMessage(
           ran.ok
             ? `Scheduled “${prompt.label}” sent to its session in ${repoLabel(ran.cwd)}.`
@@ -2470,7 +2493,8 @@ function Workbench() {
    * does. A one-off is the exception: it runs late rather than never, and is
    * removed from the list once it has gone somewhere. One that could not run
    * (its session is in a terminal tab, its repo unknown) stays listed as "due
-   * now" and is tried again at the next launch, not on every tick.
+   * now" and is tried again at the next launch, not on every tick, unless it
+   * is edited first: see `attemptKey`.
    */
   const triedOnceRef = useRef(new Set<string>());
   useEffect(() => {
@@ -2494,8 +2518,11 @@ function Workbench() {
       const now = new Date();
       const minute = Math.floor(now.getTime() / 60_000);
       for (const prompt of dueOneOffs(readPrompts(), now)) {
-        if (triedOnceRef.current.has(prompt.id)) continue;
-        triedOnceRef.current.add(prompt.id);
+        // By what was tried, not by id: an edit after a failed attempt is a
+        // new thing to try.
+        const attempt = attemptKey(prompt);
+        if (triedOnceRef.current.has(attempt)) continue;
+        triedOnceRef.current.add(attempt);
         void runScheduledRef.current(prompt).then((ran) => {
           if (ran) writePrompts(removePrompt(readPrompts(), prompt.id));
         });
@@ -2767,7 +2794,8 @@ function Workbench() {
    */
   const closeTabsExcept = useCallback(
     (keepId: string | null) => {
-      for (const tab of visibleTabs) {
+      // The tab in front last, so its successor is picked from what is left.
+      for (const tab of closingOrder(visibleTabs, activeTabRef.current)) {
         if (tab.id !== keepId) closeTab(tab.id);
       }
     },
@@ -3026,6 +3054,9 @@ function Workbench() {
         id: ID.closeTerminalPane,
         label: "Close Terminal Pane",
         chord: CHORD.closeTerminal,
+        // Only a pane you can see. The panel stays mounted while hidden, so
+        // from anywhere the chord used to end the shell running out of sight.
+        disabled: !terminalVisible,
         run: () => terminalActions.current?.closePane(),
       },
       {
@@ -3493,7 +3524,8 @@ function Workbench() {
                   menu.openContextMenu(event, [
                     {
                       label: "Close All Files and Views",
-                      run: () => viewTabs.forEach((tab) => closeTab(tab.id)),
+                      run: () =>
+                        closingOrder(viewTabs, activeTab).forEach((tab) => closeTab(tab.id)),
                     },
                     "separator",
                     "app",

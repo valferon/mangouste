@@ -99,6 +99,10 @@ function evict(list: Entry[]): Entry[] {
 export function rememberThinking(signature: string | undefined, text: string): void {
   const id = keyFor(signature);
   if (id === null || text === "") return;
+  // A block larger than the whole budget cannot be kept at any price: making
+  // room for it evicted every other entry and then the block itself, and the
+  // empty list was what got written. It renders as an evicted block does.
+  if (text.length > MAX_CHARS) return;
   load();
   const list = entries as Entry[];
   const map = index as Map<string, string>;

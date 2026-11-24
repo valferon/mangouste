@@ -501,7 +501,11 @@ fn is_wrap_up(prompt: &str) -> bool {
 /// The sentence the offer is in, as the note for where you left off.
 fn offer_sentence(text: &str) -> String {
     let trimmed = text.trim_end();
-    let cut = trimmed[..trimmed.len().saturating_sub(1)]
+    // Everything but the last character, so a closing full stop is not taken
+    // for the start of the sentence. By character, not by byte: the text may
+    // end on an emoji or an ellipsis, and a slice inside one panics.
+    let last = trimmed.char_indices().next_back().map_or(0, |(at, _)| at);
+    let cut = trimmed[..last]
         .rfind(['.', '!', '\n'])
         .map(|at| at + 1)
         .unwrap_or(0);
@@ -688,6 +692,27 @@ mod tests {
             verdict.next_step.as_deref(),
             Some("Want me to build the logbook next?")
         );
+    }
+
+    #[test]
+    fn an_offer_ending_on_a_multibyte_character_is_still_a_note() {
+        // The sentence search drops the last character so a closing full stop is
+        // not taken for the start; dropping the last *byte* instead split an
+        // emoji or an ellipsis in two and panicked on the slice.
+        for ending in ["🙂", "…", "é"] {
+            let mut lines: Vec<String> = (0..7)
+                .map(|i| user(&format!("step {i}"), "2026-09-01T10:00:00.000Z"))
+                .collect();
+            let offer = format!("Let me know if you want the logbook next {ending}");
+            lines.push(assistant(
+                &format!("Rail is done. {offer}"),
+                "2026-09-01T11:00:00.000Z",
+            ));
+            let facts = facts_of(&lines);
+            let verdict = decide(&facts, &RepoFacts::default(), later(&facts));
+            assert_eq!(verdict.outcome, Outcome::Parked);
+            assert_eq!(verdict.next_step.as_deref(), Some(offer.as_str()));
+        }
     }
 
     #[test]

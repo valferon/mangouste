@@ -373,3 +373,17 @@ export function successorTab(
   }
   return selectable.find((tab) => tab.kind === "chat") ?? selectable[0] ?? null;
 }
+
+/**
+ * `tabs` in the order to close them when several go at once: the one in front
+ * last.
+ *
+ * Closing a tab picks its successor only when it is the tab in front, and
+ * "in front" is read from before the batch began. Closed first, the active tab
+ * hands focus to a neighbour the same batch then removes, and nothing picks
+ * again: Close All Tabs left an empty strip, a blank pane and no fresh session.
+ * Closed last, its successor is chosen from what is actually left.
+ */
+export function closingOrder<T extends { id: string }>(tabs: readonly T[], active: string): T[] {
+  return [...tabs.filter((tab) => tab.id !== active), ...tabs.filter((tab) => tab.id === active)];
+}

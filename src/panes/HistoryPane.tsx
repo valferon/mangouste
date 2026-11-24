@@ -1,7 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { copyText } from "../lib/editing";
-import { layoutGraph, type GraphEdge, type GraphRow } from "../lib/graph";
+import {
+  breaksAncestry,
+  layoutGraph,
+  layoutList,
+  type GraphEdge,
+  type GraphRow,
+} from "../lib/graph";
 import { ClearIcon, ExpandIcon, HistoryIcon, RefreshIcon } from "../lib/icons";
 import {
   gitBranchList,
@@ -436,7 +442,12 @@ export const HistoryPane = memo(function HistoryPane({
     };
   }, [cwd, selected, visible]);
 
-  const graph = useMemo(() => layoutGraph(commits), [commits]);
+  // A message, author or path filter returns commits with the history between
+  // them left out, and those are a list, not a graph. See `breaksAncestry`.
+  const graph = useMemo(
+    () => (breaksAncestry(filter) ? layoutList(commits) : layoutGraph(commits)),
+    [commits, filter],
+  );
   const pitch = LANE_WIDTH[layout];
   const cap = MAX_LANES[layout];
   const graphWidth = useMemo(

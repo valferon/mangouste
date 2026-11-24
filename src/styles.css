@@ -520,6 +520,27 @@ body {
   width: 20px;
 }
 
+/* The account's label or address, which runs longer than `main` did. Clamped,
+   because the actions do not shrink and the header is one fixed line: the
+   menu and the tooltip carry it whole, and the arrow stays outside the clamp
+   so it is never the part cut off. In its own case, not the header's
+   capitals: an address in capitals is harder to tell from the next one. */
+.pane-header .actions .account-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 170px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.account-switch .name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pane-body {
   flex: 1;
   min-height: 0;

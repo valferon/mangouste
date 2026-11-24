@@ -31,6 +31,7 @@ import {
   readSessionWindow,
   searchFiles,
 } from "../lib/ipc";
+import { titleOf } from "../lib/accountNames";
 import {
   abortControl,
   controlApplyFlagSettings,
@@ -119,6 +120,7 @@ import { Resizer } from "../layout/Split";
 import { copyText } from "../lib/editing";
 import { CHORD } from "../lib/keybindings";
 import { appendToDraft, type DirectRequest, type PasteRequest } from "../lib/quickPrompts";
+import { markServed, servedUpTo, unserved } from "../lib/servedRequests";
 
 /** One empty list, so a pane with none does not see a new one each render. */
 const NO_DIRECT: DirectRequest[] = [];
@@ -296,6 +298,15 @@ type ChatItem = { key: string; atMs?: number } & (
 );
 
 type NoticeTone = "info" | "warn";
+
+/**
+ * The permission and question cards nobody has answered yet.
+ *
+ * The only rows with no copy on disk: a history read that replaces the log has
+ * to carry them over, or the CLI stays blocked on a card that is gone.
+ */
+const openAsks = (items: ChatItem[]): ChatItem[] =>
+  items.filter((item) => item.kind === "permission" && item.decided === null);
 
 /** Named rather than a closure so an item stays plain data, like every other. */
 interface NoticeAction {
@@ -2065,6 +2076,22 @@ export const ChatPane = memo(function ChatPane({
    * result of the previous one.
    */
   const closedTurnKeyRef = useRef<string | null>(null);
+  /**
+   * A message went to the CLI while a turn was running.
+   *
+   * The CLI queues it. At a tool boundary it is folded into the running turn;
+   * with none left it is answered in a turn of its own, after the first one
+   * has reported its `result`. The wire does not say which it will be: no user
+   * frame is echoed and `queued_turn_count` reads 0 on that result (measured on
+   * 2.1.322). So the result that follows such a send is not taken as having
+   * closed nothing, whatever starts next: that turn was asked for.
+   *
+   * A flag and not a count: several messages queued behind one turn are
+   * answered together in a single turn (same measurement), so one result is
+   * all there is to let through. If the message was folded in after all, the
+   * cost is a later pause that goes unlabelled, not a wrong label.
+   */
+  const sentMidTurnRef = useRef(false);
   // Settled `assistant` frames carry thinking blocks with `thinking: ""` — the
   // text only ever arrives as stream deltas, so it is buffered by block index
   // here and grafted back on when the frame lands.
@@ -2254,6 +2281,11 @@ export const ChatPane = memo(function ChatPane({
    * the banner's "latest" re-reads them. Working around it would mean tracking
    * provenance per item, and the case is a search hit clicked while the same
    * session happens to be mid-turn.
+   *
+   * One kind of row is on no disk: a permission or question card nobody has
+   * answered. It exists only in this list, the CLI is blocked until it is
+   * answered, and nothing short of a respawn would bring it back. Those are
+   * carried across a replace, after the history, where a live prompt belongs.
    */
   const loadHistory = useCallback(
     async (
@@ -2281,7 +2313,7 @@ export const ChatPane = memo(function ChatPane({
             // Leaving a window: back to the tail, and back to following it.
             setSticky(true);
             setAnchored(null);
-            setItems(history);
+            setItems((current) => [...history, ...openAsks(current)]);
             setToolResults(results);
             return;
           }
@@ -2302,7 +2334,7 @@ export const ChatPane = memo(function ChatPane({
         // Before the commit, or the resize observer re-pins to the bottom on the
         // same frame the window lands and the scroll below fights it.
         setSticky(false);
-        setItems(history);
+        setItems((current) => [...history, ...openAsks(current)]);
         setToolResults(results);
         setAnchored({
           offset: view.offset,
@@ -2396,6 +2428,18 @@ export const ChatPane = memo(function ChatPane({
     setToolResults({});
     // A fresh process has no turn behind it, cut off or otherwise.
     setCutOff(false);
+    // Nor a tool in flight. The outgoing instance is retired below, so the
+    // `result` and exit frames that would clear these are filtered out, and a
+    // restart mid-tool left "ready · Bash" on the bar and the dead call, its
+    // clock and its process tree on the next turn's spinner.
+    setPendingTool(null);
+    setToolActivity(null);
+    setToolOutput(null);
+    setToolProcesses([]);
+    setTurnStartedAt(null);
+    partialToolRef.current = null;
+    thinkingTextRef.current = new Map();
+    sentMidTurnRef.current = false;
     setCostUsd(null);
     setModel(null);
     setContextTokens(0);
@@ -2506,6 +2550,8 @@ export const ChatPane = memo(function ChatPane({
       .catch((e) => {
         if (generation !== startGenerationRef.current) return null;
         markAlive(false);
+        // The turn the old process was running died with it.
+        setRunning(false);
         setPhase("failed to start");
         onSystemMessageRef.current(`Failed to start claude: ${e}`);
         return null;
@@ -2777,7 +2823,8 @@ export const ChatPane = memo(function ChatPane({
           if (typeof frame.total_cost_usd === "number") setCostUsd(frame.total_cost_usd);
           const origin = frame.origin as { kind?: string } | null | undefined;
           const resultKey = nextKey();
-          closedTurnKeyRef.current = resultKey;
+          closedTurnKeyRef.current = sentMidTurnRef.current ? null : resultKey;
+          sentMidTurnRef.current = false;
           appendItem({
             kind: "result",
             key: resultKey,
@@ -2803,6 +2850,18 @@ export const ChatPane = memo(function ChatPane({
               }
             | undefined;
           if (!event) return;
+          if (event.type === "message_start") {
+            // The model has started answering, so a turn is in flight whoever
+            // started it: a message queued behind the last turn, or the CLI on
+            // its own after a background task. Nothing else announces either
+            // (result, init, status, then this, on 2.1.322), and the settled
+            // frame that used to raise the flag is a whole thinking block
+            // away. Until it landed the pane read as idle: no stop button,
+            // Escape unbound, the tab marked finished.
+            setRunning(true);
+            setTurnStartedAt((at) => at ?? Date.now());
+            return;
+          }
           if (event.type === "content_block_start") {
             if (event.content_block?.type === "thinking" && typeof event.index === "number") {
               thinkingTextRef.current.set(event.index, "");
@@ -3219,7 +3278,9 @@ export const ChatPane = memo(function ChatPane({
             : text,
       });
       // This turn was asked for, so the result before it closed exactly what it
-      // said it closed.
+      // said it closed. Sent into a running turn, it may only start after that
+      // turn's own result, which must not be re-read as a pause either.
+      if (runningRef.current) sentMidTurnRef.current = true;
       closedTurnKeyRef.current = null;
       setRunning(true);
       setCutOff(false);
@@ -3263,12 +3324,13 @@ export const ChatPane = memo(function ChatPane({
   const followAccount = useCallback(async () => {
     const spawned = spawnedAccountRef.current;
     if (!spawned) return;
-    let current: string;
+    let listed: Awaited<ReturnType<typeof accountList>>;
     try {
-      current = (await accountList()).current;
+      listed = await accountList();
     } catch {
       return;
     }
+    const current = listed.current;
     if (current === spawned) return;
     // The tab can close during that round trip, and a pane that is gone must
     // not start a process nobody will see.
@@ -3279,7 +3341,8 @@ export const ChatPane = memo(function ChatPane({
     appendItem({
       kind: "notice",
       key: nextKey(),
-      text: `moved to account ${current}: this session was running on ${spawned}.`,
+      // By what the switcher calls them, not by their directories.
+      text: `moved to account ${titleOf(listed.accounts, current)}: this session was running on ${titleOf(listed.accounts, spawned)}.`,
       tone: "info",
     });
   }, [spawn, appendItem]);
@@ -3337,19 +3400,22 @@ export const ChatPane = memo(function ChatPane({
    * landing here. It goes straight to the CLI and leaves the draft alone, since
    * whatever is half-typed belongs to the person, not to the schedule. Queued
    * until the process is up, like a pasted prompt's send.
+   *
+   * What has been served is remembered by chat id, outside the pane: the list
+   * outlives this mount, and a session reopened under the same id must not send
+   * the turns its previous pane already sent. See `servedRequests.ts`.
    */
-  const servedDirectRef = useRef(0);
   useEffect(() => {
     if (!alive) return;
-    const fresh = directRequests.filter((request) => request.token > servedDirectRef.current);
+    const fresh = unserved(chatId, "direct", directRequests);
     if (fresh.length === 0) return;
-    servedDirectRef.current = Math.max(...fresh.map((request) => request.token));
+    markServed(chatId, "direct", Math.max(...fresh.map((request) => request.token)));
     // In order, one frame each, each written before the next is sent; the CLI
     // queues a turn that arrives while one runs.
     void (async () => {
       for (const request of fresh) await dispatchTurn(request.text, []);
     })();
-  }, [alive, directRequests, dispatchTurn]);
+  }, [alive, chatId, directRequests, dispatchTurn]);
 
   /*
    * A prompt from the rail. It lands after whatever is already typed rather
@@ -3358,7 +3424,6 @@ export const ChatPane = memo(function ChatPane({
    * first on purpose: in the commit that pastes, it runs before the flag is
    * raised, so it is the next commit's `send`, with the new draft, that fires.
    */
-  const servedPasteRef = useRef(0);
   const sendAfterPasteRef = useRef(false);
   useEffect(() => {
     // Held until the process is up, which for a session opened by the prompt
@@ -3369,8 +3434,10 @@ export const ChatPane = memo(function ChatPane({
     void send();
   }, [send, alive]);
   useEffect(() => {
-    if (!pasteRequest || pasteRequest.token <= servedPasteRef.current) return;
-    servedPasteRef.current = pasteRequest.token;
+    // By chat id, not per mount, for the same reason as the turns above: the
+    // request is still in App state when this session's tab is opened again.
+    if (!pasteRequest || pasteRequest.token <= servedUpTo(chatId, "paste")) return;
+    markServed(chatId, "paste", pasteRequest.token);
     setDraft((current) => {
       const next = appendToDraft(current, pasteRequest.text);
       setCaret(next.length);
@@ -3378,7 +3445,7 @@ export const ChatPane = memo(function ChatPane({
     });
     sendAfterPasteRef.current = pasteRequest.submit;
     composerRef.current?.focus();
-  }, [pasteRequest]);
+  }, [chatId, pasteRequest]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -3515,6 +3582,9 @@ export const ChatPane = memo(function ChatPane({
       const wasRunning = runningRef.current;
       if (wasRunning) await interrupt();
       await spawn("restart");
+      // A spawn that failed has already said so; "restarted" would be untrue,
+      // and there is nothing up to send the resume to.
+      if (!aliveRef.current) return;
       emitNotice(
         wasRunning
           ? `restarted to apply ${what} — picking the interrupted turn back up.`
@@ -3562,6 +3632,10 @@ export const ChatPane = memo(function ChatPane({
         emitNotice(`model armed: ${alias} — applies when this session starts.`);
         return;
       }
+      // A respawn aborts whatever was asked of the outgoing process, and it
+      // launches with this pick already armed. Answering that abort with the
+      // fallback below respawned a second time.
+      const generation = startGenerationRef.current;
       void controlSetModel(chatId, modelArg(alias))
         .then((result) => {
           const applied = result.model ?? alias;
@@ -3571,6 +3645,7 @@ export const ChatPane = memo(function ChatPane({
         })
         .catch((e) => {
           logDebug(chatId, "control", `set_model failed: ${String(e)}`);
+          if (generation !== startGenerationRef.current) return;
           void restartToApply(`model ${alias}`);
         });
     },
@@ -3668,6 +3743,8 @@ export const ChatPane = memo(function ChatPane({
         emitNotice(`permission mode armed: ${modeLabel(mode)} — applies when this session starts.`);
         return;
       }
+      // As in `pickModel`: a process spawned since took this pick at launch.
+      const generation = startGenerationRef.current;
       void controlSetPermissionMode(chatId, mode)
         .then((result) => {
           const applied = result.mode ?? mode;
@@ -3686,6 +3763,7 @@ export const ChatPane = memo(function ChatPane({
           // `bypassPermissions`, which the CLI will not raise a process into
           // unless it was launched there; a restart resumes the same session id,
           // so applying it that way costs the transcript nothing.
+          if (generation !== startGenerationRef.current) return;
           void restartToApply(`permission mode ${modeLabel(mode)}`);
         });
     },

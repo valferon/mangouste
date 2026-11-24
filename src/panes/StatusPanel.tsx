@@ -1,11 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { accountSet, fetchUsage, gitStatus, onAccountChanged } from "../lib/ipc";
 import type { ClaudeUsage, ProjectGroup } from "../lib/types";
-import { accountLabel, useAccounts } from "../lib/accounts";
+import { accountLabel, accountTitle, useAccounts } from "../lib/accounts";
 import { copyText } from "../lib/editing";
 import { KEYS, readString, writeString } from "../lib/persist";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { useFlags } from "../lib/sessionFlagsContext";
+import { usageFaultOf, type UsageFault } from "../lib/usageFault";
 
 export interface ChatStats {
   sessionId: string | null;
@@ -84,7 +85,11 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
     () => readString(USAGE_ENABLED_KEY) === "true",
   );
   const [usage, setUsage] = useState<ClaudeUsage | null>(null);
-  const [usageError, setUsageError] = useState<string | null>(null);
+  const [usageError, setUsageError] = useState<UsageFault | null>(null);
+  /** Counts the asks, so only the latest one may answer. */
+  const usageAsk = useRef(0);
+  /** The one unasked re-ask a fault has booked, if any. */
+  const usageRetry = useRef<number | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
   const flags = useFlags();
   // Whose quota the bars are. Refetched on a switch, so the header and the
@@ -115,16 +120,40 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
     [accounts, setAccounts, onManageAccounts],
   );
 
-  const refreshUsage = useCallback(async () => {
-    if (!usageEnabled) return;
-    try {
-      setUsage(await fetchUsage());
-      setUsageError(null);
-    } catch (e) {
-      // Keep the last good numbers; a transient failure should not blank the panel.
-      setUsageError(String(e));
-    }
-  }, [usageEnabled]);
+  const refreshUsage = useCallback(
+    async (isRetry = false) => {
+      if (!usageEnabled) return;
+      // A fetch can sit behind a sign-in renewal for a second or more, and after
+      // a switch the one still in flight is the account that was just left. Its
+      // numbers landing late would be shown under the new account's name.
+      const ask = ++usageAsk.current;
+      // Any re-ask that was booked is this ask now.
+      if (usageRetry.current !== null) window.clearTimeout(usageRetry.current);
+      usageRetry.current = null;
+      try {
+        const next = await fetchUsage();
+        if (ask !== usageAsk.current) return;
+        setUsage(next);
+        setUsageError(null);
+      } catch (e) {
+        if (ask !== usageAsk.current) return;
+        const fault = usageFaultOf(e);
+        // Keep the last good numbers; a transient failure should not blank the panel.
+        setUsageError(fault);
+        // A renewal that found no network is worth one more ask before the
+        // timer's, which is minutes away. One: a re-ask that fails waits for
+        // the timer like anything else, or a machine left offline would
+        // start the CLI twice a minute for as long as it stayed that way.
+        if (fault.retryMs !== null && !isRetry) {
+          usageRetry.current = window.setTimeout(() => {
+            usageRetry.current = null;
+            void refreshUsage(true);
+          }, fault.retryMs);
+        }
+      }
+    },
+    [usageEnabled],
+  );
 
   useEffect(() => {
     writeString(USAGE_ENABLED_KEY, String(usageEnabled));
@@ -137,13 +166,22 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
     const timer = window.setInterval(() => void refreshUsage(), USAGE_REFRESH_MS);
     const unlisten = onAccountChanged(() => {
       // The numbers on screen are the previous account's. A failed fetch keeps
-      // the last good ones, which after a switch would be someone else's.
+      // the last good ones, which after a switch would be someone else's. So
+      // would a fault be: "work is not signed in" under main's name, with a
+      // button to sign work in.
       setUsage(null);
+      setUsageError(null);
       void refreshUsage();
     });
     return () => {
       window.clearInterval(timer);
       void unlisten.then((off) => off());
+      // An ask still in flight was made while the window was on. Its answer
+      // landing after it is turned off, or after the next turning-on has
+      // asked again, is nobody's. Nor is a re-ask it had booked.
+      usageAsk.current += 1;
+      if (usageRetry.current !== null) window.clearTimeout(usageRetry.current);
+      usageRetry.current = null;
     };
   }, [usageEnabled, refreshUsage]);
 
@@ -169,6 +207,10 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
     const tally = { active: 0, awaiting: 0, pendingReview: 0, interrupted: 0, finished: 0 };
     for (const group of groups) {
       for (const session of group.sessions) {
+        // As the rail's header counts do. Archiving is how an `awaiting` or
+        // `interrupted` row is dismissed, and neither ages out on its own, so
+        // counting them here left "1 need you" up for a row that was gone.
+        if (flags.isArchived(session.id)) continue;
         const status = flags.effectiveStatus(session);
         if (status in tally) tally[status as keyof typeof tally] += 1;
       }
@@ -223,7 +265,7 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
                 menu.openMenu({ items: accountEntries(), x: at.left, y: at.bottom + 2 });
               }}
             >
-              {account?.name ?? "account"} ▾
+              <span className="name">{account ? accountTitle(account) : "account"}</span> ▾
             </button>
           )}
           <button
@@ -265,7 +307,26 @@ export const StatusPanel = memo(function StatusPanel({ groups, cwd, stats, onMan
           <UsageBar key={w.model} percent={w.percent} label={`7d ${w.model.toLowerCase()}`} />
         ))}
       {switchError && <div className="empty-note">Could not switch: {switchError}</div>}
-      {usageEnabled && usageError && <div className="empty-note">{usageError}</div>}
+      {usageEnabled && usageError && (
+        <div className="empty-note">
+          {usageError.message}
+          {/* Only where signing in is the fix. A lapsed token is renewed
+              without anyone, so most switches never get here. */}
+          {usageError.signIn && onManageAccounts && (
+            <>
+              {" "}
+              <button
+                className="toggle-button"
+                data-active="true"
+                title="Opens Settings on accounts, to sign it in"
+                onClick={onManageAccounts}
+              >
+                Sign in…
+              </button>
+            </>
+          )}
+        </div>
+      )}
       {usageEnabled && !usage && !usageError && <div className="empty-note">Loading…</div>}
 
       <div className="tally-row">

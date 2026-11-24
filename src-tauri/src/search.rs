@@ -454,9 +454,48 @@ fn apply_replacements(
     (out, replaced)
 }
 
-/// `Captures::expand`, named so the call site above reads.
+/// `Captures::expand`, with a numbered group ending where its digits do.
+///
+/// The crate reads the longest name it can after a `$`, so `$1_id` asks for a
+/// group called `1_id`. There is none, an unknown group expands to nothing,
+/// and the match is replaced by an empty string in every file of a Replace
+/// All, with no preview to show it coming. Every editor reads that as group
+/// one followed by `_id`, which is what the box promises.
 fn expand(captures: &Captures<'_>, replacement: &str, out: &mut String) {
-    captures.expand(replacement, out);
+    captures.expand(&brace_numbered_groups(replacement), out);
+}
+
+/// `$12` written as `${12}`, leaving everything else as typed.
+///
+/// `$$` stays a literal dollar, `${…}` is already delimited, and a name
+/// (`$stem`) keeps the crate's own reading.
+fn brace_numbered_groups(replacement: &str) -> std::borrow::Cow<'_, str> {
+    if !replacement.contains('$') {
+        return std::borrow::Cow::Borrowed(replacement);
+    }
+    let mut out = String::with_capacity(replacement.len() + 4);
+    let mut rest = replacement;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(tail) = after.strip_prefix('$') {
+            out.push_str("$$");
+            rest = tail;
+            continue;
+        }
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            out.push('$');
+            rest = after;
+            continue;
+        }
+        out.push_str("${");
+        out.push_str(&after[..digits]);
+        out.push('}');
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Rewrite the given files, replacing the matches the pane still has selected.
@@ -807,6 +846,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "$1\n");
+    }
+
+    /// `$1_id` is group one and then `_id`, as it is in every editor's replace
+    /// box. Handed to the regex crate as typed, it names a group called `1_id`,
+    /// which does not exist, and every match was replaced by nothing at all.
+    #[test]
+    fn a_numbered_group_ends_where_its_digits_do() {
+        let dir = scratch("group-then-word");
+        let file = dir.join("a.txt");
+        let path = file.to_string_lossy().into_owned();
+        let replace = |text: &str, query: &str, replacement: &str| {
+            std::fs::write(&file, text).unwrap();
+            replace_matches(
+                query.into(),
+                SearchOptions {
+                    regex: true,
+                    ..options()
+                },
+                replacement.into(),
+                vec![ReplaceTarget {
+                    path: path.clone(),
+                    modified_ms: None,
+                    spans: None,
+                }],
+            )
+            .unwrap();
+            std::fs::read_to_string(&file).unwrap()
+        };
+
+        assert_eq!(replace("userId\n", r"(\w+)Id", "$1_id"), "user_id\n");
+        assert_eq!(replace("v1\n", r"v(\d)", "$1x$1"), "1x1\n");
+        // What already worked keeps working: braces, a named group, the whole
+        // match, and a doubled dollar for a literal one.
+        assert_eq!(replace("userId\n", r"(\w+)Id", "${1}_id"), "user_id\n");
+        assert_eq!(
+            replace("userId\n", r"(?P<stem>\w+)Id", "$stem.id"),
+            "user.id\n"
+        );
+        assert_eq!(replace("userId\n", r"\w+Id", "<$0>"), "<userId>\n");
+        assert_eq!(replace("cost 5\n", r"(\d+)", "$$$1"), "cost $5\n");
     }
 
     /// claude edits the same tree, so a file that moved under the results is

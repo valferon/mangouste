@@ -102,6 +102,19 @@ export function dueOneOffs(prompts: readonly QuickPrompt[], now: Date): QuickPro
 }
 
 /**
+ * What one attempt at a due one-off was an attempt at.
+ *
+ * A one-off that could not run is not tried again on every tick, and its id
+ * was the whole memory of that. But an edit keeps the id: give the prompt a
+ * repo, a session or a new time after it failed and it still counted as tried,
+ * so it sat at "due now" until the next launch. Where and when it runs is what
+ * was tried, so that is the key.
+ */
+export function attemptKey(prompt: QuickPrompt): string {
+  return JSON.stringify([prompt.id, prompt.at, prompt.project, prompt.session]);
+}
+
+/**
  * Fired when this window writes the list. `storage` only reaches the *other*
  * windows, and the list is now also written from outside the pane (a session
  * scheduling a follow-up, a one-off removing itself once it has run).

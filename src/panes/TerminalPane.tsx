@@ -7,6 +7,7 @@ import { CHORD } from "../lib/keybindings";
 import { matchChord } from "../lib/commands";
 import { isMac } from "../lib/platform";
 import type { PasteRequest } from "../lib/quickPrompts";
+import { markServed, servedUpTo } from "../lib/servedRequests";
 import { useMenu, type MenuEntry } from "../lib/menu";
 import { clipboardGet, onPtyData, onPtyExit, openExternal, primaryGet, primarySet, ptyClose, ptyOpen, ptyResize, ptyWrite } from "../lib/ipc";
 
@@ -233,22 +234,35 @@ export function TerminalPane({
      * can cross, and `pty://exit` only arrives once the reader has drained, so
      * the first thing to notice a dead terminal is often the write itself.
      */
+    /**
+     * One write at a time, in the order they were made.
+     *
+     * Each `pty_write` is a task of its own on the Rust side, and two issued in
+     * the same tick race for the writer: a saved prompt sent here with "send"
+     * is a paste and then a CR, and the CR could win, pressing Enter on an
+     * empty prompt and leaving the text sitting unsent. The command resolves
+     * once its bytes are written, so waiting for it is what keeps the order.
+     */
+    let writes: Promise<void> = Promise.resolve();
     const writePty = (text: string) => {
       if (deadRef.current) {
         sayDead();
         return;
       }
-      void ptyWrite(id, encodeBase64(encoder.encode(text))).catch(() => {
-        // Only once the open has landed does a rejection mean a dead shell. The
-        // Rust side answers a write for an unknown id exactly as it answers one
-        // for a shell that exited, and a keystroke into a pane whose `pty_open`
-        // is still in flight is the former: type-ahead, not a corpse. Believing
-        // it would poison the pane before its shell ever spoke, and swallow the
-        // launch command with it.
-        if (instance === null) return;
-        deadRef.current = true;
-        sayDead();
-      });
+      const bytes = encodeBase64(encoder.encode(text));
+      writes = writes
+        .then(() => ptyWrite(id, bytes))
+        .catch(() => {
+          // Only once the open has landed does a rejection mean a dead shell. The
+          // Rust side answers a write for an unknown id exactly as it answers one
+          // for a shell that exited, and a keystroke into a pane whose `pty_open`
+          // is still in flight is the former: type-ahead, not a corpse. Believing
+          // it would poison the pane before its shell ever spoke, and swallow the
+          // launch command with it.
+          if (instance === null) return;
+          deadRef.current = true;
+          sayDead();
+        });
     };
     /**
      * Clipboard text in, through xterm's own paste: it turns newlines into CR
@@ -597,14 +611,17 @@ export function TerminalPane({
 
   // Through the same bracketed paste a Ctrl+Shift+V takes, so a multi-line
   // prompt reaches `claude` as one edit; the Enter after it is a keystroke.
-  const servedPasteRef = useRef(0);
+  //
+  // Served once per terminal id, not once per mount: the request stays in App
+  // state after this tab closes, and the session opened again must not have
+  // the same prompt typed into it. See `servedRequests.ts`.
   useEffect(() => {
-    if (!pasteRequest || pasteRequest.token <= servedPasteRef.current) return;
-    servedPasteRef.current = pasteRequest.token;
+    if (!pasteRequest || pasteRequest.token <= servedUpTo(id, "paste")) return;
+    markServed(id, "paste", pasteRequest.token);
     pasteRef.current?.(pasteRequest.text);
     if (pasteRequest.submit && !deadRef.current) termRef.current?.input("\r");
     termRef.current?.focus();
-  }, [pasteRequest]);
+  }, [id, pasteRequest]);
 
   // The parent bumps this when the panel height changes.
   useEffect(() => {

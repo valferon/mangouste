@@ -18,7 +18,7 @@ import {
 } from "../lib/ipc";
 import { fileGlyph } from "../lib/fileIcons";
 import { baseName, parentDir } from "../lib/paths";
-import { scmStatus } from "../lib/scmStatus";
+import { indexPaths, scmStatus } from "../lib/scmStatus";
 import {
   BranchIcon,
   CheckIcon,
@@ -397,7 +397,7 @@ export const GitPane = memo(function GitPane({
         { label: "Open File", run: () => onOpenFile(absolute) },
         "separator",
         staged
-          ? { label: "Unstage", disabled: busy !== null, run: () => unstage([file.path]) }
+          ? { label: "Unstage", disabled: busy !== null, run: () => unstage(indexPaths([file])) }
           : { label: "Stage", disabled: busy !== null, run: () => stage([file.path]) },
         !staged && {
           label: isUntracked(file) ? "Delete Untracked File" : "Discard Changes",
@@ -422,7 +422,7 @@ export const GitPane = memo(function GitPane({
       key === "staged" && {
         label: "Unstage All",
         disabled: busy !== null || stagedFiles.length === 0,
-        run: () => unstage(stagedFiles.map((file) => file.path)),
+        run: () => unstage(indexPaths(stagedFiles)),
       },
       key === "changes" && {
         label: "Stage All Changes",
@@ -532,7 +532,7 @@ export const GitPane = memo(function GitPane({
           className="toggle-button icon-button"
           title={staged ? "Unstage" : "Stage"}
           disabled={busy !== null}
-          onClick={() => (staged ? unstage([file.path]) : stage([file.path]))}
+          onClick={() => (staged ? unstage(indexPaths([file])) : stage([file.path]))}
         >
           {staged ? <MinusIcon /> : <PlusIcon />}
         </button>
@@ -756,7 +756,7 @@ export const GitPane = memo(function GitPane({
                 className="toggle-button icon-button"
                 title="Unstage all"
                 disabled={busy !== null}
-                onClick={() => unstage(stagedFiles.map((f) => f.path))}
+                onClick={() => unstage(indexPaths(stagedFiles))}
               >
                 <MinusIcon />
               </button>,

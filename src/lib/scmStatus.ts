@@ -43,3 +43,20 @@ export function scmStatus(code: string): ScmStatus {
   }
   return MEANINGS[index] ?? MEANINGS[worktree] ?? { letter: "·", tone: "modified", title: code };
 }
+
+/**
+ * The index paths behind these rows, which for a rename is two.
+ *
+ * A staged rename is one row and two index entries: the new name added and the
+ * old one deleted. Unstaged by the name on the row alone, the file went back to
+ * untracked while `D old` stayed staged, so "Unstage All" left a row behind and
+ * the next commit deleted the file and nothing else.
+ */
+export function indexPaths(
+  files: readonly { path: string; originalPath: string | null }[],
+): string[] {
+  return files.flatMap((file) =>
+    file.originalPath ? [file.originalPath, file.path] : [file.path],
+  );
+}
+

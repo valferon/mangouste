@@ -67,6 +67,9 @@ pub fn list_dir(
         WalkBuilder::new(&root)
             .max_depth(Some(1))
             .hidden(!show_hidden)
+            // `.ignore` is ripgrep's file and on by default in the walker. Git
+            // knows nothing of it, so what it names stays in the tree.
+            .ignore(false)
             .git_ignore(gitignore)
             .git_global(gitignore)
             .git_exclude(gitignore)
@@ -589,6 +592,38 @@ mod tests {
             list(&dir, true),
             [("out".into(), false), ("kept.txt".into(), false)]
         );
+    }
+
+    /// `.ignore` is ripgrep's file, not git's. The walker reads it unless told
+    /// not to, so a tracked entry named in one vanished from the tree under
+    /// either setting, and from an ancestor's it was dimmed as "gitignored".
+    #[test]
+    fn listing_does_not_hide_what_only_a_dot_ignore_file_names() {
+        let dir = scratch("dot-ignore");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("vendor")).unwrap();
+        std::fs::write(dir.join(".ignore"), "vendor/\nlock.json\n").unwrap();
+        std::fs::write(dir.join("lock.json"), "").unwrap();
+        std::fs::write(dir.join("kept.txt"), "").unwrap();
+
+        let list = |respect| {
+            list_dir(
+                dir.to_string_lossy().into_owned(),
+                Some(respect),
+                Some(false),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.ignored))
+            .collect::<Vec<_>>()
+        };
+        let all: Vec<(String, bool)> = vec![
+            ("vendor".into(), false),
+            ("kept.txt".into(), false),
+            ("lock.json".into(), false),
+        ];
+        assert_eq!(list(true), all);
+        assert_eq!(list(false), all);
     }
 
     /// The whole reason saving is not `fs::write`: claude edits the same files

@@ -174,7 +174,17 @@ export const SearchPane = memo(function SearchPane({
       setBusy(false);
       return;
     }
-    if (query.length < MIN_AUTO_QUERY && forced.current !== query) return;
+    if (query.length < MIN_AUTO_QUERY && forced.current !== query) {
+      // Too short to sweep unasked, and no longer what the list was found for.
+      // Left up, the last query's hits sat under a different query, with their
+      // replace buttons live and the "press Enter" hint hidden behind them. A
+      // sweep still in flight for the longer query is dropped the same way.
+      generation.current += 1;
+      setOutcome(null);
+      setError(null);
+      setBusy(false);
+      return;
+    }
     const timer = setTimeout(() => void run(query), DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [query, run]);

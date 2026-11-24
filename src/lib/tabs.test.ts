@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   changesTabLabel,
   cleanStoredTabs,
+  closingOrder,
   isStoredTab,
   restoreTab,
   storedTabId,
@@ -450,3 +451,24 @@ describe("a chat tab's own permission mode", () => {
     expect(stored).not.toHaveProperty("permissionMode");
   });
 });
+
+describe("closingOrder", () => {
+  const strip = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  /**
+   * A close picks a successor only for the tab in front, and reads "in front"
+   * from before the batch. Closed first, the active tab handed focus to a tab
+   * the same batch then removed: an empty strip and a blank pane.
+   */
+  it("closes the tab in front last", () => {
+    expect(closingOrder(strip, "a").map((tab) => tab.id)).toEqual(["b", "c", "a"]);
+    expect(closingOrder(strip, "b").map((tab) => tab.id)).toEqual(["a", "c", "b"]);
+  });
+
+  it("leaves the order alone when the tab in front is not among them", () => {
+    expect(closingOrder(strip, "z").map((tab) => tab.id)).toEqual(["a", "b", "c"]);
+    expect(closingOrder(strip, "").map((tab) => tab.id)).toEqual(["a", "b", "c"]);
+    expect(closingOrder([], "a")).toEqual([]);
+  });
+});
+

@@ -307,7 +307,45 @@ pub fn copy_path(from: String, to: String) -> Result<(), String> {
         return Err("cannot copy a directory into itself".to_string());
     }
     prepare_parent(&to)?;
-    copy_tree(&from, &to)
+    copy_or_clean_up(&from, &to)
+}
+
+/// `copy_tree`, taking back whatever it wrote if it fails part way.
+///
+/// For the reason the cross-device move gives: a half-written tree at the
+/// target is worse than no tree. The retry hits "already exists", and nobody
+/// was told there was anything to clean up.
+///
+/// Only what this call made is taken back. The name is claimed first, by a
+/// create that fails when anything is already there, so a target that another
+/// window made since the caller looked is refused and left exactly as it is,
+/// not copied over and not cleaned up.
+fn copy_or_clean_up(from: &Path, to: &Path) -> Result<(), String> {
+    let kind = std::fs::symlink_metadata(from)
+        .map_err(|e| e.to_string())?
+        .file_type();
+    if kind.is_symlink() {
+        // Made in one call or not at all, and never over something else.
+        return copy_tree(from, to);
+    }
+    if kind.is_dir() {
+        std::fs::create_dir(to).map_err(|e| e.to_string())?;
+        return fill_dir(from, to, 0).inspect_err(|_| {
+            let _ = remove(to);
+        });
+    }
+    if !kind.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)
+        .map_err(|e| e.to_string())?;
+    // Over the empty file that is now ours, which also carries the mode.
+    copy_tree(from, to).inspect_err(|_| {
+        let _ = remove(to);
+    })
 }
 
 /// Copy an entry beside itself under a free name, returning the path made.
@@ -323,7 +361,7 @@ pub fn duplicate_path(path: String) -> Result<String, String> {
         return Err("source is gone".to_string());
     }
     let target = free_copy_name(&path)?;
-    copy_tree(&path, &target)?;
+    copy_or_clean_up(&path, &target)?;
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -416,6 +454,11 @@ fn copy_tree_at(from: &Path, to: &Path, depth: usize) -> Result<(), String> {
     }
 
     std::fs::create_dir(to).map_err(|e| e.to_string())?;
+    fill_dir(from, to, depth)
+}
+
+/// Copy what is inside `from` into `to`, a directory that already exists.
+fn fill_dir(from: &Path, to: &Path, depth: usize) -> Result<(), String> {
     for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         copy_tree_at(&entry.path(), &to.join(entry.file_name()), depth + 1)?;
@@ -807,5 +850,58 @@ mod tests {
 
         assert_eq!(refused.unwrap_err(), "already exists");
         assert_eq!(text(&to), "keep\n");
+    }
+
+    /// A copy that fails part way must not leave its half behind: the retry
+    /// would then hit "already exists" on a tree nobody was told about. The
+    /// cross-device move has always cleaned up after itself; these two did not.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_nothing_at_the_target() {
+        let dir = scratch("failed-copy");
+        let source = dir.join("box");
+        std::fs::create_dir_all(source.join("inner")).unwrap();
+        std::fs::write(source.join("inner").join("a.txt"), "a").unwrap();
+        // Not a regular file, so the copy refuses it and the whole tree fails.
+        let _socket = std::os::unix::net::UnixListener::bind(source.join("sock")).unwrap();
+
+        let target = dir.join("pasted");
+        assert!(copy_path(
+            source.to_string_lossy().into_owned(),
+            target.to_string_lossy().into_owned()
+        )
+        .is_err());
+        assert!(!occupied(&target), "a partial copy was left at the target");
+
+        assert!(duplicate_path(source.to_string_lossy().into_owned()).is_err());
+        assert!(
+            !occupied(&dir.join("box copy")),
+            "a partial duplicate was left beside the source"
+        );
+    }
+
+    /// The clean-up takes back only what the copy made. A name somebody else
+    /// took after the caller looked is refused and left as it is: not copied
+    /// over, and not removed as if it were this copy's own half-written tree.
+    #[test]
+    fn a_copy_onto_a_name_taken_meanwhile_leaves_it_alone() {
+        let dir = scratch("copy-claims-its-name");
+        std::fs::write(dir.join("a.txt"), "mine").unwrap();
+        std::fs::write(dir.join("taken.txt"), "theirs").unwrap();
+        assert!(copy_or_clean_up(&dir.join("a.txt"), &dir.join("taken.txt")).is_err());
+        assert_eq!(text(&dir.join("taken.txt")), "theirs");
+
+        std::fs::create_dir_all(dir.join("box")).unwrap();
+        std::fs::write(dir.join("box").join("in.txt"), "mine").unwrap();
+        std::fs::create_dir_all(dir.join("taken")).unwrap();
+        std::fs::write(dir.join("taken").join("keep.txt"), "theirs").unwrap();
+        assert!(copy_or_clean_up(&dir.join("box"), &dir.join("taken")).is_err());
+        assert_eq!(text(&dir.join("taken").join("keep.txt")), "theirs");
+
+        // And a free name is copied whole, mode included.
+        copy_or_clean_up(&dir.join("box"), &dir.join("fresh")).unwrap();
+        assert_eq!(text(&dir.join("fresh").join("in.txt")), "mine");
+        copy_or_clean_up(&dir.join("a.txt"), &dir.join("b.txt")).unwrap();
+        assert_eq!(text(&dir.join("b.txt")), "mine");
     }
 }

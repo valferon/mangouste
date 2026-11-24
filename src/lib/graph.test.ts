@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { layoutGraph, type GraphEdge } from "./graph";
-import type { Commit } from "./types";
+import { breaksAncestry, layoutGraph, layoutList, type GraphEdge } from "./graph";
+import type { Commit, LogFilter } from "./types";
 
 /** A commit is only its sha and its parents here; the rest never reaches the layout. */
 function commit(sha: string, ...parents: string[]): Commit {
@@ -92,3 +92,39 @@ describe("layoutGraph", () => {
     expect(layoutGraph([])).toEqual([]);
   });
 });
+
+describe("a filtered log", () => {
+  // What `git log -- a.txt` prints for a linear history where every other
+  // commit touched the file: each survivor still names its real parent, which
+  // the filter left out.
+  const filtered = [commit("c6", "c5"), commit("c4", "c3"), commit("c2", "c1")];
+
+  it("is not a graph: every row would open a lane of its own", () => {
+    // The shape this exists to avoid, pinned so the reason stays visible.
+    expect(layoutGraph(filtered).map((row) => row.lane)).toEqual([0, 1, 2]);
+  });
+
+  it("is laid out as a plain list, one node a row and no edges", () => {
+    const rows = layoutList(filtered);
+    expect(rows.map((row) => row.sha)).toEqual(["c6", "c4", "c2"]);
+    expect(rows.every((row) => row.lane === 0 && row.lanes === 1 && row.edges.length === 0)).toBe(
+      true,
+    );
+    expect(layoutList([])).toEqual([]);
+  });
+
+  it("is what a message, author or path filter produces", () => {
+    expect(breaksAncestry({ author: "val" })).toBe(true);
+    expect(breaksAncestry({ text: "fix" })).toBe(true);
+    expect(breaksAncestry({ path: "src/lib" })).toBe(true);
+  });
+
+  it("is not what a branch, a range or a blank box produces", () => {
+    expect(breaksAncestry({})).toBe(false);
+    // A blank box is not a filter: Rust drops it before it reaches git.
+    expect(breaksAncestry({ author: "  ", text: "", path: undefined })).toBe(false);
+    const narrowed: LogFilter = { branch: "main", range: { from: "a", to: "b" } };
+    expect(breaksAncestry(narrowed)).toBe(false);
+  });
+});
+

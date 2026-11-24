@@ -244,6 +244,23 @@ fn holds_session(chat_id: &str, reported: Option<&str>, session_id: &str) -> boo
     reported == Some(session_id) || chat_id.ends_with(&format!("|{session_id}"))
 }
 
+/// What the pane passes to resume a session as a copy under a new id.
+const FORK_FLAG: &str = "--fork-session";
+
+/// The session this start would become a second writer on, if any.
+///
+/// A plain resume writes to the transcript it names. A fork only reads it: the
+/// CLI copies the conversation into an id of its own, so the session in
+/// `resume` stays whoever's it was. That is usually the session that asked for
+/// the fork, alive and waiting on that very tool call.
+fn resumed_session(options: &StartOptions) -> Option<&str> {
+    let forks = options
+        .extra_args
+        .as_deref()
+        .is_some_and(|args| args.iter().any(|arg| arg == FORK_FLAG));
+    options.resume.as_deref().filter(|_| !forks)
+}
+
 #[derive(Default)]
 pub struct ChatManager {
     chats: Mutex<HashMap<String, Chat>>,
@@ -573,6 +590,33 @@ impl ChatManager {
 //   3. An explicit rename appends a `custom-title`, the record kind
 //      `claude --name` writes, which outranks every `ai-title` in every
 //      lister — this app, the CLI picker, the VS Code extension.
+
+/// Whether a frame from the CLI says a turn began or ended.
+///
+/// `Some(false)` is a `result`. `Some(true)` is the model starting to answer on
+/// the main thread, which is how a turn nobody just sent a frame for announces
+/// itself: a message queued behind the previous turn is answered in a turn of
+/// its own after that turn's `result`, and the CLI starts one unasked when a
+/// background task reports. Neither echoes a user frame first (measured on
+/// 2.1.322: `result`, `init`, `status`, then `message_start`). A subagent's
+/// stream carries its parent's tool id and says nothing about this turn.
+fn turn_edge(frame: &Value) -> Option<bool> {
+    match frame.get("type").and_then(Value::as_str)? {
+        "result" => Some(false),
+        "stream_event" => {
+            let nested = frame
+                .get("parent_tool_use_id")
+                .is_some_and(|id| !id.is_null());
+            let started = frame
+                .get("event")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str)
+                == Some("message_start");
+            (started && !nested).then_some(true)
+        }
+        _ => None,
+    }
+}
 
 /// The tool calls a frame carries results for. Only `user` frames carry any;
 /// every other shape reads as none.
@@ -1631,7 +1675,10 @@ pub fn start(
     // window's is the orphan its reload left behind — a window never holds two
     // tabs for one session, `openSessionTab` dedupes by uuid — so it is ended
     // before the resume, rather than left appending to the same transcript.
-    let orphan = options.resume.as_deref().and_then(|session| {
+    //
+    // Not for a fork: the session it names is its parent, and ending that one
+    // killed the turn that had just asked for the fork.
+    let orphan = resumed_session(&options).and_then(|session| {
         manager
             .chats
             .lock()
@@ -1723,6 +1770,9 @@ pub fn start(
     // Unique on this process's stream, which is all a control request id has
     // to be; the frontend's own ids are `mangouste-<n>-<ms>`.
     let title_request_id = format!("mangouste-title-{instance}");
+    // What was already running under the CLI when the turn opened. Made here
+    // because two threads below write and read it. See "Tool liveness".
+    let baseline = Arc::new(Mutex::new(HashSet::<u32>::new()));
 
     // stdout: one JSON object per line, forwarded verbatim.
     {
@@ -1738,6 +1788,7 @@ pub fn start(
         let titled = Arc::clone(&titled);
         let stdin = Arc::clone(&stdin);
         let title_request_id = title_request_id.clone();
+        let baseline = Arc::clone(&baseline);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             // Bytes, not `lines()`: that iterator ends on the first non-UTF-8
@@ -1808,8 +1859,20 @@ pub fn start(
                                 settle_title(&sid, &prompt);
                             }
                         }
-                        if value.get("type").and_then(|v| v.as_str()) == Some("result") {
-                            running.store(false, Ordering::SeqCst);
+                        match turn_edge(&value) {
+                            Some(false) => running.store(false, Ordering::SeqCst),
+                            // A turn that opened without `send_frame` seeing
+                            // it open. Left at "not running", a kill in the
+                            // middle of it wrote no interrupt marker, the tool
+                            // probe sat idle through it, and a pane attaching
+                            // was told the session was at rest. The baseline
+                            // is taken first, as `send_frame` takes it.
+                            Some(true) if !running.load(Ordering::SeqCst) => {
+                                *baseline.lock() =
+                                    group_processes(pid).iter().map(|p| p.pid).collect();
+                                running.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
                         }
                         // Before the frame is forwarded, so the pane hears the
                         // card withdrawn no later than it hears why.
@@ -1882,12 +1945,12 @@ pub fn start(
     }
 
     // Tool liveness: name what is actually executing while a turn is running.
-    // The baseline is taken as each turn opens (see `send_frame`), so
+    // The baseline is taken as each turn opens (see `send_frame`, and the
+    // stdout pump for a turn the CLI opens on its own), so
     // session-lifetime helpers (MCP servers, the permission bridge) accumulate
     // into it and only work started during the turn is ever reported. Idle
     // ticks scan nothing: with many chats open, a per-second process-table walk
     // each — a `ps` spawn each off Linux — bought nothing between turns.
-    let baseline = Arc::new(Mutex::new(HashSet::<u32>::new()));
     {
         let manager = Arc::clone(manager);
         let chat_id = options.chat_id.clone();
@@ -2096,6 +2159,28 @@ mod tests {
     fn the_id_match_is_on_a_whole_segment() {
         let id = format!("chat|/home/user/demo|x{SESSION}");
         assert!(!holds_session(&id, None, SESSION));
+    }
+
+    #[test]
+    fn a_plain_resume_is_a_second_writer_on_its_session() {
+        let mut options = options();
+        assert_eq!(resumed_session(&options), None);
+        options.resume = Some(SESSION.into());
+        assert_eq!(resumed_session(&options), Some(SESSION));
+        // Other flags beside it change nothing.
+        options.extra_args = Some(vec!["--effort".into(), "high".into()]);
+        assert_eq!(resumed_session(&options), Some(SESSION));
+    }
+
+    /// `fork_session` starts the fork while its parent is mid-turn on the tool
+    /// call that asked for it. Taken for a reload orphan of the same session,
+    /// the parent was killed (or, from another window, the fork was refused).
+    #[test]
+    fn a_fork_leaves_the_session_it_copies_alone() {
+        let mut options = options();
+        options.resume = Some(SESSION.into());
+        options.extra_args = Some(vec!["--effort".into(), "high".into(), FORK_FLAG.into()]);
+        assert_eq!(resumed_session(&options), None);
     }
 
     #[test]
@@ -2351,6 +2436,50 @@ mod tests {
         assert_eq!(user_text_of(&image_only), None);
         let plain = json!({ "type": "user", "message": { "role": "user", "content": "hello" } });
         assert_eq!(user_text_of(&plain).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_result_closes_the_turn_and_a_main_thread_answer_opens_one() {
+        assert_eq!(
+            turn_edge(&json!({ "type": "result", "subtype": "success" })),
+            Some(false)
+        );
+        // A queued message's own turn, or one the CLI started: no user frame
+        // came first, so this is the first thing that says a turn is running.
+        let started = json!({
+            "type": "stream_event",
+            "parent_tool_use_id": null,
+            "event": { "type": "message_start" }
+        });
+        assert_eq!(turn_edge(&started), Some(true));
+        // Older frames carry no parent field at all.
+        let bare = json!({ "type": "stream_event", "event": { "type": "message_start" } });
+        assert_eq!(turn_edge(&bare), Some(true));
+    }
+
+    #[test]
+    fn frames_that_are_not_a_turn_edge_change_nothing() {
+        // A subagent answering is its parent's tool call, not this turn.
+        let nested = json!({
+            "type": "stream_event",
+            "parent_tool_use_id": "toolu_1",
+            "event": { "type": "message_start" }
+        });
+        assert_eq!(turn_edge(&nested), None);
+        let delta = json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_delta", "delta": { "type": "text_delta" } }
+        });
+        assert_eq!(turn_edge(&delta), None);
+        assert_eq!(
+            turn_edge(&json!({ "type": "assistant", "message": {} })),
+            None
+        );
+        assert_eq!(
+            turn_edge(&json!({ "type": "system", "subtype": "init" })),
+            None
+        );
+        assert_eq!(turn_edge(&json!({ "no": "type" })), None);
     }
 
     #[test]

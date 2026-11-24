@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addPrompt,
   appendToDraft,
+  attemptKey,
   claimMinute,
   cleanPrompts,
   deriveLabel,
@@ -215,6 +216,32 @@ describe("claimMinute", () => {
 
   it("drops the entries of prompts that are gone", () => {
     expect(claimMinute({ gone: 5, b: 7 }, "a", 100, live)).toEqual({ a: 100, b: 7 });
+  });
+});
+
+describe("attemptKey", () => {
+  const due = prompt("a", { at: "2026-11-16T09:00:00.000Z", submit: true });
+
+  it("is the same for the same prompt, so a failed one-off is not retried every tick", () => {
+    expect(attemptKey(due)).toBe(attemptKey({ ...due }));
+    // What it says is not what was tried: where and when it runs is.
+    expect(attemptKey({ ...due, text: "reworded", label: "renamed" })).toBe(attemptKey(due));
+  });
+
+  /**
+   * An edit keeps the id. Keyed by id alone, a one-off given a repo, a session
+   * or a new time after it had failed still counted as tried, and sat at "due
+   * now" until the next launch.
+   */
+  it("changes when the prompt is given somewhere or sometime else to run", () => {
+    const tried = attemptKey(due);
+    expect(attemptKey({ ...due, project: "/home/user/repo" })).not.toBe(tried);
+    expect(attemptKey({ ...due, session: "279b648d-896f-4ac8-9101-604cf933626f" })).not.toBe(tried);
+    expect(attemptKey({ ...due, at: "2026-11-16T09:10:00.000Z" })).not.toBe(tried);
+  });
+
+  it("tells two prompts apart", () => {
+    expect(attemptKey(prompt("b", { at: due.at }))).not.toBe(attemptKey(due));
   });
 });
 

@@ -675,7 +675,13 @@ export const fetchRelease = (tag?: string) =>
 
 /* ---------- usage ---------- */
 
-/** Reads the local OAuth token and calls Anthropic's usage endpoint. Opt-in. */
+/**
+ * Reads the local OAuth token and calls Anthropic's usage endpoint. Opt-in.
+ *
+ * A token that has lapsed is renewed first, by the CLI, so this can take a
+ * second longer after a switch. Rejects with `{ message, signIn, retryMs }`;
+ * read it with `usageFaultOf`.
+ */
 export const fetchUsage = () => invoke<ClaudeUsage>("fetch_usage");
 
 /* ---------- accounts ---------- */
@@ -689,8 +695,21 @@ export const accountList = () => invoke<Accounts>("account_list");
  */
 export const accountSet = (name: string) => invoke<Accounts>("account_set", { name });
 
-/** Create an account under `~/.claude-accounts`. It starts signed out. */
-export const accountAdd = (name: string) => invoke<Accounts>("account_add", { name });
+/**
+ * Create an account under `~/.claude-accounts`, in the directory `name`. It
+ * starts signed out. `label` is what it is called when that is not the
+ * directory's name, and is refused before anything is made if another account
+ * answers to it.
+ */
+export const accountAdd = (name: string, label: string | null = null) =>
+  invoke<Accounts>("account_add", { name, label });
+
+/**
+ * Call an account `label` on screen, or take its label off with a blank one.
+ * The directory keeps its name; refused when another account answers to it.
+ */
+export const accountRename = (name: string, label: string) =>
+  invoke<Accounts>("account_rename", { name, label });
 
 /** Delete an account's directory. Refused for `main` and the one in use. */
 export const accountRemove = (name: string) => invoke<Accounts>("account_remove", { name });
@@ -709,6 +728,10 @@ export interface AccountLoginEvent {
 
 export const onAccountLogin = (handler: (event: AccountLoginEvent) => void): Promise<UnlistenFn> =>
   listen<AccountLoginEvent>("account://login", (event) => handler(event.payload));
+
+/** An account was called something else; only the lists of names reload. */
+export const onAccountLabels = (handler: () => void): Promise<UnlistenFn> =>
+  listen<string>("account://labels", () => handler());
 
 /** The account changed, in this window or another; readers refetch. */
 export const onAccountChanged = (handler: (name: string) => void): Promise<UnlistenFn> =>

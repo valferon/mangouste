@@ -78,6 +78,22 @@ function snapshot(overrides: Partial<RetireSnapshot> = {}): RetireSnapshot {
 }
 
 describe("retirableTabs", () => {
+  /**
+   * The pair shows two tabs and only one of them is the active one. Exempting
+   * the active tab alone closed the session on screen beside it, killing its
+   * process and dropping whatever was typed into its composer.
+   */
+  it("keeps a tab that is on screen beside the active one", () => {
+    const stale = snapshot({ activeTab: "t-front", onScreen: ["t-front", "t-old"] });
+    expect(retirableTabs(stale)).toEqual([]);
+    // Archiving does not override it either: you are still looking at it.
+    expect(retirableTabs({ ...stale, isArchived: only("s-old") })).toEqual([]);
+    // Off screen again, it ages out like any other tab.
+    expect(retirableTabs(snapshot({ activeTab: "t-front", onScreen: ["t-front"] }))).toEqual([
+      "t-old",
+    ]);
+  });
+
   it("retires a tab whose session has been quiet past the cutoff", () => {
     expect(retirableTabs(snapshot())).toEqual(["t-old"]);
   });

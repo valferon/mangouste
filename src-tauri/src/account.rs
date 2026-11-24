@@ -11,7 +11,7 @@
 //! Three things depend on the choice, and all three come through here so they
 //! cannot disagree: the transcripts the rail scans (`projects_root`), the state
 //! and credentials the usage and dashboard panes read (`state_file`,
-//! `credentials_file`), and the environment every `claude` child gets
+//! `credentials_file_of`), and the environment every `claude` child gets
 //! (`apply`, `apply_pty`). A child spawned before a switch keeps the account it
 //! started with; the environment is read once, at spawn.
 //!
@@ -42,6 +42,11 @@ const ACCOUNTS_DIR: &str = ".claude-accounts";
 /// account's state — the usage window, the dashboard — refetch.
 pub const EVENT_CHANGED: &str = "account://changed";
 
+/// Emitted when an account is called something else. Its own event, because
+/// nothing about any account's state has moved: only the lists that show the
+/// names reload, and the usage window and the dashboard stay as they are.
+pub const EVENT_LABELS: &str = "account://labels";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -51,6 +56,9 @@ pub struct Account {
     pub dir: String,
     /// The signed-in address from the account's `.claude.json`, when there is one.
     pub email: Option<String>,
+    /// What the person calls it, when they have said. `name` is a directory
+    /// and stays one; this is what the switcher shows in its place.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,11 +212,6 @@ pub fn config_dir() -> Option<PathBuf> {
     Layout::real().map(|layout| layout.dir_of(&current_name()))
 }
 
-/// Whether the account in effect is the CLI's default one.
-pub fn is_main() -> bool {
-    current_name() == MAIN
-}
-
 /// The transcripts the rail scans: `<config dir>/projects`.
 pub fn projects_root() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("projects"))
@@ -230,9 +233,11 @@ fn state_file_in(layout: &Layout, name: &str) -> PathBuf {
     }
 }
 
-/// The credentials file: `<config dir>/.credentials.json` on every account.
-pub fn credentials_file() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join(".credentials.json"))
+/// The credentials file of `name`: `<config dir>/.credentials.json` on every
+/// account. By name rather than for the account in effect, so a caller that
+/// reads, renews and reads again stays on one account through a switch.
+pub fn credentials_file_of(name: &str) -> Option<PathBuf> {
+    Layout::real().map(|layout| layout.dir_of(name).join(".credentials.json"))
 }
 
 /// The `CLAUDE_CONFIG_DIR` a child on `name` gets: `None` means unset.
@@ -241,7 +246,10 @@ pub fn credentials_file() -> Option<PathBuf> {
 /// explicit path and an absent one are the same account to the CLI, but a set
 /// variable is what tells a `claude-acct`-style wrapper in a terminal that a
 /// non-default account is in force, and `main` is not one.
-fn env_for(name: &str) -> Option<PathBuf> {
+///
+/// Set or unset is also what the CLI names its macOS keychain item by, so the
+/// usage reader asks this to find the item a child on `name` wrote.
+pub(crate) fn env_for(name: &str) -> Option<PathBuf> {
     if name == MAIN {
         return None;
     }
@@ -360,13 +368,14 @@ fn email_in(state_file: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-fn list(layout: &Layout, current: &str) -> Accounts {
+fn list(layout: &Layout, current: &str, labels: &crate::labels::Labels) -> Accounts {
     let accounts = layout
         .names()
         .into_iter()
         .map(|name| Account {
             dir: layout.dir_of(&name).to_string_lossy().into_owned(),
             email: email_in(&state_file_in(layout, &name)),
+            label: labels.get(&name).cloned(),
             name,
         })
         .collect();
@@ -376,11 +385,53 @@ fn list(layout: &Layout, current: &str) -> Accounts {
     }
 }
 
+/// `list`, with the labels on disk.
+fn listed(layout: &Layout, current: &str) -> Accounts {
+    list(layout, current, &crate::labels::read())
+}
+
+/// What `name` is called on screen: its label, else the address it is signed
+/// in as, else the name. For the messages the backend writes about an
+/// account, so they name it the way the switcher does.
+pub fn title(name: &str) -> String {
+    let label = crate::labels::read().remove(name);
+    let email = Layout::real().and_then(|layout| email_in(&state_file_in(&layout, name)));
+    crate::labels::title(label.as_deref(), email.as_deref(), name)
+}
+
 /// Every account on disk, and which one is in effect.
 #[tauri::command(async)]
 pub fn account_list() -> Result<Accounts, String> {
     let layout = Layout::real().ok_or("no home directory")?;
-    Ok(list(&layout, &current_name()))
+    Ok(listed(&layout, &current_name()))
+}
+
+/// Every account but `name`, with what each shows as: what a label for
+/// `name` must not be mistaken for.
+fn others(layout: &Layout, name: &str) -> Vec<crate::labels::Other> {
+    layout
+        .names()
+        .into_iter()
+        .filter(|other| other != name)
+        .map(|other| crate::labels::Other {
+            email: email_in(&state_file_in(layout, &other)),
+            name: other,
+        })
+        .collect()
+}
+
+/// Call account `name` what was typed, or take its label off when that is
+/// blank. The directory keeps its name: see `labels`.
+#[tauri::command(async)]
+pub fn account_rename(app: AppHandle, name: String, label: String) -> Result<Accounts, String> {
+    let layout = Layout::real().ok_or("no home directory")?;
+    if !layout.names().contains(&name) {
+        return Err(format!("no account {name}"));
+    }
+    crate::labels::set(&name, &label, &others(&layout, &name))?;
+    let current = current_name();
+    let _ = app.emit(EVENT_LABELS, &name);
+    Ok(listed(&layout, &current))
 }
 
 /// Make `name` the account in effect, for new children and every reader.
@@ -407,7 +458,7 @@ pub fn account_set(app: AppHandle, name: String) -> Result<Accounts, String> {
     }
     let _ = app.emit(crate::EVENT_SESSIONS_CHANGED, ());
     let _ = app.emit(EVENT_CHANGED, &name);
-    Ok(list(&layout, &name))
+    Ok(listed(&layout, &name))
 }
 
 /// What a new account shares with `main` by symlink, as `claude-acct` does:
@@ -511,12 +562,31 @@ fn remove_in(layout: &Layout, name: &str, current: &str) -> Result<(), String> {
 }
 
 /// Create an account. It starts signed out; `account_login` signs it in.
+///
+/// `label` is what the person called it, when that is not the directory's
+/// name. It is checked before the directory is made, so a name another
+/// account answers to is refused with nothing created rather than leaving an
+/// account behind under a name nobody chose.
 #[tauri::command(async)]
-pub fn account_add(app: AppHandle, name: String) -> Result<Accounts, String> {
+pub fn account_add(
+    app: AppHandle,
+    name: String,
+    label: Option<String>,
+) -> Result<Accounts, String> {
     let layout = Layout::real().ok_or("no home directory")?;
+    let label = label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty() && *label != name);
+    let rest = others(&layout, &name);
+    if let Some(label) = label {
+        crate::labels::check(&name, label, &rest)?;
+    }
     add_in(&layout, &name)?;
+    let named = label.map_or(Ok(()), |label| crate::labels::set(&name, label, &rest));
     let _ = app.emit(EVENT_CHANGED, current_name());
-    Ok(list(&layout, &current_name()))
+    named.map_err(|e| format!("made {name}, but could not name it: {e}"))?;
+    Ok(listed(&layout, &current_name()))
 }
 
 /// Delete an account's directory.
@@ -525,8 +595,9 @@ pub fn account_remove(app: AppHandle, name: String) -> Result<Accounts, String> 
     let layout = Layout::real().ok_or("no home directory")?;
     let current = current_name();
     remove_in(&layout, &name, &current)?;
+    crate::labels::forget(&name);
     let _ = app.emit(EVENT_CHANGED, &current);
-    Ok(list(&layout, &current))
+    Ok(listed(&layout, &current))
 }
 
 /// Emitted with each line `claude auth login` prints, and once when it ends.
@@ -786,7 +857,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(layout.home.join(".claude.json"), r#"{"oauthAccount":{}}"#).unwrap();
-        let listed = list(&layout, "work");
+        let listed = list(&layout, "work", &crate::labels::Labels::new());
         assert_eq!(listed.current, "work");
         let emails: Vec<_> = listed
             .accounts
@@ -794,6 +865,25 @@ mod tests {
             .map(|a| (a.name.as_str(), a.email.as_deref()))
             .collect();
         assert_eq!(emails, [("main", None), ("work", Some("w@example.com"))]);
+    }
+
+    /// A label rides on the account it was given to and nowhere else, and one
+    /// left behind for an account that is gone names nothing.
+    #[test]
+    fn list_carries_each_accounts_label() {
+        let (_home, layout) = layout("list_carries_each_accounts_label");
+        add(&layout, "work");
+        let labels: crate::labels::Labels = [("work", "Ops team"), ("gone", "Old")]
+            .into_iter()
+            .map(|(name, label)| (name.to_string(), label.to_string()))
+            .collect();
+        let listed = list(&layout, "main", &labels);
+        let named: Vec<_> = listed
+            .accounts
+            .iter()
+            .map(|a| (a.name.as_str(), a.label.as_deref()))
+            .collect();
+        assert_eq!(named, [("main", None), ("work", Some("Ops team"))]);
     }
 
     #[test]
